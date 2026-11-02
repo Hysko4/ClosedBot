@@ -1,0 +1,26 @@
+# Servicio de systemd para Cuadrilla.
+# Copia este archivo a /etc/systemd/system/cuadrilla.service y ajusta User y WorkingDirectory
+# si instalaste la app en otro lugar. Las claves van en /etc/cuadrilla.env (permisos 600).
+
+[Unit]
+Description=Cuadrilla, equipo personal de agentes de IA
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cuadrilla
+Group=cuadrilla
+WorkingDirectory=/home/cuadrilla/cuadrilla
+EnvironmentFile=/etc/cuadrilla.env
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning dist/src/server.js
+Restart=on-failure
+RestartSec=5
+UMask=0077
+# Endurecimiento básico: el servicio no puede ganar privilegios (sudo) ni escribir en /usr o /etc.
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

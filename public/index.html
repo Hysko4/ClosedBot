@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+    <title>Cuadrilla</title>
+    <meta name="description" content="Tu equipo personal de agentes de IA." />
+    <meta name="theme-color" content="#f5f3ef" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Cuadrilla" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <div id="boot" class="boot" aria-hidden="true">
+      <img src="/icons/icon.svg" alt="" width="56" height="56" />
+    </div>
+
+    <section id="login" class="login" hidden>
+      <form id="login-form" class="login-card" autocomplete="on">
+        <div class="brand brand-large">
+          <img src="/icons/icon.svg" alt="" width="44" height="44" />
+          <span>Cuadrilla</span>
+        </div>
+        <p class="muted">Tu equipo personal de agentes de IA.</p>
+        <label class="field">
+          <span>Contraseña</span>
+          <input id="login-password" name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <button type="submit" class="button primary block" id="login-submit">Entrar</button>
+        <p class="form-error" id="login-error" role="alert"></p>
+      </form>
+    </section>
+
+    <div id="app" class="layout" hidden>
+      <aside class="sidebar" aria-label="Agentes">
+        <header class="sidebar-header">
+          <div class="brand">
+            <img src="/icons/icon.svg" alt="" width="28" height="28" />
+            <span>Cuadrilla</span>
+          </div>
+          <button type="button" class="icon-button" id="new-agent" title="Nuevo agente" aria-label="Nuevo agente">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
+        </header>
+        <ul class="agent-list" id="agent-list"></ul>
+        <div class="sidebar-empty" id="sidebar-empty" hidden>
+          <p>Todavía no tienes agentes.</p>
+          <button type="button" class="button primary" id="first-agent">Crear el primero</button>
+        </div>
+        <footer class="sidebar-footer">
+          <button type="button" class="link-button" id="open-settings">Ajustes y proveedores</button>
+          <span class="connection" id="connection" data-state="connecting">Conectando…</span>
+        </footer>
+      </aside>
+
+      <main class="chat" id="chat">
+        <div class="chat-empty" id="chat-empty">
+          <img src="/icons/icon.svg" alt="" width="72" height="72" />
+          <h2>Elige un agente</h2>
+          <p class="muted">
+            Cada agente trabaja en su propia carpeta y puede pedir ayuda a sus compañeros. Los mensajes que le envíes mientras
+            trabaja quedan en cola y los atiende en orden.
+          </p>
+        </div>
+
+        <section class="conversation" id="conversation" hidden>
+          <header class="chat-header">
+            <button type="button" class="icon-button mobile-only" id="back" aria-label="Volver a la lista">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
+            </button>
+            <div class="avatar" id="chat-avatar" aria-hidden="true"></div>
+            <div class="chat-title">
+              <h1 id="chat-name"></h1>
+              <p id="chat-meta" class="muted"></p>
+            </div>
+            <div class="chat-actions">
+              <button type="button" class="button danger-soft" id="stop" hidden>Detener</button>
+              <button type="button" class="icon-button" id="agent-menu-button" aria-haspopup="menu" aria-expanded="false" aria-label="Opciones del agente">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" /></svg>
+              </button>
+              <div class="menu" id="agent-menu" role="menu" hidden>
+                <button type="button" role="menuitem" data-action="edit">Editar agente</button>
+                <button type="button" role="menuitem" data-action="pause">Pausar la cola</button>
+                <button type="button" role="menuitem" data-action="reset">Empezar de cero</button>
+                <button type="button" role="menuitem" data-action="delete" class="danger">Eliminar agente</button>
+              </div>
+            </div>
+          </header>
+
+          <div class="queue-bar" id="queue-bar" hidden>
+            <button type="button" class="queue-toggle" id="queue-toggle" aria-expanded="false">
+              <span id="queue-summary"></span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+            </button>
+            <ol class="queue-list" id="queue-list" hidden></ol>
+          </div>
+
+          <div class="messages" id="messages" role="log" aria-live="polite" aria-relevant="additions">
+            <button type="button" class="button ghost load-more" id="load-more" hidden>Cargar mensajes anteriores</button>
+            <div id="message-list"></div>
+          </div>
+
+          <form class="composer" id="composer">
+            <textarea id="composer-input" rows="1" placeholder="Escribe un mensaje…" aria-label="Mensaje" maxlength="100000"></textarea>
+            <button type="submit" class="send-button" id="send" aria-label="Enviar">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6" /></svg>
+            </button>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <dialog class="dialog" id="agent-dialog" aria-labelledby="agent-dialog-title">
+      <form id="agent-form" method="dialog" novalidate>
+        <header class="dialog-header">
+          <h2 id="agent-dialog-title">Nuevo agente</h2>
+        </header>
+        <div class="dialog-body">
+          <label class="field">
+            <span>Nombre</span>
+            <input name="name" maxlength="60" required placeholder="Ej.: Ana" />
+          </label>
+          <label class="field">
+            <span>Rol</span>
+            <input name="role" maxlength="200" placeholder="Ej.: Investigadora, Programador, Revisora" />
+          </label>
+          <label class="field">
+            <span>Instrucciones permanentes</span>
+            <textarea name="instructions" rows="4" maxlength="8000" placeholder="Cómo quieres que trabaje, qué debe priorizar, cuándo pedir ayuda…"></textarea>
+          </label>
+          <label class="field">
+            <span>Proveedor</span>
+            <select name="provider"></select>
+          </label>
+          <p class="hint" id="provider-hint"></p>
+          <div class="field-row">
+            <label class="field">
+              <span>Modelo</span>
+              <select name="model"></select>
+            </label>
+            <label class="field">
+              <span>Esfuerzo</span>
+              <select name="effort"></select>
+            </label>
+          </div>
+          <fieldset class="field access">
+            <legend>Acceso</legend>
+            <label class="choice">
+              <input type="radio" name="access" value="carpeta" checked />
+              <span><strong>Solo su carpeta</strong> (recomendado): escribe en su carpeta y en la compartida, con sandbox.</span>
+            </label>
+            <label class="choice">
+              <input type="radio" name="access" value="total" />
+              <span><strong>Acceso total</strong>: comandos y archivos de todo el servidor, sin pedir permiso.</span>
+            </label>
+            <p class="warning" id="access-warning" hidden>
+              Con acceso total el agente puede borrar, instalar o leer cualquier cosa del servidor, incluidas credenciales. Úsalo solo en una
+              máquina dedicada a Cuadrilla.
+            </p>
+          </fieldset>
+          <p class="form-error" id="agent-error" role="alert"></p>
+        </div>
+        <footer class="dialog-footer">
+          <button type="button" class="button ghost" id="agent-cancel">Cancelar</button>
+          <button type="submit" class="button primary" id="agent-save">Guardar</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog class="dialog" id="settings-dialog" aria-labelledby="settings-title">
+      <div>
+        <header class="dialog-header">
+          <h2 id="settings-title">Ajustes</h2>
+        </header>
+        <div class="dialog-body">
+          <h3 class="section-title">Proveedores</h3>
+          <ul class="provider-list" id="provider-list"></ul>
+          <button type="button" class="button ghost" id="refresh-providers">Volver a comprobar</button>
+          <h3 class="section-title">Carpetas en el servidor</h3>
+          <dl class="paths" id="paths"></dl>
+          <h3 class="section-title">Instalar en el teléfono</h3>
+          <p class="muted small">
+            Android (Chrome): menú ⋮ → «Instalar app». iPhone (Safari): botón Compartir → «Añadir a pantalla de inicio».
+          </p>
+          <p class="muted small" id="version"></p>
+        </div>
+        <footer class="dialog-footer">
+          <button type="button" class="button danger-soft" id="logout">Cerrar sesión</button>
+          <button type="button" class="button primary" id="settings-close">Listo</button>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog class="dialog dialog-small" id="confirm-dialog" aria-labelledby="confirm-title">
+      <form method="dialog">
+        <div class="dialog-body">
+          <h2 id="confirm-title"></h2>
+          <p id="confirm-text" class="muted"></p>
+        </div>
+        <footer class="dialog-footer">
+          <button type="submit" value="cancel" class="button ghost">Cancelar</button>
+          <button type="submit" value="ok" class="button danger" id="confirm-ok">Confirmar</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>
