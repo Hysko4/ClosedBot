@@ -3,10 +3,12 @@ import { EventEmitter } from "node:events";
 import {
   TEAM_NAMESPACE,
   TOOL_ASK_USER,
+  TOOL_CREATE_AGENT,
   TOOL_CREATE_ROUTINE,
   TOOL_LIST_AGENTS,
   TOOL_LIST_ROUTINES,
   TOOL_SEND_MESSAGE,
+  TOOL_UPDATE_AGENT,
 } from "../team.js";
 import type { AgentClient, ProviderId } from "./client.js";
 import {
@@ -36,7 +38,9 @@ export interface DemoClientOptions {
  *   - una línea `@Nombre: texto` envía `texto` al compañero Nombre;
  *   - `/equipo` lista a los compañeros; `/lento` transmite la respuesta despacio;
  *   - `/pregunta [¿Texto? | Opción A | Opción B]` hace una pregunta con opciones al usuario;
- *   - `/rutina HH:MM Nombre` o `/rutina cada N Nombre` crea una rutina; `/rutinas` las lista.
+ *   - `/rutina HH:MM Nombre` o `/rutina cada N Nombre` crea una rutina; `/rutinas` las lista;
+ *   - solo para el bot principal: `/crear Nombre | Rol | Proyecto` crea un agente y
+ *     `/ajustar Nombre | Rol nuevo` le cambia el rol.
  */
 export class DemoAgentClient extends EventEmitter<ClientEvents> implements AgentClient {
   readonly provider: ProviderId = "demo";
@@ -168,6 +172,30 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
           notes.push(`Creé la rutina «${name}».`);
         } catch (error) {
           notes.push(`No pude crear la rutina: ${errorMessage(error)}`);
+        }
+      }
+      for (const match of body.matchAll(/^\/crear\s+(.+)$/gm)) {
+        const [name = "", role = "", project = ""] = (match[1] ?? "").split("|").map((part) => part.trim());
+        const args = {
+          name,
+          role: role || "Agente de prueba",
+          instructions: `Agente de prueba creado desde la demo con el rol «${role || "Agente de prueba"}».`,
+          project: project || "Demo",
+        };
+        try {
+          await this.#callTool(threadId, state.turnId, TOOL_CREATE_AGENT, args);
+          notes.push(`Creé a ${name} en «${args.project}».`);
+        } catch (error) {
+          notes.push(`No pude crear a ${name}: ${errorMessage(error)}`);
+        }
+      }
+      for (const match of body.matchAll(/^\/ajustar\s+(.+)$/gm)) {
+        const [agent = "", role = ""] = (match[1] ?? "").split("|").map((part) => part.trim());
+        try {
+          await this.#callTool(threadId, state.turnId, TOOL_UPDATE_AGENT, { agent, role });
+          notes.push(`Le cambié el rol a ${agent}.`);
+        } catch (error) {
+          notes.push(`No pude ajustar a ${agent}: ${errorMessage(error)}`);
         }
       }
       if (/(^|\s)\/rutinas(\s|$)/.test(body)) {

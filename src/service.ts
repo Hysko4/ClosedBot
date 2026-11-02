@@ -22,19 +22,25 @@ import { type CliCommand, runCli } from "./providers/spawn.js";
 import { describeSchedule, nextRun, normalizeSchedule } from "./schedule.js";
 import {
   type AskUserArgs,
+  type CreateAgentArgs,
   parseAskUserArgs,
+  parseCreateAgentArgs,
   parseCreateRoutineArgs,
   parseRoutineIdArgs,
   parseSendMessageArgs,
+  parseUpdateAgentArgs,
   type QuestionOption,
-  TEAM_DYNAMIC_TOOLS,
   TEAM_NAMESPACE,
+  teamDynamicTools,
   TOOL_ASK_USER,
+  TOOL_CREATE_AGENT,
   TOOL_CREATE_ROUTINE,
   TOOL_DELETE_ROUTINE,
   TOOL_LIST_AGENTS,
   TOOL_LIST_ROUTINES,
   TOOL_SEND_MESSAGE,
+  TOOL_UPDATE_AGENT,
+  type UpdateAgentArgs,
 } from "./team.js";
 import { VERSION } from "./version.js";
 
@@ -50,6 +56,13 @@ const ROUTINE_CHECK_MS = 60_000;
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export const SETTINGS_META = "settings";
 export const DEFAULT_BOT_NAME = "ClosedBot";
+/** Bot principal: arma los equipos de agentes. Su id se guarda aparte de los ajustes. */
+export const MAIN_AGENT_META = "main_agent";
+export const MAIN_AGENT_NAME = "Claude Bot";
+export const MAIN_AGENT_ROLE = "Bot principal: arma y coordina tus equipos de agentes";
+/** Topes para los agentes que crea el bot principal: en total y en un mismo turno. */
+export const MAX_AGENTS = 60;
+export const MAX_AGENTS_PER_TURN = 8;
 const OPTION_LETTERS = "ABCD";
 
 export interface ProviderStatus {
@@ -81,6 +94,8 @@ export interface AgentView extends AgentRecord {
   queued: number;
   /** Hay mensajes del agente que el usuario aún no vio. */
   unread: boolean;
+  /** Es el bot principal (Claude Bot): arma los equipos y no se puede eliminar. */
+  main: boolean;
 }
 
 export interface RoutineView extends RoutineRecord {
@@ -119,6 +134,8 @@ export interface ServiceOptions {
   signInCommands?: (provider: SignInProvider) => SignInCommands | null;
   /** Tiempo máximo para terminar un inicio de sesión (10 minutos por defecto). */
   signInTimeoutMs?: number;
+  /** Crea el bot principal (Claude Bot) al arrancar si aún no existe. */
+  mainAgent?: boolean;
   log?: (level: "info" | "warn" | "error", message: string) => void;
 }
 
@@ -154,6 +171,8 @@ interface TurnState {
   lastAssistantText: string;
   /** Pregunta que el agente le hizo al usuario en este turno (para la vista previa). */
   askedQuestion: string | null;
+  /** Agentes que creó en este turno (solo el bot principal). */
+  createdAgents: number;
 }
 
 export class ServiceError extends Error {
@@ -195,6 +214,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   }));
   #stopping = false;
   #routineTimer: NodeJS.Timeout | null = null;
+  #mainAgentId: string | null = null;
   readonly #signIns: SignInFlows;
 
   constructor(options: ServiceOptions) {
@@ -211,6 +231,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   async start(): Promise<void> {
     mkdirSync(this.#options.workspacesDir, { recursive: true });
     mkdirSync(this.#options.sharedDir, { recursive: true });
+    this.#ensureMainAgent();
     for (const delivery of this.#store.reconcileUnfinished()) {
       this.#notice(delivery.agentId, "La app se reinició mientras este agente trabajaba; ese turno quedó interrumpido.");
     }
@@ -430,6 +451,9 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 
   async deleteAgent(id: string): Promise<void> {
     const agent = this.#requireAgent(id);
+    if (this.#isMain(agent)) {
+      throw new ServiceError(`${agent.name} es el bot principal y no se puede eliminar. Si quieres, empieza su conversación de cero.`, 409);
+    }
     if (this.#active.has(id)) throw new ServiceError("Detén el turno en curso antes de eliminar el agente.", 409);
     this.#store.cancelQueuedForAgent(id);
     await this.#closeThread(agent);
@@ -467,6 +491,43 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const updated = this.#store.updateAgent(id, { readAt: Math.max(Date.now(), agent.lastAt) });
     this.#emitAgents();
     return this.#view(updated);
+  }
+
+  /** Id del bot principal (Claude Bot), o null si esta instalación no lo tiene. */
+  mainAgentId(): string | null {
+    return this.#mainAgentId;
+  }
+
+  /** Busca el bot principal guardado; si falta, adopta un agente que ya se llame así o lo crea. */
+  #ensureMainAgent(): void {
+    const stored = this.#store.getMeta(MAIN_AGENT_META);
+    const existing = stored ? this.#store.getAgent(stored) : null;
+    this.#mainAgentId = existing?.id ?? null;
+    if (existing || !this.#options.mainAgent) return;
+    const adopted = this.#store.findAgentByName(MAIN_AGENT_NAME);
+    let agent = adopted;
+    if (!agent) {
+      const workspace = this.#uniqueWorkspace(MAIN_AGENT_NAME);
+      mkdirSync(workspace, { recursive: true });
+      agent = this.#store.createAgent({
+        name: MAIN_AGENT_NAME,
+        role: MAIN_AGENT_ROLE,
+        instructions: "",
+        provider: "claude",
+        model: null,
+        effort: null,
+        access: "carpeta",
+        workspace,
+        project: "",
+      });
+    }
+    this.#store.setMeta(MAIN_AGENT_META, agent.id);
+    this.#mainAgentId = agent.id;
+    this.#log("info", adopted ? `«${agent.name}» pasa a ser el bot principal.` : `Creé el bot principal «${agent.name}».`);
+  }
+
+  #isMain(agent: AgentRecord): boolean {
+    return agent.id === this.#mainAgentId;
   }
 
   // ---------- ajustes ----------
@@ -798,16 +859,19 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     await client.request("thread/close", { threadId: agent.threadId }).catch(() => undefined);
   }
 
-  #threadParams(agent: AgentRecord): Record<string, unknown> {
+  #threadParams(agent: AgentRecord, starting: boolean): Record<string, unknown> {
+    const main = this.#isMain(agent);
     const params: Record<string, unknown> = {
       cwd: agent.workspace,
       runtimeWorkspaceRoots: [agent.workspace, this.#options.sharedDir],
       approvalPolicy: "never",
       sandbox: this.#access(agent) === "total" ? "danger-full-access" : "workspace-write",
-      developerInstructions: buildInstructions({ ...agent, access: this.#access(agent) }, this.#options.sharedDir, this.getSettings().userName),
+      developerInstructions: buildInstructions({ ...agent, access: this.#access(agent) }, this.#options.sharedDir, this.getSettings().userName, { main }),
     };
     if (agent.model) params.model = agent.model;
     if (agent.effort && agent.provider !== "codex") params.effort = agent.effort;
+    // Codex fija las herramientas al crear el hilo; Claude y la demo las reciben también al reanudarlo.
+    if (starting || agent.provider !== "codex") params.dynamicTools = [teamDynamicTools(main)];
     return params;
   }
 
@@ -817,7 +881,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       const key = `${agent.provider}:${agent.threadId}`;
       if (this.#loadedThreads.has(key)) return agent.threadId;
       try {
-        await client.request("thread/resume", { threadId: agent.threadId, ...this.#threadParams(agent) });
+        await client.request("thread/resume", { threadId: agent.threadId, ...this.#threadParams(agent, false) });
         this.#loadedThreads.add(key);
         return agent.threadId;
       } catch (error) {
@@ -826,10 +890,9 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       }
     }
     const response = await client.request<ThreadResponse>("thread/start", {
-      ...this.#threadParams(agent),
+      ...this.#threadParams(agent, true),
       ephemeral: false,
       serviceName: "closedbot",
-      dynamicTools: [TEAM_DYNAMIC_TOOLS],
     });
     const threadId = response.thread.id;
     this.#store.updateAgent(agent.id, { threadId });
@@ -875,6 +938,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       assistantMessageIds: new Set(),
       lastAssistantText: "",
       askedQuestion: null,
+      createdAgents: 0,
     };
     this.#active.set(agent.id, state);
     this.#store.updateDelivery(delivery.id, { status: "starting", startedAt: Date.now() });
@@ -1154,15 +1218,28 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const senderId = this.#threadToAgent.get(params.threadId);
     if (!senderId) throw new Error("No se reconoce al agente que envía.");
     if (params.tool === TOOL_LIST_AGENTS) {
+      // El bot principal ve además el modelo y las instrucciones, para ajustar equipos sin duplicarlos.
+      const forMain = senderId === this.#mainAgentId;
       const agents = this.listAgents().map((agent) => ({
         id: agent.id,
         nombre: agent.name,
         rol: agent.role || "Asistente general",
+        proyecto: agent.project || null,
         proveedor: agent.provider,
         estado: agent.state === "working" ? "trabajando" : agent.state === "queued" ? "con cola" : agent.state === "paused" ? "en pausa" : "libre",
         eresTu: agent.id === senderId,
+        ...(agent.main ? { botPrincipal: true } : {}),
+        ...(forMain ? { modelo: agent.model ?? "predeterminado", instrucciones: clip(agent.instructions, 400) } : {}),
       }));
       return toolResult({ agentes: agents });
+    }
+    if (params.tool === TOOL_CREATE_AGENT || params.tool === TOOL_UPDATE_AGENT) {
+      if (senderId !== this.#mainAgentId) {
+        throw new Error("Solo el bot principal puede crear o cambiar agentes. Si hace falta, pídeselo al usuario.");
+      }
+      return params.tool === TOOL_CREATE_AGENT
+        ? this.#createAgentFromMain(senderId, parseCreateAgentArgs(params.arguments), params.turnId)
+        : this.#updateAgentFromMain(senderId, parseUpdateAgentArgs(params.arguments), params.turnId);
     }
     if (params.tool === TOOL_ASK_USER) return this.#askUser(senderId, parseAskUserArgs(params.arguments), params.turnId);
     if (params.tool === TOOL_CREATE_ROUTINE) {
@@ -1228,6 +1305,110 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       messageId: message.id,
       nota: "La tarjeta ya está en la conversación. Termina tu turno ahora: la respuesta del usuario te llegará como un mensaje nuevo.",
     });
+  }
+
+  /** create_agent del bot principal: crea el agente, lo deja marcado en ambas conversaciones y lo devuelve. */
+  #createAgentFromMain(mainId: string, args: CreateAgentArgs, turnId: string | null): DynamicToolResult {
+    const main = this.#requireAgent(mainId);
+    const state = this.#active.get(mainId);
+    if (state && state.createdAgents >= MAX_AGENTS_PER_TURN) {
+      throw new Error(`Ya creaste ${MAX_AGENTS_PER_TURN} agentes en este turno, el máximo por pedido. Muéstrale el equipo al usuario y sigue en otro turno si te lo pide.`);
+    }
+    if (this.#store.listAgents().length >= MAX_AGENTS) {
+      throw new Error(`Ya hay ${MAX_AGENTS} agentes, el máximo que puedes crear. Pídele al usuario que elimine los que no use.`);
+    }
+    const provider = args.provider ?? main.provider;
+    const status = this.#providers.find((item) => item.id === provider);
+    if (provider !== main.provider && status && !status.available) {
+      throw new Error(`${providerLabel(provider)} no está disponible en este equipo: crea el agente con ${providerLabel(main.provider)}.`);
+    }
+    let agent: AgentView;
+    try {
+      agent = this.createAgent({
+        name: args.name,
+        role: args.role,
+        instructions: args.instructions,
+        provider,
+        model: args.model,
+        project: args.project,
+      });
+    } catch (error) {
+      if (error instanceof ServiceError && error.status === 409) {
+        throw new Error(`${error.message} Elige otro nombre, o ajusta ese agente con update_agent.`);
+      }
+      throw error;
+    }
+    if (state) state.createdAgents += 1;
+    const activity = this.#store.insertMessage({
+      agentId: mainId,
+      role: "activity",
+      text: `Creó el agente «${agent.name}» · ${agent.project}`,
+      status: "completed",
+      turnId,
+      payload: { kind: "agent-created", agentId: agent.id, project: agent.project },
+    });
+    this.#emit({ type: "message", agentId: mainId, message: activity });
+    this.#notice(agent.id, `${main.name} creó este agente para el proyecto «${agent.project}».`);
+    // Queda como no leído hasta que el usuario lo abra: así ve qué agentes son nuevos.
+    this.#store.updateAgent(agent.id, { readAt: 0 });
+    this.#emitAgents();
+    return toolResult({
+      creado: true,
+      id: agent.id,
+      nombre: agent.name,
+      proyecto: agent.project,
+      proveedor: agent.provider,
+      modelo: agent.model ?? "predeterminado",
+    });
+  }
+
+  /** update_agent del bot principal: cambia solo lo indicado y lo deja marcado en ambas conversaciones. */
+  #updateAgentFromMain(mainId: string, args: UpdateAgentArgs, turnId: string | null): DynamicToolResult {
+    const main = this.#requireAgent(mainId);
+    const target = this.#resolveAgentRef(args.agent);
+    if (target.id === mainId) throw new Error("No puedes cambiarte a ti mismo: eso lo hace el usuario desde «Editar agente».");
+    const patch: Partial<AgentInput> = {};
+    const changes: string[] = [];
+    if (args.name !== undefined && args.name !== target.name) {
+      patch.name = args.name;
+      changes.push("nombre");
+    }
+    if (args.role !== undefined && args.role !== target.role) {
+      patch.role = args.role;
+      changes.push("rol");
+    }
+    if (args.instructions !== undefined && args.instructions !== target.instructions) {
+      patch.instructions = args.instructions;
+      changes.push("instrucciones");
+    }
+    if (args.project !== undefined && args.project !== target.project) {
+      patch.project = args.project;
+      changes.push("proyecto");
+    }
+    if (args.model !== undefined && args.model !== target.model) {
+      patch.model = args.model;
+      changes.push("modelo");
+    }
+    if (!changes.length) return toolResult({ actualizado: false, nota: "No había nada distinto que cambiar." });
+    let updated: AgentView;
+    try {
+      updated = this.updateAgent(target.id, patch);
+    } catch (error) {
+      throw new Error(errorText(error));
+    }
+    const list = changes.join(", ");
+    const activity = this.#store.insertMessage({
+      agentId: mainId,
+      role: "activity",
+      text: `Ajustó a «${updated.name}»: ${list}`,
+      status: "completed",
+      turnId,
+      payload: { kind: "agent-updated", agentId: updated.id, changes },
+    });
+    this.#emit({ type: "message", agentId: mainId, message: activity });
+    this.#notice(updated.id, `${main.name} ajustó este agente: ${list}.`);
+    this.#emitAgents();
+    return toolResult({ actualizado: true, id: updated.id, nombre: updated.name, proyecto: updated.project || null, cambios: changes });
   }
 
   #fireRoutine(routine: RoutineRecord, scheduledAt: number, manual: boolean): void {
@@ -1394,7 +1575,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   #view(agent: AgentRecord): AgentView {
     const queued = this.#store.countQueued(agent.id);
     const state: AgentState = this.#active.has(agent.id) ? "working" : agent.paused ? "paused" : queued > 0 ? "queued" : "idle";
-    return { ...agent, state, queued, unread: agent.lastAt > agent.readAt };
+    return { ...agent, state, queued, unread: agent.lastAt > agent.readAt, main: this.#isMain(agent) };
   }
 
   #uniqueWorkspace(name: string): string {
@@ -1489,6 +1670,11 @@ function readOptions(payload: Record<string, unknown>): QuestionOption[] {
     label: typeof option.label === "string" ? option.label : "",
     detail: typeof option.detail === "string" ? option.detail : "",
   }));
+}
+
+function clip(text: string, max: number): string {
+  const value = text.trim();
+  return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
 function toolResult(value: unknown): DynamicToolResult {

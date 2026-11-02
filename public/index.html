@@ -50,22 +50,24 @@
           </button>
         </div>
 
-        <div class="bot-card">
-          <div class="bot-avatar" id="bot-avatar" aria-hidden="true">
+        <button type="button" class="bot-card" id="bot-card" aria-current="false" title="Habla con Claude Bot: arma tus equipos de agentes">
+          <span class="bot-avatar" id="bot-avatar" aria-hidden="true">
             <span class="bot-badge" id="connection" data-state="connecting" title="Conectando…"></span>
-          </div>
-          <div class="bot-name" id="bot-name">ClosedBot</div>
-        </div>
+          </span>
+          <span class="bot-name"><span id="bot-name">Claude Bot</span><span class="bot-unread" id="bot-unread" title="Mensajes nuevos" hidden></span></span>
+          <span class="bot-status" id="bot-status">Arma tus equipos de agentes</span>
+        </button>
 
         <div class="search-box" id="search-box" hidden>
           <input id="search-input" type="search" placeholder="Buscar agente…" aria-label="Buscar agente" autocomplete="off" />
         </div>
 
-        <nav class="agent-groups" id="agent-groups" aria-label="Conversaciones"></nav>
         <div class="sidebar-empty" id="sidebar-empty" hidden>
-          <p>Todavía no tienes agentes.</p>
-          <button type="button" class="button primary" id="first-agent">Crear el primero</button>
+          <p>Todavía no tienes equipos. Cuéntale a <span class="main-name">Claude Bot</span> qué necesitas y él los arma por ti.</p>
+          <button type="button" class="button primary" id="first-team">Hablar con <span class="main-name">Claude Bot</span></button>
+          <button type="button" class="button ghost" id="first-agent">Crear un agente a mano</button>
         </div>
+        <nav class="agent-groups" id="agent-groups" aria-label="Conversaciones"></nav>
 
         <footer class="sidebar-footer">
           <button type="button" class="user-chip" id="open-profile" title="Tu nombre y ajustes">
@@ -81,11 +83,12 @@
       <main class="chat" id="chat">
         <div class="chat-empty" id="chat-empty">
           <div class="empty-mascot" id="empty-mascot" aria-hidden="true"></div>
-          <h2>Elige una conversación</h2>
+          <h2>¿Qué quieres lograr?</h2>
           <p class="muted">
-            Cada agente trabaja en su propia carpeta y puede pedir ayuda a sus compañeros. Si le escribes mientras trabaja, tu mensaje queda en
-            cola y lo atiende en orden.
+            Cuéntaselo a <span class="main-name">Claude Bot</span> y armará el equipo de agentes que lo hará. Cada agente trabaja en su propia
+            carpeta y puede pedir ayuda a sus compañeros.
           </p>
+          <button type="button" class="button primary" id="empty-talk">Hablar con <span class="main-name">Claude Bot</span></button>
           <div class="connect-callout" id="connect-callout" hidden>
             <p id="connect-text"></p>
             <button type="button" class="button primary" id="connect-claude">Iniciar sesión con Claude</button>
@@ -118,6 +121,15 @@
           <div class="messages" id="messages" role="log" aria-live="polite" aria-relevant="additions">
             <div class="thread">
               <button type="button" class="button ghost load-more" id="load-more" hidden>Cargar mensajes anteriores</button>
+              <div class="main-intro" id="main-intro" hidden>
+                <div class="intro-mascot" id="intro-mascot" aria-hidden="true"></div>
+                <h2 id="intro-title">Hola, soy Claude Bot</h2>
+                <p class="muted">
+                  Cuéntame qué quieres lograr y armo el equipo de agentes que lo hará: cada uno con su rol, sus instrucciones y su proyecto.
+                  Después le paso el primer encargo y te cuento cómo va.
+                </p>
+                <div class="intro-ideas" id="intro-ideas" aria-label="Ideas para empezar"></div>
+              </div>
               <div id="message-list"></div>
             </div>
           </div>
@@ -164,7 +176,7 @@
               <span>Nombre</span>
               <input name="name" maxlength="60" required placeholder="Ej.: Director de Programación" />
             </label>
-            <label class="field">
+            <label class="field" id="project-field">
               <span>Proyecto</span>
               <input name="project" maxlength="60" list="project-options" placeholder="Ej.: Creación de Juegos" autocomplete="off" />
             </label>
@@ -175,7 +187,7 @@
             <input name="role" maxlength="200" placeholder="Ej.: Investigadora, Programador, Revisora" />
           </label>
           <label class="field">
-            <span>Instrucciones permanentes</span>
+            <span id="instructions-label">Instrucciones permanentes</span>
             <textarea name="instructions" rows="4" maxlength="8000" placeholder="Cómo quieres que trabaje, qué debe priorizar, cuándo pedir ayuda…"></textarea>
           </label>
           <label class="field">
@@ -295,18 +307,12 @@
         </header>
         <div class="dialog-body">
           <form id="names-form" class="names-form" novalidate>
-            <div class="field-row">
-              <label class="field">
-                <span>Tu nombre</span>
-                <input name="userName" maxlength="40" placeholder="Ej.: Jonathan" autocomplete="given-name" />
-              </label>
-              <label class="field">
-                <span>Nombre del asistente</span>
-                <input name="botName" maxlength="40" placeholder="ClosedBot" autocomplete="off" />
-              </label>
-            </div>
+            <label class="field">
+              <span>Tu nombre</span>
+              <input name="userName" maxlength="40" placeholder="Ej.: Jonathan" autocomplete="given-name" />
+            </label>
             <div class="form-actions">
-              <button type="submit" class="button ghost" id="names-save">Guardar nombres</button>
+              <button type="submit" class="button ghost" id="names-save">Guardar nombre</button>
             </div>
           </form>
           <h3 class="section-title">Proveedores</h3>

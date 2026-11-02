@@ -22,7 +22,11 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES } from "../schedule.js";
 import {
+  AGENT_FIELD_HELP,
+  AGENT_LIMITS,
+  AGENT_PROVIDERS,
   ASK_USER_DESCRIPTION,
+  CREATE_AGENT_DESCRIPTION,
   CREATE_ROUTINE_DESCRIPTION,
   DELETE_ROUTINE_DESCRIPTION,
   LIST_AGENTS_DESCRIPTION,
@@ -31,12 +35,16 @@ import {
   ROUTINE_LIMITS,
   SEND_MESSAGE_DESCRIPTION,
   TEAM_NAMESPACE,
+  TEAM_TOOLS,
   TOOL_ASK_USER,
+  TOOL_CREATE_AGENT,
   TOOL_CREATE_ROUTINE,
   TOOL_DELETE_ROUTINE,
   TOOL_LIST_AGENTS,
   TOOL_LIST_ROUTINES,
   TOOL_SEND_MESSAGE,
+  TOOL_UPDATE_AGENT,
+  UPDATE_AGENT_DESCRIPTION,
 } from "../team.js";
 import { VERSION } from "../version.js";
 import type { AccessLevel, AgentClient, ProviderId } from "./client.js";
@@ -63,6 +71,8 @@ interface ThreadConfig {
   developerInstructions: string;
   additionalDirectories: string[];
   access: AccessLevel;
+  /** Herramientas de ClosedBot que ve el agente (el bot principal tiene además las de equipos). Por defecto, las de todos. */
+  teamTools?: string[];
 }
 
 interface ActiveTurn {
@@ -247,7 +257,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
     // conectores de esa cuenta (servidores, bancos, brókeres…) y en acceso total podría usarlos sin preguntar.
     env.ENABLE_CLAUDEAI_MCP_SERVERS = "false";
 
-    const mcpServers: NonNullable<Options["mcpServers"]> = { [TEAM_NAMESPACE]: this.#createTeamServer(threadId) };
+    const mcpServers: NonNullable<Options["mcpServers"]> = { [TEAM_NAMESPACE]: this.#createTeamServer(threadId, config.teamTools ?? [...TEAM_TOOLS]) };
     if (this.#options.playwright) {
       mcpServers.playwright = {
         type: "stdio",
@@ -515,61 +525,85 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
     });
   }
 
-  #createTeamServer(threadId: string) {
+  #createTeamServer(threadId: string, names: string[]) {
     const call = (name: string, args: unknown) => this.#callDynamicTool(threadId, name, args);
-    return createSdkMcpServer({
-      name: TEAM_NAMESPACE,
-      version: VERSION,
-      tools: [
-        tool(TOOL_LIST_AGENTS, LIST_AGENTS_DESCRIPTION, {}, (args) => call(TOOL_LIST_AGENTS, args)),
-        tool(
-          TOOL_SEND_MESSAGE,
-          SEND_MESSAGE_DESCRIPTION,
-          {
-            to: z.array(z.string()).min(1).max(16),
-            text: z.string().min(1).max(50_000),
-            replyToMessageId: z.string().nullable().optional(),
-          },
-          (args) => call(TOOL_SEND_MESSAGE, args),
-        ),
-        tool(
-          TOOL_ASK_USER,
-          ASK_USER_DESCRIPTION,
-          {
-            question: z.string().min(1).max(QUESTION_LIMITS.question),
-            options: z
-              .array(
-                z.object({
-                  label: z.string().min(1).max(QUESTION_LIMITS.label),
-                  detail: z.string().max(QUESTION_LIMITS.detail).optional(),
-                }),
-              )
-              .min(QUESTION_LIMITS.minOptions)
-              .max(QUESTION_LIMITS.maxOptions),
-            recommended: z.number().int().min(0).max(QUESTION_LIMITS.maxOptions - 1).nullable().optional(),
-          },
-          (args) => call(TOOL_ASK_USER, args),
-        ),
-        tool(
-          TOOL_CREATE_ROUTINE,
-          CREATE_ROUTINE_DESCRIPTION,
-          {
-            name: z.string().min(1).max(ROUTINE_LIMITS.name),
-            prompt: z.string().min(1).max(ROUTINE_LIMITS.prompt),
-            times: z
-              .array(z.string().regex(/^\d{1,2}:\d{2}$/))
-              .min(1)
-              .max(ROUTINE_LIMITS.times)
-              .optional(),
-            days: z.array(z.number().int().min(0).max(6)).max(7).optional(),
-            everyMinutes: z.number().int().min(MIN_INTERVAL_MINUTES).max(MAX_INTERVAL_MINUTES).optional(),
-          },
-          (args) => call(TOOL_CREATE_ROUTINE, args),
-        ),
-        tool(TOOL_LIST_ROUTINES, LIST_ROUTINES_DESCRIPTION, {}, (args) => call(TOOL_LIST_ROUTINES, args)),
-        tool(TOOL_DELETE_ROUTINE, DELETE_ROUTINE_DESCRIPTION, { id: z.string().min(1) }, (args) => call(TOOL_DELETE_ROUTINE, args)),
-      ],
-    });
+    const tools = [
+      tool(TOOL_LIST_AGENTS, LIST_AGENTS_DESCRIPTION, {}, (args) => call(TOOL_LIST_AGENTS, args)),
+      tool(
+        TOOL_SEND_MESSAGE,
+        SEND_MESSAGE_DESCRIPTION,
+        {
+          to: z.array(z.string()).min(1).max(16),
+          text: z.string().min(1).max(50_000),
+          replyToMessageId: z.string().nullable().optional(),
+        },
+        (args) => call(TOOL_SEND_MESSAGE, args),
+      ),
+      tool(
+        TOOL_ASK_USER,
+        ASK_USER_DESCRIPTION,
+        {
+          question: z.string().min(1).max(QUESTION_LIMITS.question),
+          options: z
+            .array(
+              z.object({
+                label: z.string().min(1).max(QUESTION_LIMITS.label),
+                detail: z.string().max(QUESTION_LIMITS.detail).optional(),
+              }),
+            )
+            .min(QUESTION_LIMITS.minOptions)
+            .max(QUESTION_LIMITS.maxOptions),
+          recommended: z.number().int().min(0).max(QUESTION_LIMITS.maxOptions - 1).nullable().optional(),
+        },
+        (args) => call(TOOL_ASK_USER, args),
+      ),
+      tool(
+        TOOL_CREATE_ROUTINE,
+        CREATE_ROUTINE_DESCRIPTION,
+        {
+          name: z.string().min(1).max(ROUTINE_LIMITS.name),
+          prompt: z.string().min(1).max(ROUTINE_LIMITS.prompt),
+          times: z
+            .array(z.string().regex(/^\d{1,2}:\d{2}$/))
+            .min(1)
+            .max(ROUTINE_LIMITS.times)
+            .optional(),
+          days: z.array(z.number().int().min(0).max(6)).max(7).optional(),
+          everyMinutes: z.number().int().min(MIN_INTERVAL_MINUTES).max(MAX_INTERVAL_MINUTES).optional(),
+        },
+        (args) => call(TOOL_CREATE_ROUTINE, args),
+      ),
+      tool(TOOL_LIST_ROUTINES, LIST_ROUTINES_DESCRIPTION, {}, (args) => call(TOOL_LIST_ROUTINES, args)),
+      tool(TOOL_DELETE_ROUTINE, DELETE_ROUTINE_DESCRIPTION, { id: z.string().min(1) }, (args) => call(TOOL_DELETE_ROUTINE, args)),
+      tool(
+        TOOL_CREATE_AGENT,
+        CREATE_AGENT_DESCRIPTION,
+        {
+          name: z.string().min(1).max(AGENT_LIMITS.name).describe(AGENT_FIELD_HELP.name),
+          role: z.string().min(1).max(AGENT_LIMITS.role).describe(AGENT_FIELD_HELP.role),
+          instructions: z.string().min(1).max(AGENT_LIMITS.instructions).describe(AGENT_FIELD_HELP.instructions),
+          project: z.string().min(1).max(AGENT_LIMITS.project).describe(AGENT_FIELD_HELP.project),
+          provider: z.enum(AGENT_PROVIDERS).optional().describe(AGENT_FIELD_HELP.provider),
+          model: z.string().max(AGENT_LIMITS.model).optional().describe(AGENT_FIELD_HELP.model),
+        },
+        (args) => call(TOOL_CREATE_AGENT, args),
+      ),
+      tool(
+        TOOL_UPDATE_AGENT,
+        UPDATE_AGENT_DESCRIPTION,
+        {
+          agent: z.string().min(1).describe("Id o nombre actual del agente."),
+          name: z.string().min(1).max(AGENT_LIMITS.name).optional().describe("Nombre nuevo."),
+          role: z.string().min(1).max(AGENT_LIMITS.role).optional().describe(AGENT_FIELD_HELP.role),
+          instructions: z.string().min(1).max(AGENT_LIMITS.instructions).optional().describe(AGENT_FIELD_HELP.instructions),
+          project: z.string().max(AGENT_LIMITS.project).optional().describe("Proyecto nuevo; vacío lo saca de su grupo."),
+          model: z.string().max(AGENT_LIMITS.model).optional().describe("Modelo nuevo; vacío vuelve al modelo por defecto."),
+        },
+        (args) => call(TOOL_UPDATE_AGENT, args),
+      ),
+    ];
+    const allowed = new Set(names);
+    return createSdkMcpServer({ name: TEAM_NAMESPACE, version: VERSION, tools: tools.filter((entry) => allowed.has(entry.name)) });
   }
 
   async #callDynamicTool(threadId: string, name: string, args: unknown): Promise<CallToolResult> {
@@ -702,7 +736,19 @@ function readThreadConfig(params: unknown): ThreadConfig {
     developerInstructions: getString(params, "developerInstructions") ?? "",
     additionalDirectories: [...new Set([cwd, ...roots])],
     access: sandbox === "danger-full-access" ? "total" : "carpeta",
+    teamTools: readTeamTools(params),
   };
+}
+
+/** Nombres de las herramientas de ClosedBot que pide el orquestador (como `dynamicTools` del app-server). */
+function readTeamTools(params: unknown): string[] {
+  if (!isRecord(params) || !Array.isArray(params.dynamicTools)) return [...TEAM_TOOLS];
+  const names = new Set<string>();
+  for (const group of params.dynamicTools) {
+    if (!isRecord(group) || group.name !== TEAM_NAMESPACE || !Array.isArray(group.tools)) continue;
+    for (const entry of group.tools) if (isRecord(entry) && typeof entry.name === "string") names.add(entry.name);
+  }
+  return [...names];
 }
 
 function sameRuntimeConfig(a: ThreadConfig, b: ThreadConfig): boolean {
@@ -711,8 +757,13 @@ function sameRuntimeConfig(a: ThreadConfig, b: ThreadConfig): boolean {
     a.access === b.access &&
     a.effort === b.effort &&
     a.developerInstructions === b.developerInstructions &&
-    a.additionalDirectories.join("\n") === b.additionalDirectories.join("\n")
+    a.additionalDirectories.join("\n") === b.additionalDirectories.join("\n") &&
+    teamToolsKey(a) === teamToolsKey(b)
   );
+}
+
+function teamToolsKey(config: ThreadConfig): string {
+  return [...(config.teamTools ?? TEAM_TOOLS)].sort().join("\n");
 }
 
 function requiredString(value: unknown, key: string): string {

@@ -6,6 +6,7 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
 
 ## Qué hace
 
+- **Claude Bot, el bot principal**: va fijo arriba de la barra lateral. Le cuentas qué quieres lograr y arma el equipo de agentes que lo hará: crea cada agente con su nombre, rol e instrucciones, los agrupa en un proyecto, le pasa el primer encargo al líder y te cuenta cómo va. También ajusta equipos que ya existen (rol, instrucciones, proyecto o modelo). No elimina agentes ni cambia sus permisos, y no se puede eliminar.
 - **Varios agentes**, cada uno con su proveedor (Claude, Codex o Demo), modelo, nivel de esfuerzo y nivel de acceso.
 - **Cola por agente**: si le escribes mientras trabaja, el mensaje espera su turno. Puedes quitar mensajes de la cola, pausarla o detener el turno en curso.
 - **Trabajo en equipo**: los agentes se escriben entre sí con las herramientas `list_agents` y `send_message`. Si un compañero termina sin contestar, su resultado vuelve solo a quien se lo pidió. Hay un límite de reenvíos seguidos (6 por defecto) para cortar bucles.
@@ -148,6 +149,7 @@ Si el navegador no se abre (o usas la app desde otro equipo), Ajustes muestra un
 
 ## Uso
 
+- **Armar un equipo**: toca a Claude Bot (arriba en la barra lateral) y cuéntale qué necesitas, por ejemplo: «Arma un equipo para crear un videojuego de plataformas». Cada agente que crea aparece en la lista, dentro de su proyecto y con un punto azul. En su chat verás «Creó a …»; al tocar el nombre se abre la conversación de ese agente. En «Editar a Claude Bot» puedes dejarle tus preferencias para armar equipos (por ejemplo, «máximo 3 agentes» o «usa Sonnet para tareas simples»).
 - **Crear un agente**: botón **+**. Elige el proveedor, el modelo (o «Predeterminado»), el esfuerzo y el acceso.
 - **Escribir**: en el computador, Enter envía y Mayús+Enter hace un salto de línea. En el teléfono se envía con el botón.
 - **Cola**: si el agente está ocupado, verás «N mensajes esperando turno». Desde ahí puedes quitar mensajes. En el menú ⋯ puedes pausar la cola, empezar de cero, editar o eliminar el agente. «Detener» corta el turno en curso.
@@ -158,7 +160,7 @@ Si el navegador no se abre (o usas la app desde otro equipo), Ajustes muestra un
 - **Proyectos**: al crear o editar un agente, escribe un proyecto para agruparlo en la barra lateral.
 - **Voz**: el micrófono dicta en el cuadro de texto. Con el cuadro vacío, el botón morado graba y envía al terminar. El dictado usa el reconocimiento de voz del navegador, que en Edge y Chrome procesa el audio en los servidores de Microsoft o Google.
 - **Adjuntos**: clip, pegar o arrastrar. Hasta 25 MB por archivo; se guardan en `adjuntos/` dentro de la carpeta del agente.
-- **Probar sin IA**: con el proveedor Demo, una línea `@Nombre: texto` envía `texto` a ese compañero, `/equipo` lista a los compañeros, `/lento` responde despacio (para probar «Detener»), `/pregunta ¿Texto? | A | B` muestra una tarjeta de opciones y `/rutina 09:00 Nombre` crea una rutina.
+- **Probar sin IA**: con el proveedor Demo, una línea `@Nombre: texto` envía `texto` a ese compañero, `/equipo` lista a los compañeros, `/lento` responde despacio (para probar «Detener»), `/pregunta ¿Texto? | A | B` muestra una tarjeta de opciones y `/rutina 09:00 Nombre` crea una rutina. Si Claude Bot usa la demo, `/crear Nombre | Rol | Proyecto` crea un agente y `/ajustar Nombre | Rol nuevo` le cambia el rol.
 
 ## Configuración
 
@@ -210,7 +212,7 @@ npm ci
 npm test        # compila y corre las pruebas
 ```
 
-Las pruebas usan el proveedor Demo y simulaciones del SDK de Claude y del `codex app-server`, así que no gastan créditos. Cubren la cola, los mensajes entre agentes, el límite de reenvíos, la interrupción, el reinicio, el login, la protección CSRF, los eventos en vivo, las preguntas con opciones, las rutinas y sus horarios, los adjuntos, el control del lanzador de escritorio, el inicio de sesión con la cuenta (con un Claude Code falso) y la mudanza de `~/.cuadrilla` a `~/.closedbot`.
+Las pruebas usan el proveedor Demo y simulaciones del SDK de Claude y del `codex app-server`, así que no gastan créditos. Cubren a Claude Bot (crear, proteger y sus herramientas para armar equipos), la cola, los mensajes entre agentes, el límite de reenvíos, la interrupción, el reinicio, el login, la protección CSRF, los eventos en vivo, las preguntas con opciones, las rutinas y sus horarios, los adjuntos, el control del lanzador de escritorio, el inicio de sesión con la cuenta (con un Claude Code falso) y la mudanza de `~/.cuadrilla` a `~/.closedbot`.
 
 ```
 src/
@@ -220,7 +222,7 @@ src/
   service.ts           orquestador: colas, hilos, mensajes entre agentes
   db.ts                SQLite (node:sqlite)
   instructions.ts      instrucciones de sistema de cada agente
-  team.ts              herramientas del equipo: mensajes, preguntas y rutinas
+  team.ts              herramientas del equipo: mensajes, preguntas, rutinas y las de Claude Bot
   schedule.ts          horarios de las rutinas
   version.ts           versión de la app
   providers/           Claude (Agent SDK), Codex (app-server), Demo, detección
@@ -234,8 +236,9 @@ test/                  pruebas (node:test)
 
 ## Estado y límites conocidos
 
-- Versión 0.3.1. Se probó con el proveedor Demo y con simulaciones de Claude y Codex. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
+- Versión 0.4.0. Se probó con el proveedor Demo y con simulaciones de Claude y Codex. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
 - Un solo usuario y sin notificaciones push por ahora.
+- Claude Bot crea hasta 8 agentes por pedido y deja de crear cuando ya hay 60 agentes en total.
 - Las preguntas con opciones terminan el turno del agente: tu respuesta le llega como un mensaje nuevo.
 - Las rutinas solo corren con ClosedBot abierta (en Windows, basta con el icono de la bandeja).
 

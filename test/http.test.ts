@@ -11,8 +11,8 @@ import { createHarness, waitFor } from "./helpers.js";
 const publicDir = fileURLToPath(new URL("../../public", import.meta.url));
 const PASSWORD = "contraseña-de-prueba";
 
-async function startServer(extra: Partial<AppOptions> = {}) {
-  const h = await createHarness();
+async function startServer(extra: Partial<AppOptions> = {}, harness: Parameters<typeof createHarness>[0] = {}) {
+  const h = await createHarness(harness);
   h.store.setMeta(PASSWORD_META, await hashPassword(PASSWORD));
   const auth = new Auth({ store: h.store, sessionDays: 1 });
   const app = createApp({
@@ -274,6 +274,27 @@ test("HTTP: crear agente, conversar y recibir eventos en vivo", async () => {
 });
 
 const CONTROL_TOKEN = "token-de-control-de-prueba-con-32-caracteres-o-mas";
+
+test("HTTP: Claude Bot llega marcado como principal y no se puede eliminar", async () => {
+  const s = await startServer({}, { mainAgent: true });
+  try {
+    await s.login();
+    const state = await s.call("/api/state");
+    const agents = state.json?.agents as Array<{ id: string; name: string; main: boolean }>;
+    assert.deepEqual(
+      agents.map((agent) => [agent.name, agent.main]),
+      [["Claude Bot", true]],
+    );
+    const main = agents[0] as { id: string };
+    const removed = await s.call(`/api/agents/${main.id}`, { method: "DELETE" });
+    assert.equal(removed.status, 409);
+    assert.match(String(removed.json?.error), /bot principal/);
+    const renamed = await s.call(`/api/agents/${main.id}`, { method: "PATCH", body: { name: "Mi Bot" } });
+    assert.equal(renamed.json?.agent.main, true);
+  } finally {
+    await s.close();
+  }
+});
 
 test("HTTP: sin token de control no existen las rutas del lanzador", async () => {
   const s = await startServer();

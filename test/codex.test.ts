@@ -17,7 +17,7 @@ function readLog(path: string): Array<Record<string, unknown>> {
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-async function codexHarness() {
+async function codexHarness(mainAgent = false) {
   chmodSync(fixture, 0o755);
   const temp = tempDir("closedbot-codex-");
   const log = join(temp.path, "requests.jsonl");
@@ -32,6 +32,7 @@ async function codexHarness() {
       provider === "codex"
         ? new CodexAppServerClient({ executable, env: { ...process.env, FAKE_LOG: log } })
         : new DemoAgentClient({ wordDelayMs: 0 }),
+    mainAgent,
   });
   return {
     h,
@@ -62,7 +63,10 @@ test("Codex: hilo, turno, herramientas del equipo y aprobaciones", async () => {
     const start = requests.find((item) => item.method === "thread/start") as { params: Record<string, unknown> };
     assert.equal(start.params.sandbox, "workspace-write");
     assert.equal(start.params.approvalPolicy, "never");
-    assert.equal((start.params.dynamicTools as Array<{ name: string }>)[0]?.name, "closedbot");
+    const tools = (start.params.dynamicTools as Array<{ name: string; tools: Array<{ name: string }> }>)[0];
+    assert.equal(tools?.name, "closedbot");
+    assert.ok(tools?.tools.some((entry) => entry.name === "send_message"));
+    assert.ok(!tools?.tools.some((entry) => entry.name === "create_agent"), "crear agentes es solo del bot principal");
     assert.equal(start.params.effort, undefined, "Codex recibe el esfuerzo por turno, no al crear el hilo");
     const turn = requests.find((item) => item.method === "turn/start") as { params: Record<string, unknown> };
     assert.deepEqual((turn.params.input as Array<Record<string, unknown>>)[0]?.text_elements, []);
@@ -80,6 +84,22 @@ test("Codex: hilo, turno, herramientas del equipo y aprobaciones", async () => {
   }
 });
 
+test("Codex: si Claude Bot usa Codex, su hilo nace con las herramientas para armar equipos", async () => {
+  const { h, log, close } = await codexHarness(true);
+  try {
+    const mainId = h.service.mainAgentId() as string;
+    h.service.updateAgent(mainId, { provider: "codex" });
+    const { message } = h.service.sendUserMessage(mainId, "hola");
+    await waitFor(() => h.store.getMessage(message.id)?.status === "completed", 8_000, "turno de Codex");
+    const start = readLog(log).find((item) => item.method === "thread/start") as { params: Record<string, unknown> };
+    const tools = (start.params.dynamicTools as Array<{ tools: Array<{ name: string }> }>)[0]?.tools.map((entry) => entry.name) ?? [];
+    assert.ok(tools.includes("create_agent") && tools.includes("update_agent"));
+    assert.match(String(start.params.developerInstructions), /Eres el bot principal de ClosedBot/);
+  } finally {
+    await close();
+  }
+});
+
 test("Codex: si el proceso muere, el turno falla y el siguiente mensaje reanuda el hilo", async () => {
   const { h, log, close } = await codexHarness();
   try {
@@ -91,8 +111,9 @@ test("Codex: si el proceso muere, el turno falla y el siguiente mensaje reanuda 
     assert.ok(h.service.listMessages(codi.id).some((item) => item.role === "notice" && /se detuvo/.test(item.text)));
     const again = h.service.sendUserMessage(codi.id, "sigo aquí");
     await waitFor(() => h.store.getMessage(again.message.id)?.status === "completed", 8_000, "turno tras reinicio");
-    const resumed = readLog(log).filter((item) => item.method === "thread/resume") as Array<{ params: { threadId: string } }>;
+    const resumed = readLog(log).filter((item) => item.method === "thread/resume") as Array<{ params: { threadId: string; dynamicTools?: unknown } }>;
     assert.equal(resumed.at(-1)?.params.threadId, "thr-1");
+    assert.equal(resumed.at(-1)?.params.dynamicTools, undefined, "Codex fija las herramientas al crear el hilo");
   } finally {
     await close();
   }

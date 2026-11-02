@@ -44,6 +44,8 @@ export async function createHarness(options: {
   detectProviders?: ServiceOptions["detectProviders"];
   signInCommands?: ServiceOptions["signInCommands"];
   signInTimeoutMs?: number;
+  /** Crea el bot principal (Claude Bot) como en la app; por defecto no, para que las cuentas de agentes sean simples. */
+  mainAgent?: boolean;
 } = {}): Promise<Harness> {
   const temp = options.dir ? { path: options.dir, cleanup: () => undefined } : tempDir();
   const store = new Store(join(temp.path, "closedbot.db"));
@@ -57,6 +59,7 @@ export async function createHarness(options: {
     detectProviders: options.detectProviders ?? (async () => TEST_PROVIDERS),
     ...(options.signInCommands ? { signInCommands: options.signInCommands } : {}),
     ...(options.signInTimeoutMs ? { signInTimeoutMs: options.signInTimeoutMs } : {}),
+    ...(options.mainAgent ? { mainAgent: true } : {}),
   });
   service.on("event", (event) => events.push(event));
   await service.start();

@@ -457,8 +457,9 @@ const AVATAR_SEQUENCE = [
   [6, "#4cbb73"],
 ];
 
-/** Avatar estable de un agente: sale del número que le dio el servidor al crearlo (o de su id). */
+/** Avatar estable de un agente: sale del número que le dio el servidor al crearlo (o de su id). Claude Bot usa la mascota. */
 function blobAvatar(agent) {
+  if (agent?.main) return drawBlob(MASCOT, "#f2f2f2");
   const index = Number.isInteger(agent.avatar) ? agent.avatar : hashString(agent.id ?? String(agent));
   const [shape, color] =
     AVATAR_SEQUENCE[index] ?? [index % BLOB_SHAPES.length, BLOB_COLORS[Math.floor(index / BLOB_SHAPES.length) % BLOB_COLORS.length]];
@@ -468,6 +469,7 @@ function blobAvatar(agent) {
 function renderMascots() {
   $("#login-mascot").replaceChildren(drawBlob(MASCOT, "#f2f2f2"));
   $("#empty-mascot").replaceChildren(drawBlob(MASCOT, "#f2f2f2"));
+  $("#intro-mascot").replaceChildren(drawBlob(MASCOT, "#f2f2f2"));
   $("#bot-avatar").prepend(drawBlob(MASCOT, "#f2f2f2"));
 }
 
@@ -481,6 +483,8 @@ const ICONS = {
   spark: ["M12 4.5l1.7 5.8 5.8 1.7-5.8 1.7-1.7 5.8-1.7-5.8-5.8-1.7 5.8-1.7z"],
   clip: ["M8.5 12.5l6-6a3 3 0 0 1 4.2 4.2l-7.4 7.4a5 5 0 0 1-7-7L11 4.4"],
   close: ["M7 7l10 10M17 7L7 17"],
+  team: ["M9.5 4.8a3.2 3.2 0 1 0 0 6.4a3.2 3.2 0 1 0 0-6.4", "M3.8 19c.6-3.2 3-5 5.7-5s5.1 1.8 5.7 5", "M18.5 8v6M15.5 11h6"],
+  pencil: ["M5 19l1-4.2 9.6-9.6a2 2 0 0 1 2.8 0l.4.4a2 2 0 0 1 0 2.8L9.2 18z", "M13.8 7l3.2 3.2"],
 };
 
 function icon(name) {
@@ -492,16 +496,55 @@ function icon(name) {
 // ---------- identidad y barra lateral ----------
 
 function renderIdentity() {
-  const { botName, userName } = state.settings;
-  $("#bot-name").textContent = botName || "ClosedBot";
-  const name = userName?.trim() || "Tú";
+  const name = state.settings.userName?.trim() || "Tú";
   $("#user-name").textContent = name;
   $("#user-avatar").textContent = name.charAt(0).toUpperCase();
+  renderBotCard();
   updateTitle();
 }
 
 function findAgent(id) {
   return state.agents.find((agent) => agent.id === id) ?? null;
+}
+
+/** El bot principal (Claude Bot): arma los equipos y va fijo arriba de la lista. */
+function mainAgent() {
+  return state.agents.find((agent) => agent.main) ?? null;
+}
+
+function openMainAgent() {
+  const main = mainAgent();
+  if (main) void navigate(main.id);
+}
+
+/** Tarjeta de arriba de la barra lateral: abre la conversación con Claude Bot y muestra si trabaja o tiene novedades. */
+function renderBotCard() {
+  const main = mainAgent();
+  const card = $("#bot-card");
+  const name = main?.name ?? state.settings.botName ?? "ClosedBot";
+  $("#bot-name").textContent = name;
+  for (const node of document.querySelectorAll(".main-name")) node.textContent = name;
+  card.disabled = !main;
+  card.setAttribute("aria-current", String(Boolean(main) && main.id === state.currentId));
+  card.title = main ? `Habla con ${name}: arma tus equipos de agentes` : name;
+  const unread = Boolean(main) && isUnread(main);
+  $("#bot-unread").hidden = !unread;
+  const status = $("#bot-status");
+  status.hidden = !main;
+  if (!main) return;
+  status.dataset.tone = "";
+  if (main.state === "working") {
+    status.textContent = "Trabajando…";
+    status.dataset.tone = "working";
+  } else if (hasPendingDecision(main.id) || main.preview?.startsWith("Pregunta:")) {
+    status.textContent = "Te hizo una pregunta";
+    status.dataset.tone = "question";
+  } else if (main.state === "paused") {
+    status.textContent = "Cola en pausa";
+    status.dataset.tone = "paused";
+  } else {
+    status.textContent = "Arma tus equipos de agentes";
+  }
 }
 
 function agentName(id) {
@@ -523,9 +566,15 @@ function fold(text) {
 function renderSidebar() {
   const container = $("#agent-groups");
   container.replaceChildren();
-  $("#sidebar-empty").hidden = state.agents.length > 0;
+  renderBotCard();
+  // Claude Bot va en la tarjeta de arriba; la lista muestra los equipos.
+  const team = state.agents.filter((agent) => !agent.main);
+  const empty = team.length === 0;
+  $("#sidebar-empty").hidden = !empty;
+  $("#first-team").hidden = !mainAgent();
+  $("#first-agent").className = mainAgent() ? "button ghost" : "button primary";
   const query = fold(state.search.trim());
-  const visible = state.agents.filter((agent) => !query || fold(`${agent.name} ${agent.role} ${agent.project}`).includes(query));
+  const visible = team.filter((agent) => !query || fold(`${agent.name} ${agent.role} ${agent.project}`).includes(query));
   const groups = new Map();
   for (const agent of visible) {
     const key = agent.project || "";
@@ -544,11 +593,11 @@ function renderSidebar() {
     section.append(title, list);
     container.append(section);
   }
-  if (query && !visible.length) {
-    const empty = document.createElement("p");
-    empty.className = "sidebar-empty";
-    empty.textContent = "Ningún agente coincide con la búsqueda.";
-    container.append(empty);
+  if (query && !visible.length && !empty) {
+    const none = document.createElement("p");
+    none.className = "sidebar-empty";
+    none.textContent = "Ningún agente coincide con la búsqueda.";
+    container.append(none);
   }
   updateTitle();
 }
@@ -647,6 +696,9 @@ function renderHeader() {
   $("#chat-meta").textContent = parts.filter(Boolean).join(" · ");
   const pause = document.querySelector('#agent-menu [data-action="pause"]');
   pause.textContent = agent.paused ? "Reanudar la cola" : "Pausar la cola";
+  // Claude Bot no se elimina: se puede empezar de cero.
+  document.querySelector('#agent-menu [data-action="delete"]').hidden = Boolean(agent.main);
+  document.querySelector('#agent-menu [data-action="edit"]').textContent = agent.main ? `Editar a ${agent.name}` : "Editar agente";
   updatePlaceholder();
 }
 
@@ -657,7 +709,46 @@ function hasPendingDecision(agentId) {
 function updatePlaceholder() {
   const agent = findAgent(state.currentId);
   if (!agent) return;
-  $("#composer-input").placeholder = hasPendingDecision(agent.id) ? "Escribe tu respuesta o habla de otra cosa" : `Escribe a ${agent.name}…`;
+  $("#composer-input").placeholder = hasPendingDecision(agent.id)
+    ? "Escribe tu respuesta o habla de otra cosa"
+    : agent.main
+      ? "Cuéntale qué necesitas…"
+      : `Escribe a ${agent.name}…`;
+}
+
+/** Ideas para empezar a hablar con Claude Bot: llenan el cuadro de texto para que las ajustes antes de enviar. */
+const MAIN_IDEAS = [
+  "Arma un equipo para crear un videojuego de plataformas para PC",
+  "Quiero un equipo que investigue un tema y me entregue un informe cada lunes",
+  "Necesito agentes que mantengan y mejoren mi página web",
+];
+
+/** Pantalla de inicio de Claude Bot: se ve mientras su conversación está vacía. */
+function renderMainIntro() {
+  const agent = findAgent(state.currentId);
+  const intro = $("#main-intro");
+  const show = Boolean(agent?.main) && !(state.messages.get(agent.id) ?? []).length && !state.hasMore.get(agent.id);
+  intro.hidden = !show;
+  if (!show) return;
+  $("#intro-title").textContent = `Hola, soy ${agent.name}`;
+  const ideas = $("#intro-ideas");
+  if (ideas.childElementCount) return;
+  for (const idea of MAIN_IDEAS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "idea";
+    button.textContent = idea;
+    button.addEventListener("click", () => {
+      const input = $("#composer-input");
+      input.value = idea;
+      autosize(input);
+      saveDraft();
+      updateActionButton();
+      input.focus();
+      input.setSelectionRange(idea.length, idea.length);
+    });
+    ideas.append(button);
+  }
 }
 
 async function loadConversation(agentId, { keepScroll = false } = {}) {
@@ -716,6 +807,7 @@ function renderAllMessages() {
     container.append(node);
   }
   $("#load-more").hidden = !state.hasMore.get(state.currentId);
+  renderMainIntro();
   updateWorkingIndicator();
 }
 
@@ -735,8 +827,12 @@ function upsertMessage(agentId, message) {
   if (existing) existing.replaceWith(node);
   else $("#message-list").append(node);
   elements.set(message.id, node);
+  if (!$("#main-intro").hidden) renderMainIntro();
   updateWorkingIndicator();
-  if (message.role === "decision") updatePlaceholder();
+  if (message.role === "decision") {
+    updatePlaceholder();
+    renderBotCard();
+  }
   if (atBottom || (!existing && message.role === "user")) scrollToBottom();
 }
 
@@ -791,6 +887,24 @@ function buildMessage(message) {
 
   if (message.role === "activity") {
     node.className = "msg msg-activity";
+    const kind = message.payload?.kind;
+    if (kind === "agent-created" || kind === "agent-updated") {
+      const target = findAgent(message.payload.agentId);
+      const created = kind === "agent-created";
+      const name = target?.name ?? message.text.match(/«(.+?)»/)?.[1] ?? "un agente";
+      const link = document.createElement(target ? "button" : "span");
+      link.className = "what";
+      link.textContent = name;
+      if (target) {
+        link.type = "button";
+        link.title = `Abrir la conversación con ${name}`;
+        link.addEventListener("click", () => navigate(target.id));
+      }
+      const detail = created ? message.payload.project : (message.payload.changes ?? []).join(", ");
+      node.append(icon(created ? "team" : "pencil"), created ? "Creó a" : "Ajustó a", link);
+      if (detail) node.append(`· ${detail}`);
+      return node;
+    }
     const created = message.text.match(/^(Creó|Creaste) la rutina «(.+)» · (.+)$/s);
     if (created) {
       const what = document.createElement("span");
@@ -1548,12 +1662,19 @@ async function openAgentDialog(agent = null) {
   form.reset();
   $("#agent-error").textContent = "";
   $("#agent-dialog-title").textContent = agent ? `Editar a ${agent.name}` : "Nuevo agente";
+  const main = Boolean(agent?.main);
+  $("#project-field").hidden = main;
+  $("#instructions-label").textContent = main ? "Tus preferencias para armar equipos" : "Instrucciones permanentes";
+  form.elements.instructions.placeholder = main
+    ? "Opcional. Ej.: equipos de 3 agentes como máximo; usa Sonnet para tareas simples; escríbeme siempre en español."
+    : "Cómo quieres que trabaje, qué debe priorizar, cuándo pedir ayuda…";
   form.elements.name.value = agent?.name ?? "";
   form.elements.project.value = agent ? agent.project : (findAgent(state.currentId)?.project ?? "");
+  form.elements.role.placeholder = main ? "Ej.: Bot principal: arma y coordina mis equipos" : "Ej.: Investigadora, Programador, Revisora";
   form.elements.role.value = agent?.role ?? "";
   form.elements.instructions.value = agent?.instructions ?? "";
   form.elements.access.value = agent?.access ?? "carpeta";
-  const projects = [...new Set(state.agents.map((item) => item.project).filter(Boolean))];
+  const projects = [...new Set(state.agents.filter((item) => !item.main).map((item) => item.project).filter(Boolean))];
   $("#project-options").replaceChildren(...projects.map((project) => new Option(project, project)));
   fillProviders(agent?.provider);
   updateAccessWarning();
@@ -1646,9 +1767,10 @@ async function saveAgent(event) {
     form.elements.name.focus();
     return;
   }
+  const editing = editingAgentId ? findAgent(editingAgentId) : null;
   const body = {
     name,
-    project: form.elements.project.value,
+    ...(editing?.main ? {} : { project: form.elements.project.value }),
     role: form.elements.role.value,
     instructions: form.elements.instructions.value,
     provider: form.elements.provider.value,
@@ -1868,7 +1990,6 @@ function openSettings({ focusName = false } = {}) {
   renderProviders();
   const names = $("#names-form");
   names.elements.userName.value = state.settings.userName ?? "";
-  names.elements.botName.value = state.settings.botName === "ClosedBot" ? "" : (state.settings.botName ?? "");
   const paths = $("#paths");
   paths.replaceChildren();
   for (const [label, value] of [
@@ -1929,11 +2050,11 @@ async function saveNames(event) {
   try {
     const result = await api("/api/settings", {
       method: "PATCH",
-      body: { userName: form.elements.userName.value, botName: form.elements.botName.value },
+      body: { userName: form.elements.userName.value },
     });
     state.settings = result.settings;
     renderIdentity();
-    showToast("Nombres guardados.");
+    showToast("Nombre guardado.");
   } catch (error) {
     showToast(error.message, "error");
   } finally {
@@ -2210,6 +2331,9 @@ function bindUi() {
   $("#login-form").addEventListener("submit", login);
   $("#new-agent").addEventListener("click", () => openAgentDialog());
   $("#first-agent").addEventListener("click", () => openAgentDialog());
+  $("#first-team").addEventListener("click", openMainAgent);
+  $("#empty-talk").addEventListener("click", openMainAgent);
+  $("#bot-card").addEventListener("click", openMainAgent);
   $("#search-toggle").addEventListener("click", () => toggleSearch());
   $("#search-input").addEventListener("input", (event) => {
     state.search = event.target.value;

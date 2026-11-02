@@ -86,6 +86,8 @@ async function main(): Promise<void> {
     sharedDir: config.sharedDir,
     maxHops: config.maxHops,
     createClient,
+    // Claude Bot: el bot principal que arma los equipos de agentes.
+    mainAgent: true,
     detectProviders: () =>
       detectProviders({
         enabled: config.detectProviders,

@@ -1,2 +1,2 @@
 /** Versión de ClosedBot (la misma de package.json). */
-export const VERSION = "0.3.1";
+export const VERSION = "0.4.0";

@@ -46,6 +46,18 @@ async function callTeamTool(options: Options, name: string, args: Record<string,
   return content.map((item) => item.text ?? "").join("\n");
 }
 
+/** Nombres de las herramientas del equipo que ve el agente, como se las muestra Claude. */
+async function teamToolNames(options: Options): Promise<string[]> {
+  const server = (options.mcpServers?.closedbot as McpSdkServerConfigWithInstance).instance;
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const client = new Client({ name: "prueba", version: "1.0.0" });
+  await client.connect(clientTransport);
+  const { tools } = await client.listTools();
+  await client.close();
+  return tools.map((entry) => entry.name).sort();
+}
+
 function fakeQueryFactory(recorder: Recorder): QueryFactory {
   return ({ prompt, options }) => {
     recorder.options.push(options);
@@ -93,13 +105,14 @@ function fakeQueryFactory(recorder: Recorder): QueryFactory {
   };
 }
 
-async function claudeHarness(platform?: NodeJS.Platform) {
+async function claudeHarness(platform?: NodeJS.Platform, mainAgent = false) {
   const recorder: Recorder = { options: [], prompts: [], interrupts: 0 };
   const h = await createHarness({
     createClient: (provider) =>
       provider === "claude"
         ? new ClaudeAgentClient({ createQuery: fakeQueryFactory(recorder), idleMs: 0, platform })
         : new DemoAgentClient({ wordDelayMs: 0 }),
+    mainAgent,
   });
   return { h, recorder };
 }
@@ -241,6 +254,43 @@ test("política de permisos por nivel de acceso", async () => {
   const total = createPermissionPolicy("total", []);
   assert.equal(await decide(total, "Bash", { command: "ls" }), "allow");
   assert.equal(await decide(total, "AskUserQuestion", {}), "deny");
+});
+
+test("Claude: solo Claude Bot recibe las herramientas para crear y ajustar agentes, también al reanudar", async () => {
+  const { h, recorder } = await claudeHarness("linux", true);
+  try {
+    const mainId = h.service.mainAgentId() as string;
+    const clara = h.service.createAgent({ name: "Clara", provider: "claude" });
+    for (const id of [mainId, clara.id]) {
+      const { message } = h.service.sendUserMessage(id, "hola");
+      await waitFor(() => h.store.getMessage(message.id)?.status === "completed", 5_000, "turno de Claude");
+    }
+    const [mainOptions, claraOptions] = recorder.options as [Options, Options];
+    const base = ["ask_user", "create_routine", "delete_routine", "list_agents", "list_routines", "send_message"];
+    assert.deepEqual(await teamToolNames(mainOptions), [...base, "create_agent", "update_agent"].sort());
+    assert.deepEqual(await teamToolNames(claraOptions), base);
+    assert.match((mainOptions.systemPrompt as { append: string }).append, /Eres el bot principal de ClosedBot/);
+    assert.doesNotMatch((claraOptions.systemPrompt as { append: string }).append, /bot principal/);
+
+    // Claude Bot crea un agente con su herramienta, como lo haría el modelo.
+    const created = JSON.parse(
+      await callTeamTool(mainOptions, "create_agent", { name: "Diseñadora", role: "Diseña niveles", instructions: "Diseña los niveles.", project: "Juegos" }),
+    ) as { creado: boolean; proveedor: string };
+    assert.equal(created.creado, true);
+    assert.equal(created.proveedor, "claude");
+    assert.equal(h.store.findAgentByName("Diseñadora")?.project, "Juegos");
+
+    // Al reanudar (aquí, por cambiar el acceso de todos) conserva sus herramientas.
+    h.service.updateSettings({ fullAccess: true });
+    const again = h.service.sendUserMessage(mainId, "sigue");
+    await waitFor(() => h.store.getMessage(again.message.id)?.status === "completed", 5_000, "turno reanudado");
+    const resumed = recorder.options.at(-1) as Options;
+    assert.notEqual(resumed, mainOptions, "reinició la sesión con el acceso nuevo");
+    assert.equal(resumed.permissionMode, "bypassPermissions");
+    assert.ok((await teamToolNames(resumed)).includes("create_agent"));
+  } finally {
+    await h.close();
+  }
 });
 
 test("Claude: buildOptions en acceso total", () => {
