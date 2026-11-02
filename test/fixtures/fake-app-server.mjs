@@ -31,7 +31,7 @@ async function runTurn(threadId, turnId, text) {
       threadId,
       turnId,
       callId: "call-1",
-      namespace: "cuadrilla",
+      namespace: "closedbot",
       tool: "list_agents",
       arguments: {},
     });

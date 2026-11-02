@@ -1,6 +1,6 @@
 // Derivado de OpenBot v0.1.11 (src/backend/jsonl.ts), Copyright 2026 Norbert Bodziony,
 // con licencia Apache-2.0 (ver licenses/OPENBOT-APACHE-2.0.txt y NOTICE).
-// Modificado para Cuadrilla: mensajes de error y límite de tamaño de línea.
+// Modificado para ClosedBot: mensajes de error y límite de tamaño de línea.
 
 import { StringDecoder } from "node:string_decoder";
 import { isRpcMessage, type RpcMessage } from "./protocol.js";

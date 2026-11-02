@@ -202,6 +202,19 @@ export function createApp(options: AppOptions): App {
 
   route("POST", "/api/providers/refresh", async () => ({ providers: await service.refreshProviders() }));
 
+  // Inicio de sesión con la cuenta del proveedor: su CLI abre el navegador en este equipo.
+  route("POST", "/api/providers/:id/login", (ctx) => ({ providers: service.startSignIn(param(ctx, 0)) }));
+
+  route("POST", "/api/providers/:id/login/code", async (ctx) => {
+    const body = await readJson(ctx.req);
+    service.submitSignInCode(param(ctx, 0), body.code);
+    return { providers: service.providers() };
+  });
+
+  route("POST", "/api/providers/:id/login/cancel", (ctx) => ({ providers: service.cancelSignIn(param(ctx, 0)) }));
+
+  route("POST", "/api/providers/:id/logout", async (ctx) => ({ providers: await service.signOut(param(ctx, 0)) }));
+
   route("GET", "/api/models", async (ctx) => {
     const provider = ctx.url.searchParams.get("provider");
     if (provider !== "claude" && provider !== "codex" && provider !== "demo") throw new HttpError(400, "Proveedor inválido.");
@@ -436,7 +449,7 @@ export function createApp(options: AppOptions): App {
     setSecurityHeaders(res);
     let url: URL;
     try {
-      url = new URL(req.url ?? "/", "http://cuadrilla.local");
+      url = new URL(req.url ?? "/", "http://closedbot.local");
     } catch {
       sendJson(res, 400, { error: "URL inválida." });
       return;

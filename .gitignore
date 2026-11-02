@@ -4,9 +4,13 @@ dist/
 .env
 data/
 .cuadrilla/
+.closedbot/
 
-# Contraseña guardada junto a la app en una instalación local
+# Contraseña guardada junto a la app en una instalación local (y su nombre de antes)
+CONTRASENA-CLOSEDBOT.txt
 CONTRASENA-CUADRILLA.txt
 
-# App de escritorio de Windows (la compila Instalar-escritorio.cmd)
+# App de escritorio de Windows (la compila Instalar-escritorio.cmd), y la de antes del cambio de nombre
+/ClosedBot.exe
+/ClosedBot.nuevo.exe
 /Cuadrilla.exe

@@ -1,11 +1,12 @@
 // Derivado de OpenBot v0.1.11 (src/backend/app-server-client.ts), Copyright 2026 Norbert Bodziony,
 // con licencia Apache-2.0 (ver licenses/OPENBOT-APACHE-2.0.txt y NOTICE).
-// Modificado para Cuadrilla: opciones de arranque, entorno configurable y mensajes en español.
+// Modificado para ClosedBot: opciones de arranque, entorno configurable y mensajes en español.
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import type { AgentClient, ProviderId } from "./client.js";
 import { JsonLineDecoder } from "./jsonl.js";
+import { spawnTarget } from "./spawn.js";
 import {
   type AppServerNotification,
   type AppServerRequest,
@@ -73,16 +74,13 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> implements 
     if (this.running) return;
     this.#stopping = false;
     this.#decoder = new JsonLineDecoder();
-    const child = spawn(
-      this.#options.executable,
-      ["app-server", "--listen", "stdio://", ...(this.#options.extraArgs ?? [])],
-      {
-        stdio: ["pipe", "pipe", "pipe"],
-        env: this.#options.env ?? process.env,
-        shell: process.platform === "win32",
-        windowsHide: true,
-      },
-    );
+    const target = spawnTarget(this.#options.executable, ["app-server", "--listen", "stdio://", ...(this.#options.extraArgs ?? [])]);
+    const child = spawn(target.file, target.args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: this.#options.env ?? process.env,
+      shell: target.shell,
+      windowsHide: true,
+    });
     this.#process = child;
 
     child.stdout.on("data", (chunk: Buffer) => {

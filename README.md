@@ -1,6 +1,6 @@
-# Cuadrilla
+# ClosedBot
 
-Tu equipo personal de agentes de IA. Cada agente tiene nombre, rol e instrucciones, trabaja con **Claude** o **Codex** en su propia carpeta, y puede pedirles ayuda a sus compañeros. Lo manejas como una app de escritorio en Windows (ventana propia e icono en la bandeja), desde el navegador o desde el teléfono, como una app instalada.
+Tu equipo personal de agentes de IA (hasta la versión 0.2 se llamaba Cuadrilla). Cada agente tiene nombre, rol e instrucciones, trabaja con **Claude** o **Codex** en su propia carpeta, y puede pedirles ayuda a sus compañeros. Lo manejas como una app de escritorio en Windows (ventana propia e icono en la bandeja), desde el navegador o desde el teléfono, como una app instalada.
 
 Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su versión 0.1.11, publicada con licencia Apache 2.0 (ver [Licencias](#licencias)).
 
@@ -11,10 +11,11 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
 - **Trabajo en equipo**: los agentes se escriben entre sí con las herramientas `list_agents` y `send_message`. Si un compañero termina sin contestar, su resultado vuelve solo a quien se lo pidió. Hay un límite de reenvíos seguidos (6 por defecto) para cortar bucles.
 - **Respuestas en vivo**, con el historial guardado en SQLite. Cada agente retoma su conversación aunque reinicies el servidor.
 - **Preguntas con opciones**: un agente puede preguntarte algo con una tarjeta de 2 a 4 opciones (con una recomendada). Tocas una y tu respuesta le llega como un mensaje nuevo.
-- **Rutinas**: tareas que se repiten solas, a horas fijas (por ejemplo, de lunes a viernes a las 08:30) o cada cierto tiempo (desde 15 minutos). Las creas tú o se las pides a un agente. Solo corren mientras Cuadrilla está abierta; si una se atrasa más de 2 horas, se salta y queda el aviso.
+- **Rutinas**: tareas que se repiten solas, a horas fijas (por ejemplo, de lunes a viernes a las 08:30) o cada cierto tiempo (desde 15 minutos). Las creas tú o se las pides a un agente. Solo corren mientras ClosedBot está abierta; si una se atrasa más de 2 horas, se salta y queda el aviso.
 - **Lista de agentes como en una app de chat**: agrupados por proyecto, con su último mensaje y un punto en los que tienen novedades.
 - **Dictado por voz y adjuntos**: el micrófono escribe lo que dices (en Edge o Chrome) y puedes adjuntar archivos, que quedan en la carpeta del agente.
 - **App instalable** (PWA) en Android y iPhone, a través de tu red privada de Tailscale.
+- **Conexión con tu cuenta**: en Ajustes, «Iniciar sesión con Claude» abre el navegador para que entres con tu cuenta de Claude, como en OpenBot. No hace falta una clave de API.
 - **Dos niveles de acceso**:
   - *Solo su carpeta* (por defecto): el agente escribe en su carpeta y en la carpeta compartida, y sus comandos corren dentro de un sandbox.
   - *Acceso total*: comandos y archivos de toda la máquina, sin pedir permiso. Úsalo solo en una máquina dedicada.
@@ -29,8 +30,8 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
 ## Requisitos
 
 - Linux (probado pensando en Ubuntu 22.04 o 24.04), **Node.js 22.13 o superior** y `git`.
-- **Claude**: una clave de API de Anthropic (`ANTHROPIC_API_KEY`). Para apps hechas con el Agent SDK, Anthropic indica autenticarse con clave de API.
-- **Codex** (opcional): `npm install -g @openai/codex` y luego iniciar sesión con `codex login --device-auth`.
+- **Claude**: tu cuenta de Claude (plan Pro o Max). Inicias sesión desde la app (ver [Conectar Claude](#conectar-claude)). Si prefieres, también sirve una clave de API de Anthropic (`ANTHROPIC_API_KEY`).
+- **Codex** (opcional): `npm install -g @openai/codex`. Luego inicias sesión desde Ajustes («Iniciar sesión con ChatGPT») o con `codex login --device-auth`.
 - **Modo «Solo su carpeta» con Claude**: el sandbox de Claude Code necesita `bubblewrap` y `socat`.
 - **Tailscale**, en el servidor y en el teléfono.
 
@@ -43,15 +44,15 @@ Todos los comandos van en el servidor dedicado.
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs git bubblewrap socat
 
-# 2. Un usuario solo para Cuadrilla (sin sudo)
-sudo adduser --disabled-password --gecos "" cuadrilla
-sudo -iu cuadrilla
+# 2. Un usuario solo para ClosedBot (sin sudo)
+sudo adduser --disabled-password --gecos "" closedbot
+sudo -iu closedbot
 
 # 3. Descargar el código. El repo es privado, así que primero inicia sesión en GitHub.
 #    Puedes usar la CLI de GitHub (gh auth login) o una "deploy key" de solo lectura.
 gh auth login
-gh repo clone Hysko4/ClosedBot cuadrilla
-cd cuadrilla
+gh repo clone Hysko4/ClosedBot closedbot
+cd closedbot
 npm ci
 npm run build
 
@@ -63,21 +64,23 @@ npm run password                 # te la pide dos veces
 codex login --device-auth
 
 # 6. Probar a mano
-ANTHROPIC_API_KEY=sk-ant-... npm start
+npm start
 ```
+
+Después entra a la app y conecta Claude desde Ajustes (ver [Conectar Claude](#conectar-claude)).
 
 Para verla desde tu computador antes de configurar Tailscale, usa un túnel SSH: `ssh -L 8787:127.0.0.1:8787 usuario@servidor`, y luego abre <http://127.0.0.1:8787>.
 
 ### Dejarla funcionando siempre (systemd)
 
 ```bash
-# como un usuario con sudo (no como "cuadrilla")
-sudo cp /home/cuadrilla/cuadrilla/deploy/cuadrilla.service /etc/systemd/system/
-sudo install -m 600 /home/cuadrilla/cuadrilla/deploy/cuadrilla.env.example /etc/cuadrilla.env
-sudo nano /etc/cuadrilla.env          # pega tu ANTHROPIC_API_KEY
+# como un usuario con sudo (no como "closedbot")
+sudo cp /home/closedbot/closedbot/deploy/closedbot.service /etc/systemd/system/
+sudo install -m 600 /home/closedbot/closedbot/deploy/closedbot.env.example /etc/closedbot.env
+sudo nano /etc/closedbot.env          # opcional: puerto, carpeta de datos…
 sudo systemctl daemon-reload
-sudo systemctl enable --now cuadrilla
-journalctl -u cuadrilla -f            # ver registros
+sudo systemctl enable --now closedbot
+journalctl -u closedbot -f            # ver registros
 ```
 
 ### Usarla desde el teléfono (Tailscale)
@@ -98,18 +101,20 @@ En el teléfono, instala la app de Tailscale y entra con la misma cuenta. Luego 
 También funciona en Windows 10 u 11, sin servidor aparte, como una app con su propia ventana:
 
 1. Instala Node.js 22 o superior: `winget install OpenJS.NodeJS.LTS`.
-2. Descarga el código en una carpeta tuya (por ejemplo, `C:\Users\<tú>\cuadrilla`).
-3. Abre **`Instalar-escritorio.cmd`** con doble clic. Instala las dependencias, compila, crea el programa `Cuadrilla.exe`, crea una contraseña si no tenías (queda en `CONTRASENA-CUADRILLA.txt`) y pone el acceso directo **Cuadrilla** en el escritorio y en el menú Inicio.
+2. Descarga el código en una carpeta tuya (por ejemplo, `C:\Users\<tú>\ClosedBot`).
+3. Abre **`Instalar-escritorio.cmd`** con doble clic. Instala las dependencias, compila, crea el programa `ClosedBot.exe`, crea una contraseña si no tenías (queda en `CONTRASENA-CLOSEDBOT.txt`) y pone el acceso directo **ClosedBot** en el escritorio y en el menú Inicio.
+4. En la app, abre Ajustes y pulsa **«Iniciar sesión con Claude»** (ver [Conectar Claude](#conectar-claude)).
 
 Cómo se usa:
 
-- El acceso directo abre Cuadrilla en **su propia ventana**, sin barras del navegador y sin pedir la contraseña (entra con un código de un solo uso). Usa Edge, o Chrome si no hay Edge, con un perfil solo para Cuadrilla.
+- El acceso directo abre ClosedBot en **su propia ventana**, sin barras del navegador y sin pedir la contraseña (entra con un código de un solo uso). Usa Edge, o Chrome si no hay Edge, con un perfil solo para ClosedBot.
 - Queda un **icono en la bandeja**, junto al reloj. Clic: abre la ventana. Clic derecho: *Iniciar con Windows*, *Ver registro* y *Salir*.
-- Si cierras la ventana, Cuadrilla sigue funcionando en segundo plano para tus rutinas. Para cerrarla del todo, usa *Salir*.
+- Si cierras la ventana, ClosedBot sigue funcionando en segundo plano para tus rutinas. Para cerrarla del todo, usa *Salir*.
 - Arranca con Windows (sin abrir la ventana) desde la primera instalación. Lo cambias en el menú de la bandeja.
-- El registro está en `%LOCALAPPDATA%\Cuadrilla\cuadrilla.log`. Si el servidor se cae, el programa lo vuelve a arrancar (hasta 3 veces en 15 minutos) y te avisa si no puede.
-- **Actualizar**: reemplaza el código por la versión nueva (tus datos están en `C:\Users\<tú>\.cuadrilla` y no se tocan) y vuelve a abrir `Instalar-escritorio.cmd`.
-- **Quitar los accesos directos**: `Cuadrilla.exe /desinstalar`.
+- El registro está en `%LOCALAPPDATA%\ClosedBot\closedbot.log`. Si el servidor se cae, el programa lo vuelve a arrancar (hasta 3 veces en 15 minutos) y te avisa si no puede.
+- **Actualizar**: reemplaza el código por la versión nueva (tus datos están en `C:\Users\<tú>\.closedbot` y no se tocan) y vuelve a abrir `Instalar-escritorio.cmd`.
+- **Desde la versión llamada Cuadrilla**: el instalador cierra `Cuadrilla.exe`, cambia sus accesos directos por los de ClosedBot (respeta si habías apagado el inicio con Windows) y borra `%LOCALAPPDATA%\Cuadrilla`. Al arrancar, la app mueve tus datos de `.cuadrilla` a `.closedbot`. El archivo `CONTRASENA-CUADRILLA.txt` pasa a llamarse `CONTRASENA-CLOSEDBOT.txt`.
+- **Quitar los accesos directos**: `ClosedBot.exe /desinstalar`.
 
 Si prefieres la consola: `npm ci`, `npm run build`, `npm run password -- --generate` y `npm start`, y abre <http://127.0.0.1:8787>.
 
@@ -120,13 +125,30 @@ Diferencias en Windows:
 - **Codex** tiene su propio aislamiento en Windows. Compruébalo antes de darle tareas delicadas.
 - **Para el teléfono**, instala Tailscale para Windows y ejecuta `tailscale serve --bg 8787` en una ventana de PowerShell como administrador.
 
+## Conectar Claude
+
+Como en OpenBot, los agentes se conectan **iniciando sesión con tu cuenta**, sin clave de API:
+
+1. Abre **Ajustes** y pulsa **«Iniciar sesión con Claude»** (o el botón de la pantalla de inicio).
+2. La app ejecuta el inicio de sesión de Claude Code (`claude auth login --claudeai`), que abre tu navegador en el equipo donde corre la app. Entra con tu cuenta de Claude y autoriza.
+3. Al volver, Ajustes muestra «Conectado como tu@correo · plan …». Ya puedes crear agentes con Claude.
+
+Si el navegador no se abre (o usas la app desde otro equipo), Ajustes muestra un enlace: ábrelo, entra con tu cuenta y pega en la app el código que te muestra la página. El intento se cancela solo a los 10 minutos.
+
+- La sesión de los agentes se guarda **aparte**, en `<datos>/claude`: iniciar o cerrar sesión en la app no cambia el Claude Code que uses por tu cuenta en ese equipo.
+- **«Cerrar sesión de Claude»** (en Ajustes) borra solo esa sesión.
+- El uso de los agentes cuenta para los límites de tu plan de Claude.
+- **Términos de Anthropic**: este inicio de sesión es para tu uso personal. Anthropic no permite ofrecer el login de claude.ai en apps para otras personas; para eso hace falta una clave de API.
+- Si el servidor tiene `ANTHROPIC_API_KEY` (o `CLAUDE_CODE_OAUTH_TOKEN`), esa credencial manda y no se muestra el botón.
+- Codex funciona igual con «Iniciar sesión con ChatGPT» (ejecuta `codex login`), si Codex está instalado.
+
 ## Uso
 
 - **Crear un agente**: botón **+**. Elige el proveedor, el modelo (o «Predeterminado»), el esfuerzo y el acceso.
 - **Escribir**: en el computador, Enter envía y Mayús+Enter hace un salto de línea. En el teléfono se envía con el botón.
 - **Cola**: si el agente está ocupado, verás «N mensajes esperando turno». Desde ahí puedes quitar mensajes. En el menú ⋯ puedes pausar la cola, empezar de cero, editar o eliminar el agente. «Detener» corta el turno en curso.
 - **Equipo**: pídele a un agente que consulte a otro, por ejemplo: «Pídele a Beto que revise esto». En su chat verás «Enviado a Beto» y después «Respuesta de Beto».
-- **Carpetas**: cada agente trabaja en `~/.cuadrilla/agentes/<nombre>`, y todos comparten `~/.cuadrilla/compartida`.
+- **Carpetas**: cada agente trabaja en `~/.closedbot/agentes/<nombre>`, y todos comparten `~/.closedbot/compartida`.
 - **Preguntas**: cuando un agente necesita que elijas, verás una tarjeta con opciones (A, B, C…). La recomendada lleva una etiqueta. Al tocar una, el agente sigue con tu respuesta.
 - **Rutinas**: botón del reloj en la barra lateral, o pídeselo a un agente («todos los días a las 9, revisa…»). Puedes pausarlas, ejecutarlas al momento o borrarlas. Cada agente tiene hasta 20.
 - **Proyectos**: al crear o editar un agente, escribe un proyecto para agruparlo en la barra lateral.
@@ -136,43 +158,45 @@ Diferencias en Windows:
 
 ## Configuración
 
-Se configura con variables de entorno, en `/etc/cuadrilla.env` si usas systemd.
+Se configura con variables de entorno, en `/etc/closedbot.env` si usas systemd. Las de antes del cambio de nombre (`CUADRILLA_*`) siguen funcionando.
 
 | Variable | Por defecto | Para qué sirve |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | — | Clave de API para los agentes de Claude. |
-| `CUADRILLA_HOST` | `127.0.0.1` | Dirección donde escucha. No la cambies si usas `tailscale serve`. |
-| `CUADRILLA_PORT` | `8787` | Puerto. |
-| `CUADRILLA_DATA_DIR` | `~/.cuadrilla` | Base de datos y carpetas de los agentes. |
-| `CUADRILLA_WORKSPACES_DIR` | `<datos>/agentes` | Carpetas de trabajo de los agentes. |
-| `CUADRILLA_SHARED_DIR` | `<datos>/compartida` | Carpeta compartida por el equipo. |
-| `CUADRILLA_MAX_HOPS` | `6` | Máximo de reenvíos seguidos entre agentes. |
-| `CUADRILLA_CODEX_BIN` | `codex` | Ruta del ejecutable de Codex. |
-| `CUADRILLA_CLAUDE_BIN` | — | Ruta a un `claude` propio. Si no la indicas, se usa el que trae el SDK. |
-| `CUADRILLA_PLAYWRIGHT` | `0` | `1` da a los agentes de Claude un navegador sin ventana (Playwright MCP). |
-| `CUADRILLA_DETECT` | `1` | `0` desactiva la comprobación de proveedores al arrancar. |
-| `CUADRILLA_SESSION_DAYS` | `30` | Días que dura la sesión en cada dispositivo. |
-| `CUADRILLA_SECURE_COOKIES` | `auto` | `auto` marca la cookie como `Secure` cuando llega por HTTPS (Tailscale). |
-| `CUADRILLA_PASSWORD` | — | Contraseña por variable de entorno. Solo se usa si no creaste una con `npm run password`. |
-| `CUADRILLA_CONTROL_TOKEN` | — | La pone `Cuadrilla.exe` al arrancar el servidor (mínimo 32 caracteres) para entrar sin contraseña y cerrarlo con calma. Solo funciona desde el mismo equipo y los agentes no la heredan. No hace falta configurarla. |
+| `ANTHROPIC_API_KEY` | — | Opcional: clave de API para Claude, en vez de iniciar sesión con tu cuenta. |
+| `CLOSEDBOT_HOST` | `127.0.0.1` | Dirección donde escucha. No la cambies si usas `tailscale serve`. |
+| `CLOSEDBOT_PORT` | `8787` | Puerto. |
+| `CLOSEDBOT_DATA_DIR` | `~/.closedbot` | Base de datos y carpetas de los agentes. Si solo existe `~/.cuadrilla`, se mueve a `~/.closedbot` al arrancar. |
+| `CLOSEDBOT_WORKSPACES_DIR` | `<datos>/agentes` | Carpetas de trabajo de los agentes. |
+| `CLOSEDBOT_SHARED_DIR` | `<datos>/compartida` | Carpeta compartida por el equipo. |
+| `CLOSEDBOT_CLAUDE_CONFIG_DIR` | `<datos>/claude` | Sesión de Claude Code de los agentes, aparte de la tuya. |
+| `CLOSEDBOT_MAX_HOPS` | `6` | Máximo de reenvíos seguidos entre agentes. |
+| `CLOSEDBOT_CODEX_BIN` | `codex` | Ruta del ejecutable de Codex. |
+| `CLOSEDBOT_CLAUDE_BIN` | — | Ruta a un `claude` propio. Si no la indicas, se usa el que trae el SDK. |
+| `CLOSEDBOT_PLAYWRIGHT` | `0` | `1` da a los agentes de Claude un navegador sin ventana (Playwright MCP). |
+| `CLOSEDBOT_DETECT` | `1` | `0` desactiva la comprobación de proveedores al arrancar. |
+| `CLOSEDBOT_SESSION_DAYS` | `30` | Días que dura la sesión en cada dispositivo. |
+| `CLOSEDBOT_SECURE_COOKIES` | `auto` | `auto` marca la cookie como `Secure` cuando llega por HTTPS (Tailscale). |
+| `CLOSEDBOT_PASSWORD` | — | Contraseña por variable de entorno. Solo se usa si no creaste una con `npm run password`. |
+| `CLOSEDBOT_CONTROL_TOKEN` | — | La pone `ClosedBot.exe` al arrancar el servidor (mínimo 32 caracteres) para entrar sin contraseña y cerrarlo con calma. Solo funciona desde el mismo equipo y los agentes no la heredan. No hace falta configurarla. |
 
 ## Actualizar
 
 ```bash
-sudo -iu cuadrilla
-cd ~/cuadrilla && git pull && npm ci && npm run build
+sudo -iu closedbot
+cd ~/closedbot && git pull && npm ci && npm run build
 exit
-sudo systemctl restart cuadrilla
+sudo systemctl restart closedbot
 ```
 
 ## Respaldo
 
-Todo vive en `~/.cuadrilla`: la base de datos `cuadrilla.db` y las carpetas de los agentes. Para respaldar la base sin detener la app: `sqlite3 ~/.cuadrilla/cuadrilla.db ".backup respaldo.db"`.
+Todo vive en `~/.closedbot`: la base de datos `closedbot.db` (en las instalaciones de antes del cambio de nombre conserva su nombre, `cuadrilla.db`), las carpetas de los agentes y la sesión de Claude. Para respaldar la base sin detener la app: `sqlite3 ~/.closedbot/closedbot.db ".backup respaldo.db"`.
 
 ## Solución de problemas
 
 - **«El modo solo su carpeta necesita el sandbox…»**: instala `bubblewrap` y `socat`. Si aun así falla (algunas versiones de Ubuntu restringen los espacios de nombres de usuario), revisa la documentación de sandbox de Claude Code o dale acceso total a ese agente, solo en una máquina dedicada.
-- **Codex «sin sesión»**: ejecuta `codex login --device-auth` como el usuario `cuadrilla` y pulsa «Volver a comprobar» en Ajustes.
+- **Claude «sin sesión»**: Ajustes → «Iniciar sesión con Claude». Si el navegador no se abre, usa el enlace que aparece ahí y pega el código. Si falla, Ajustes muestra el motivo y el registro guarda el detalle.
+- **Codex «sin sesión»**: Ajustes → «Iniciar sesión con ChatGPT», o `codex login --device-auth` como el usuario `closedbot`, y luego «Volver a comprobar».
 - **Olvidé la contraseña**: ejecuta `npm run password` en el servidor. Eso cierra las sesiones abiertas.
 
 ## Desarrollo
@@ -182,7 +206,7 @@ npm ci
 npm test        # compila y corre las pruebas
 ```
 
-Las pruebas usan el proveedor Demo y simulaciones del SDK de Claude y del `codex app-server`, así que no gastan créditos. Cubren la cola, los mensajes entre agentes, el límite de reenvíos, la interrupción, el reinicio, el login, la protección CSRF, los eventos en vivo, las preguntas con opciones, las rutinas y sus horarios, los adjuntos y el control del lanzador de escritorio.
+Las pruebas usan el proveedor Demo y simulaciones del SDK de Claude y del `codex app-server`, así que no gastan créditos. Cubren la cola, los mensajes entre agentes, el límite de reenvíos, la interrupción, el reinicio, el login, la protección CSRF, los eventos en vivo, las preguntas con opciones, las rutinas y sus horarios, los adjuntos, el control del lanzador de escritorio, el inicio de sesión con la cuenta (con un Claude Code falso) y la mudanza de `~/.cuadrilla` a `~/.closedbot`.
 
 ```
 src/
@@ -198,20 +222,20 @@ src/
   providers/           Claude (Agent SDK), Codex (app-server), Demo, detección
   cli/password.ts      npm run password
 public/                interfaz web (sin dependencias ni compilación)
-scripts/windows/       Cuadrilla.exe: ventana propia e icono en la bandeja (C#)
+scripts/windows/       ClosedBot.exe: ventana propia e icono en la bandeja (C#)
 deploy/                servicio de systemd y plantilla de entorno
 test/                  pruebas (node:test)
 ```
 
 ## Estado y límites conocidos
 
-- Versión 0.2.0. Se probó con el proveedor Demo y con simulaciones de Claude y Codex. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
+- Versión 0.3.0. Se probó con el proveedor Demo y con simulaciones de Claude y Codex. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
 - Un solo usuario y sin notificaciones push por ahora.
 - Las preguntas con opciones terminan el turno del agente: tu respuesta le llega como un mensaje nuevo.
-- Las rutinas solo corren con Cuadrilla abierta (en Windows, basta con el icono de la bandeja).
+- Las rutinas solo corren con ClosedBot abierta (en Windows, basta con el icono de la bandeja).
 
 ## Licencias
 
-- El código propio de Cuadrilla es privado.
-- Algunas partes derivan de **OpenBot v0.1.11** (Copyright 2026 Norbert Bodziony), con licencia Apache 2.0. Cada archivo derivado lo indica al inicio. Ver [NOTICE](NOTICE) y [licenses/OPENBOT-APACHE-2.0.txt](licenses/OPENBOT-APACHE-2.0.txt). Las versiones posteriores de OpenBot usan otra licencia y no se usaron.
+- El código propio de ClosedBot es privado.
+- Algunas partes derivan de **OpenBot v0.1.11** (Copyright 2026 Norbert Bodziony), con licencia Apache 2.0. Cada archivo derivado lo indica al inicio. Ver [NOTICE](NOTICE) y [licenses/OPENBOT-APACHE-2.0.txt](licenses/OPENBOT-APACHE-2.0.txt). Las versiones posteriores de OpenBot usan otra licencia y su código no se usó: de ellas solo se tomó la idea de conectar los proveedores con el inicio de sesión de su propio CLI.
 - Dependencias: ver [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

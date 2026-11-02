@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { Store } from "../src/db.js";
 import type { AgentClient, ProviderId } from "../src/providers/client.js";
 import { DemoAgentClient } from "../src/providers/demo.js";
-import { AgentService, type ProviderStatus, type ServiceEvent } from "../src/service.js";
+import { AgentService, type ProviderStatus, type ServiceEvent, type ServiceOptions } from "../src/service.js";
 
-export function tempDir(prefix = "cuadrilla-test-"): { path: string; cleanup: () => void } {
+export function tempDir(prefix = "closedbot-test-"): { path: string; cleanup: () => void } {
   const path = mkdtempSync(join(tmpdir(), prefix));
   return { path, cleanup: () => rmSync(path, { recursive: true, force: true }) };
 }
@@ -41,9 +41,12 @@ export async function createHarness(options: {
   createClient?: (provider: ProviderId) => AgentClient;
   dir?: string;
   keepDir?: boolean;
+  detectProviders?: ServiceOptions["detectProviders"];
+  signInCommands?: ServiceOptions["signInCommands"];
+  signInTimeoutMs?: number;
 } = {}): Promise<Harness> {
   const temp = options.dir ? { path: options.dir, cleanup: () => undefined } : tempDir();
-  const store = new Store(join(temp.path, "cuadrilla.db"));
+  const store = new Store(join(temp.path, "closedbot.db"));
   const events: ServiceEvent[] = [];
   const service = new AgentService({
     store,
@@ -51,7 +54,9 @@ export async function createHarness(options: {
     sharedDir: join(temp.path, "compartida"),
     maxHops: options.maxHops ?? 6,
     createClient: options.createClient ?? (() => new DemoAgentClient({ wordDelayMs: 0 })),
-    detectProviders: async () => TEST_PROVIDERS,
+    detectProviders: options.detectProviders ?? (async () => TEST_PROVIDERS),
+    ...(options.signInCommands ? { signInCommands: options.signInCommands } : {}),
+    ...(options.signInTimeoutMs ? { signInTimeoutMs: options.signInTimeoutMs } : {}),
   });
   service.on("event", (event) => events.push(event));
   await service.start();

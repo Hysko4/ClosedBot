@@ -17,6 +17,8 @@ import {
   type ThreadResponse,
   type TurnResponse,
 } from "./providers/protocol.js";
+import { type SignInProvider, SignInFlows, type SignInResult, type SignInView } from "./providers/signin.js";
+import { type CliCommand, runCli } from "./providers/spawn.js";
 import { describeSchedule, nextRun, normalizeSchedule } from "./schedule.js";
 import {
   type AskUserArgs,
@@ -47,6 +49,7 @@ const ROUTINE_CHECK_MS = 60_000;
 /** Tamaño máximo de un archivo adjunto. */
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const SETTINGS_META = "settings";
+export const DEFAULT_BOT_NAME = "ClosedBot";
 const OPTION_LETTERS = "ABCD";
 
 export interface ProviderStatus {
@@ -55,6 +58,20 @@ export interface ProviderStatus {
   available: boolean;
   loggedIn: boolean | null;
   detail: string;
+  /** Cuenta conectada, si el proveedor la informa. */
+  account?: { email: string | null; plan: string | null } | null;
+  /** Se puede iniciar y cerrar sesión desde la app. */
+  canSignIn?: boolean;
+  /** Inicio de sesión en curso. */
+  signIn?: SignInView | null;
+}
+
+/** Comandos del CLI de un proveedor para iniciar y cerrar sesión con la cuenta de la persona. */
+export interface SignInCommands {
+  login: CliCommand;
+  logout: CliCommand;
+  /** Claude Code acepta pegar el código que muestra la página si el navegador no vuelve solo. */
+  acceptsCode: boolean;
 }
 
 export type AgentState = "idle" | "working" | "queued" | "paused";
@@ -96,6 +113,10 @@ export interface ServiceOptions {
   maxHops: number;
   createClient: (provider: ProviderId) => AgentClient;
   detectProviders?: () => Promise<ProviderStatus[]>;
+  /** Cómo iniciar sesión en cada proveedor; null si en este equipo no se puede desde la app. */
+  signInCommands?: (provider: SignInProvider) => SignInCommands | null;
+  /** Tiempo máximo para terminar un inicio de sesión (10 minutos por defecto). */
+  signInTimeoutMs?: number;
   log?: (level: "info" | "warn" | "error", message: string) => void;
 }
 
@@ -172,11 +193,15 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   }));
   #stopping = false;
   #routineTimer: NodeJS.Timeout | null = null;
+  readonly #signIns: SignInFlows;
 
   constructor(options: ServiceOptions) {
     super();
     this.#options = options;
     this.#store = options.store;
+    this.#signIns = new SignInFlows(options.signInTimeoutMs ? { timeoutMs: options.signInTimeoutMs } : {});
+    this.#signIns.on("change", () => this.#emit({ type: "providers", providers: this.providers() }));
+    this.#signIns.on("settled", (provider, result) => void this.#afterSignIn(provider, result));
   }
 
   // ---------- ciclo de vida ----------
@@ -194,6 +219,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 
   async stop(): Promise<void> {
     this.#stopping = true;
+    this.#signIns.stopAll();
     if (this.#routineTimer) clearTimeout(this.#routineTimer);
     this.#routineTimer = null;
     const clients = [...this.#clients.values()];
@@ -210,12 +236,107 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         this.#log("warn", `No se pudo comprobar los proveedores: ${String(error)}`);
       }
     }
-    this.#emit({ type: "providers", providers: this.#providers });
-    return this.#providers;
+    const providers = this.providers();
+    this.#emit({ type: "providers", providers });
+    return providers;
   }
 
   providers(): ProviderStatus[] {
-    return this.#providers;
+    return this.#providers.map((status) => {
+      const signIn = status.id === "demo" ? null : this.#signIns.view(status.id);
+      return signIn ? { ...status, signIn } : status;
+    });
+  }
+
+  // ---------- sesión de los proveedores ----------
+
+  /** Abre el inicio de sesión del proveedor: su CLI abre el navegador para entrar con la cuenta. */
+  startSignIn(provider: unknown): ProviderStatus[] {
+    const id = signInProvider(provider);
+    const commands = this.#signInCommands(id);
+    try {
+      this.#signIns.start(id, commands.login, { acceptsCode: commands.acceptsCode });
+    } catch (error) {
+      throw new ServiceError(`No pude abrir el inicio de sesión de ${providerLabel(id)}: ${errorText(error)}`, 502);
+    }
+    this.#log("info", `Abrí el inicio de sesión de ${providerLabel(id)}.`);
+    return this.providers();
+  }
+
+  /** Código que muestra la página de inicio de sesión cuando el navegador no vuelve solo a la app. */
+  submitSignInCode(provider: unknown, code: unknown): void {
+    const id = signInProvider(provider);
+    const value = typeof code === "string" ? code.trim() : "";
+    if (!value) throw new ServiceError("Pega el código que te mostró la página.");
+    if (!/^[^\s#]{1,2048}#[^\s#]{1,2048}$/.test(value)) {
+      throw new ServiceError("Ese código no está completo: cópialo entero desde la página e inténtalo otra vez.");
+    }
+    try {
+      this.#signIns.submitCode(id, value);
+    } catch (error) {
+      throw new ServiceError(errorText(error), 409);
+    }
+  }
+
+  cancelSignIn(provider: unknown): ProviderStatus[] {
+    this.#signIns.cancel(signInProvider(provider));
+    return this.providers();
+  }
+
+  /** Cierra la sesión del proveedor en la app (no la del CLI que la persona use por su cuenta). */
+  async signOut(provider: unknown): Promise<ProviderStatus[]> {
+    const id = signInProvider(provider);
+    const commands = this.#signInCommands(id);
+    if ([...this.#active.values()].some((state) => state.provider === id)) {
+      throw new ServiceError(`Hay agentes de ${providerLabel(id)} trabajando: espera a que terminen o detenlos antes de cerrar la sesión.`, 409);
+    }
+    this.#signIns.cancel(id);
+    const result = await runCli(commands.logout, 30_000);
+    if (result.code !== 0) {
+      const detail = (result.stderr || result.stdout).trim().split(/\r?\n/).at(-1)?.slice(0, 300) || (result.error?.message ?? "sin respuesta");
+      throw new ServiceError(`No se pudo cerrar la sesión de ${providerLabel(id)}: ${detail}`, 502);
+    }
+    this.#log("info", `Cerré la sesión de ${providerLabel(id)}.`);
+    await this.#dropClient(id);
+    return this.refreshProviders();
+  }
+
+  #signInCommands(provider: SignInProvider): SignInCommands {
+    const commands = this.#options.signInCommands?.(provider) ?? null;
+    if (!commands) throw new ServiceError(`En este equipo no se puede iniciar sesión en ${providerLabel(provider)} desde la app.`, 409);
+    return commands;
+  }
+
+  async #afterSignIn(provider: SignInProvider, result: SignInResult): Promise<void> {
+    if (this.#stopping) return;
+    const label = providerLabel(provider);
+    if (!result.ok) {
+      if (result.message) {
+        this.#log("warn", `El inicio de sesión de ${label} no terminó: ${result.message}`);
+        this.#emit({ type: "notice", level: "error", message: result.message });
+      }
+      this.#emit({ type: "providers", providers: this.providers() });
+      return;
+    }
+    this.#log("info", `${label} quedó conectado.`);
+    // Los procesos que ya estaban abiertos arrancaron sin la sesión nueva.
+    await this.#dropClient(provider);
+    const providers = await this.refreshProviders();
+    const email = providers.find((status) => status.id === provider)?.account?.email;
+    this.#emit({ type: "notice", level: "info", message: `${label} quedó conectado${email ? ` como ${email}` : ""}.` });
+  }
+
+  /** Cierra el cliente de un proveedor sin turnos activos: el próximo mensaje abre uno nuevo. */
+  async #dropClient(provider: ProviderId): Promise<void> {
+    if ([...this.#active.values()].some((state) => state.provider === provider)) return;
+    const ready = this.#clientReady.get(provider);
+    this.#clientReady.delete(provider);
+    const client = this.#clients.get(provider) ?? (await ready?.catch(() => null)) ?? null;
+    this.#clients.delete(provider);
+    for (const key of [...this.#loadedThreads]) if (key.startsWith(`${provider}:`)) this.#loadedThreads.delete(key);
+    if (!client) return;
+    client.removeAllListeners();
+    await client.stop().catch(() => undefined);
   }
 
   async listModels(provider: ProviderId): Promise<Array<{ model: string; displayName: string; isDefault?: boolean; efforts: string[] }>> {
@@ -357,7 +478,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       stored = {};
     }
     return {
-      botName: typeof stored.botName === "string" && stored.botName ? stored.botName : "Cuadrilla",
+      // «Cuadrilla» era el nombre por defecto antes de que la app se llamara ClosedBot.
+      botName: typeof stored.botName === "string" && stored.botName && stored.botName !== "Cuadrilla" ? stored.botName : DEFAULT_BOT_NAME,
       userName: typeof stored.userName === "string" ? stored.userName : "",
     };
   }
@@ -365,7 +487,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   updateSettings(patch: { botName?: unknown; userName?: unknown }): Settings {
     const current = this.getSettings();
     const next: Settings = {
-      botName: patch.botName === undefined ? current.botName : cleanSettingName(patch.botName) || "Cuadrilla",
+      botName: patch.botName === undefined ? current.botName : cleanSettingName(patch.botName) || DEFAULT_BOT_NAME,
       userName: patch.userName === undefined ? current.userName : cleanSettingName(patch.userName),
     };
     this.#store.setMeta(SETTINGS_META, JSON.stringify(next));
@@ -500,7 +622,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       if (now - scheduledAt > ROUTINE_GRACE_MS) {
         this.#notice(
           routine.agentId,
-          `La rutina «${routine.name}» no corrió ${formatWhen(scheduledAt)} porque Cuadrilla estaba cerrada.${next ? ` La próxima será ${formatWhen(next)}.` : ""}`,
+          `La rutina «${routine.name}» no corrió ${formatWhen(scheduledAt)} porque ClosedBot estaba cerrada.${next ? ` La próxima será ${formatWhen(next)}.` : ""}`,
         );
         continue;
       }
@@ -615,7 +737,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         await client.request(
           "initialize",
           {
-            clientInfo: { name: "cuadrilla", title: "Cuadrilla", version: VERSION },
+            clientInfo: { name: "closedbot", title: "ClosedBot", version: VERSION },
             capabilities: { experimentalApi: true, requestAttestation: false },
           },
           20_000,
@@ -688,7 +810,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const response = await client.request<ThreadResponse>("thread/start", {
       ...this.#threadParams(agent),
       ephemeral: false,
-      serviceName: "cuadrilla",
+      serviceName: "closedbot",
       dynamicTools: [TEAM_DYNAMIC_TOOLS],
     });
     const threadId = response.thread.id;
@@ -940,7 +1062,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   async #handleServerRequest(client: AgentClient, request: AppServerRequest): Promise<void> {
     if (this.#stopping) {
       try {
-        client.respondError(request.id, { code: -32000, message: "Cuadrilla se está cerrando." });
+        client.respondError(request.id, { code: -32000, message: "ClosedBot se está cerrando." });
       } catch {
         // El proceso pudo terminar entre medio.
       }
@@ -988,7 +1110,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
           client.respond(request.id, { currentTimeAt: Math.floor(Date.now() / 1_000) });
           return;
         default:
-          client.respondError(request.id, { code: -32601, message: `Cuadrilla no implementa ${request.method}.` });
+          client.respondError(request.id, { code: -32601, message: `ClosedBot no implementa ${request.method}.` });
       }
     } catch (error) {
       if (request.method === "item/tool/call") {
@@ -1293,6 +1415,11 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   }
 }
 
+function signInProvider(value: unknown): SignInProvider {
+  if (value === "claude" || value === "codex") return value;
+  throw new ServiceError("Ese proveedor no tiene inicio de sesión.", 400);
+}
+
 export function providerLabel(provider: ProviderId): string {
   return provider === "claude" ? "Claude" : provider === "codex" ? "Codex" : "Demo";
 }
@@ -1425,7 +1552,7 @@ export function summarizeActivity(item: Record<string, unknown>): string | null 
       if (getString(item, "server") === TEAM_NAMESPACE) return null;
       return `Usó ${getString(item, "server") ?? "MCP"}.${getString(item, "tool") ?? "herramienta"}`;
     case "dynamicToolCall":
-      // Las herramientas de Cuadrilla ya dejan su propia marca (mensaje enviado, pregunta, rutina).
+      // Las herramientas de ClosedBot ya dejan su propia marca (mensaje enviado, pregunta, rutina).
       if ((getString(item, "namespace") ?? TEAM_NAMESPACE) === TEAM_NAMESPACE) return null;
       return `Usó ${getString(item, "namespace")}.${getString(item, "tool") ?? "herramienta"}`;
     case "webSearch":

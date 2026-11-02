@@ -1,9 +1,12 @@
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, sep } from "node:path";
 import { createApp } from "./app.js";
 import { Auth } from "./auth.js";
-import { loadConfig } from "./config.js";
+import { prepareConfig, setting } from "./config.js";
 import { Store } from "./db.js";
 import { ClaudeAgentClient } from "./providers/claude.js";
+import { claudeEnv, claudeLoginCommand, claudeLogoutCommand, resolveClaudeCli } from "./providers/claude-cli.js";
 import type { AgentClient, ProviderId } from "./providers/client.js";
 import { CodexAppServerClient } from "./providers/codex.js";
 import { DemoAgentClient } from "./providers/demo.js";
@@ -17,7 +20,7 @@ function log(level: "info" | "warn" | "error", message: string): void {
 }
 
 async function main(): Promise<void> {
-  const config = loadConfig();
+  const { config } = prepareConfig(process.env, log);
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   try {
     chmodSync(config.dataDir, 0o700);
@@ -25,24 +28,39 @@ async function main(): Promise<void> {
     // Si la carpeta es de otro usuario, se deja como está.
   }
   // La contraseña no debe llegar al entorno de los agentes.
-  const envPassword = process.env.CUADRILLA_PASSWORD ?? null;
-  delete process.env.CUADRILLA_PASSWORD;
-  delete process.env.CUADRILLA_NEW_PASSWORD;
+  const envPassword = setting(process.env, "PASSWORD") ?? null;
   // Tampoco el token del lanzador de escritorio (con él se abre sesión y se apaga la app).
-  let controlToken = process.env.CUADRILLA_CONTROL_TOKEN?.trim() || null;
-  delete process.env.CUADRILLA_CONTROL_TOKEN;
+  let controlToken = setting(process.env, "CONTROL_TOKEN")?.trim() || null;
+  for (const name of ["PASSWORD", "NEW_PASSWORD", "CONTROL_TOKEN"]) {
+    delete process.env[`CLOSEDBOT_${name}`];
+    delete process.env[`CUADRILLA_${name}`];
+  }
   if (controlToken && controlToken.length < 32) {
-    log("warn", "CUADRILLA_CONTROL_TOKEN es demasiado corto (mínimo 32 caracteres); se ignora.");
+    log("warn", "CLOSEDBOT_CONTROL_TOKEN es demasiado corto (mínimo 32 caracteres); se ignora.");
     controlToken = null;
   }
   const store = new Store(config.dbPath);
+  // Agentes creados cuando los datos estaban en ~/.cuadrilla: su carpeta ahora está en ~/.closedbot.
+  const legacyDir = join(homedir(), ".cuadrilla");
+  if (!config.legacyDataDir && config.dataDir === join(homedir(), ".closedbot") && !existsSync(legacyDir)) {
+    const moved = store.moveWorkspaces(legacyDir + sep, config.dataDir + sep);
+    if (moved) log("info", `Actualicé la carpeta de ${moved} agente(s) a ${config.dataDir}.`);
+  }
   const auth = new Auth({ store, sessionDays: config.sessionDays, envPassword });
   if (!(await auth.isConfigured())) {
-    console.error("Cuadrilla necesita una contraseña antes de arrancar.\nCréala con:  npm run password   (o: npm run password -- --generate)");
+    console.error("ClosedBot necesita una contraseña antes de arrancar.\nCréala con:  npm run password   (o: npm run password -- --generate)");
     store.close();
     process.exitCode = 1;
     return;
   }
+
+  // Claude Code guarda la sesión de los agentes en su propia carpeta: iniciar o cerrar sesión en la app
+  // no toca el Claude Code que se use aparte en este equipo.
+  mkdirSync(config.claudeConfigDir, { recursive: true, mode: 0o700 });
+  const claudeCli = resolveClaudeCli(config.claudeBin);
+  const claudeEnvironment = claudeEnv(envWithout(["OPENAI_API_KEY", "CODEX_API_KEY"]), config.claudeConfigDir);
+  const codexEnvironment = envWithout(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]);
+  if (!claudeCli) log("warn", "No encontré Claude Code (viene con @anthropic-ai/claude-agent-sdk); reinstala las dependencias con «npm ci».");
 
   const createClient = (provider: ProviderId): AgentClient => {
     switch (provider) {
@@ -50,12 +68,12 @@ async function main(): Promise<void> {
         return new ClaudeAgentClient({
           executable: config.claudeBin,
           playwright: config.playwright,
-          env: envWithout(["OPENAI_API_KEY", "CODEX_API_KEY"]),
+          env: claudeEnvironment,
         });
       case "codex":
         return new CodexAppServerClient({
           executable: config.codexBin,
-          env: envWithout(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]),
+          env: codexEnvironment,
         });
       case "demo":
         return new DemoAgentClient();
@@ -68,7 +86,28 @@ async function main(): Promise<void> {
     sharedDir: config.sharedDir,
     maxHops: config.maxHops,
     createClient,
-    detectProviders: () => detectProviders({ enabled: config.detectProviders, codexBin: config.codexBin }),
+    detectProviders: () =>
+      detectProviders({
+        enabled: config.detectProviders,
+        codexBin: config.codexBin,
+        claude: { cli: claudeCli, env: claudeEnvironment, configDir: config.claudeConfigDir },
+      }),
+    // Como en OpenBot: se inicia sesión con la cuenta mediante el propio CLI, que abre el navegador.
+    signInCommands: (provider) => {
+      if (provider === "claude") {
+        if (!claudeCli) return null;
+        return {
+          login: claudeLoginCommand(claudeCli, claudeEnvironment),
+          logout: claudeLogoutCommand(claudeCli, claudeEnvironment),
+          acceptsCode: true,
+        };
+      }
+      return {
+        login: { command: config.codexBin, args: ["login"], env: codexEnvironment },
+        logout: { command: config.codexBin, args: ["logout"], env: codexEnvironment },
+        acceptsCode: false,
+      };
+    },
     log,
   });
   await service.start();
@@ -92,7 +131,7 @@ async function main(): Promise<void> {
   });
   const address = app.server.address();
   const port = typeof address === "object" && address ? address.port : config.port;
-  log("info", `Cuadrilla ${VERSION} escuchando en http://${config.host.includes(":") ? `[${config.host}]` : config.host}:${port}`);
+  log("info", `ClosedBot ${VERSION} escuchando en http://${config.host.includes(":") ? `[${config.host}]` : config.host}:${port}`);
   log("info", `Datos en ${config.dataDir}`);
   if (!["127.0.0.1", "::1", "localhost"].includes(config.host)) {
     log("warn", "Escuchas fuera de localhost: asegúrate de que solo tu red privada (Tailscale) llegue a este puerto.");
@@ -110,7 +149,7 @@ async function main(): Promise<void> {
     await service.stop();
     store.close();
     clearTimeout(force);
-    log("info", "Cuadrilla se cerró.");
+    log("info", "ClosedBot se cerró.");
     // Si algo quedara colgado (un proceso de un proveedor), no impide salir.
     setTimeout(() => process.exit(0), 2_000).unref();
   };

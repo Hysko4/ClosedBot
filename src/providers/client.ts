@@ -1,6 +1,6 @@
 // Derivado de OpenBot v0.1.11 (src/backend/agent-client.ts), Copyright 2026 Norbert Bodziony,
 // con licencia Apache-2.0 (ver licenses/OPENBOT-APACHE-2.0.txt y NOTICE).
-// Modificado para Cuadrilla: proveedores propios y nivel de acceso.
+// Modificado para ClosedBot: proveedores propios y nivel de acceso.
 
 import type { AppServerNotification, AppServerRequest, RequestId, RpcError } from "./protocol.js";
 

@@ -1,6 +1,6 @@
 // Derivado de OpenBot v0.1.11 (src/backend/protocol.ts), Copyright 2026 Norbert Bodziony,
 // con licencia Apache-2.0 (ver licenses/OPENBOT-APACHE-2.0.txt y NOTICE).
-// Modificado para Cuadrilla: tipos reducidos y ayudas adicionales.
+// Modificado para ClosedBot: tipos reducidos y ayudas adicionales.
 
 export type RequestId = string | number;
 

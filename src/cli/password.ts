@@ -2,14 +2,14 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { generatePassword, hashPassword, PASSWORD_META, validateNewPassword } from "../auth.js";
-import { loadConfig } from "../config.js";
+import { prepareConfig, setting } from "../config.js";
 import { Store } from "../db.js";
 
 /**
- * Crea o cambia la contraseña de Cuadrilla y cierra todas las sesiones abiertas.
+ * Crea o cambia la contraseña de ClosedBot y cierra todas las sesiones abiertas.
  *   npm run password                 → la pide dos veces (sin mostrarla)
  *   npm run password -- --generate   → genera una segura y la muestra una sola vez
- *   CUADRILLA_NEW_PASSWORD=… npm run password → sin preguntas (para scripts)
+ *   CLOSEDBOT_NEW_PASSWORD=… npm run password → sin preguntas (para scripts)
  *
  * Para el instalador de escritorio:
  *   --if-missing      no hace nada si ya hay una contraseña
@@ -26,7 +26,8 @@ async function main(): Promise<void> {
   const saveTo = saveIndex >= 0 ? argv[saveIndex + 1] : undefined;
   if (saveIndex >= 0 && (!saveTo || saveTo.startsWith("--"))) throw new Error("Falta el archivo después de --save.");
   if (saveTo && !args.has("--generate")) throw new Error("--save solo se usa junto con --generate.");
-  const config = loadConfig();
+  // Si los datos siguen en la carpeta de cuando la app se llamaba Cuadrilla, se mudan antes de abrirlos.
+  const { config } = prepareConfig(process.env, (_level, message) => console.log(message));
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   try {
     chmodSync(config.dataDir, 0o700);
@@ -35,14 +36,14 @@ async function main(): Promise<void> {
   }
 
   if (args.has("--if-missing")) {
-    if (process.env.CUADRILLA_PASSWORD) {
-      console.log("Cuadrilla usa la contraseña de CUADRILLA_PASSWORD; no cambio nada.");
+    if (setting(process.env, "PASSWORD")) {
+      console.log("ClosedBot usa la contraseña de la variable CLOSEDBOT_PASSWORD; no cambio nada.");
       return;
     }
     const existing = new Store(config.dbPath);
     try {
       if (existing.getMeta(PASSWORD_META)) {
-        console.log("Cuadrilla ya tiene contraseña; no la cambio.");
+        console.log("ClosedBot ya tiene contraseña; no la cambio.");
         return;
       }
     } finally {
@@ -55,8 +56,8 @@ async function main(): Promise<void> {
   if (args.has("--generate")) {
     password = generatePassword();
     show = true;
-  } else if (process.env.CUADRILLA_NEW_PASSWORD) {
-    password = process.env.CUADRILLA_NEW_PASSWORD;
+  } else if (setting(process.env, "NEW_PASSWORD")) {
+    password = setting(process.env, "NEW_PASSWORD") ?? "";
   } else if (process.stdin.isTTY) {
     password = await promptHidden("Nueva contraseña: ");
     const repeat = await promptHidden("Repítela: ");
@@ -79,12 +80,12 @@ async function main(): Promise<void> {
     const file = resolve(saveTo);
     writeFileSync(
       file,
-      `Contraseña de Cuadrilla: ${password}\r\n\r\nLa necesitas para entrar desde otro dispositivo (por ejemplo, el teléfono).\r\nEn este equipo, el acceso directo de Cuadrilla entra solo.\r\n`,
+      `Contraseña de ClosedBot: ${password}\r\n\r\nLa necesitas para entrar desde otro dispositivo (por ejemplo, el teléfono).\r\nEn este equipo, el acceso directo de ClosedBot entra solo.\r\n`,
       { mode: 0o600 },
     );
     console.log(`Creé una contraseña nueva y la guardé en ${file}.`);
   } else if (show) {
-    console.log(`\nTu contraseña de Cuadrilla es:\n\n    ${password}\n\nGuárdala en tu gestor de contraseñas: no se volverá a mostrar.`);
+    console.log(`\nTu contraseña de ClosedBot es:\n\n    ${password}\n\nGuárdala en tu gestor de contraseñas: no se volverá a mostrar.`);
   }
   console.log(`Contraseña guardada en ${config.dbPath}. Se cerraron las sesiones abiertas.`);
 }

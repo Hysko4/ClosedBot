@@ -24,4 +24,4 @@
 ## Herramientas externas (no incluidas)
 
 - `codex` (OpenAI Codex CLI) se instala aparte con `npm install -g @openai/codex`.
-- `@playwright/mcp` se descarga con `npx` solo si activas `CUADRILLA_PLAYWRIGHT=1`.
+- `@playwright/mcp` se descarga con `npx` solo si activas `CLOSEDBOT_PLAYWRIGHT=1`.

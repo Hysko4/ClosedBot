@@ -34,7 +34,7 @@ test("preguntas: el agente pregunta con opciones y la respuesta le llega como me
     assert.equal(
       h.service.listMessages(ana.id).some((message) => message.role === "activity"),
       false,
-      "las herramientas de Cuadrilla no dejan líneas de actividad repetidas",
+      "las herramientas de ClosedBot no dejan líneas de actividad repetidas",
     );
 
     assert.throws(() => h.service.answerDecision(ana.id, decision.id, 5), (error: unknown) => error instanceof ServiceError && error.status === 400);
@@ -166,10 +166,10 @@ test("rutinas: validan el horario, tienen tope y se borran con su agente", async
 test("ajustes: nombres del asistente y del usuario", async () => {
   const h = await createHarness();
   try {
-    assert.deepEqual(h.service.getSettings(), { botName: "Cuadrilla", userName: "" });
-    assert.deepEqual(h.service.updateSettings({ userName: "  Jonathan  " }), { botName: "Cuadrilla", userName: "Jonathan" });
+    assert.deepEqual(h.service.getSettings(), { botName: "ClosedBot", userName: "" });
+    assert.deepEqual(h.service.updateSettings({ userName: "  Jonathan  " }), { botName: "ClosedBot", userName: "Jonathan" });
     assert.deepEqual(h.service.updateSettings({ botName: "Mi Bot" }), { botName: "Mi Bot", userName: "Jonathan" });
-    assert.equal(h.service.updateSettings({ botName: "" }).botName, "Cuadrilla");
+    assert.equal(h.service.updateSettings({ botName: "" }).botName, "ClosedBot");
     assert.throws(() => h.service.updateSettings({ userName: "x".repeat(41) }), /40 caracteres/);
     assert.ok(h.events.some((event) => event.type === "settings"));
   } finally {
@@ -203,7 +203,7 @@ test("adjuntos: se guardan con un nombre seguro dentro de la carpeta del agente"
 test("Store: una base de la versión 0.1 se actualiza sin perder datos", () => {
   const temp = tempDir();
   try {
-    const path = join(temp.path, "cuadrilla.db");
+    const path = join(temp.path, "closedbot.db");
     const old = new DatabaseSync(path);
     old.exec(`
       CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);

@@ -234,6 +234,17 @@ export class Store {
     }
   }
 
+  /**
+   * Cambia la carpeta de los agentes que estaban en `fromPrefix` (al renombrar la carpeta de datos).
+   * Solo toca las rutas que empiezan así; devuelve cuántas cambió.
+   */
+  moveWorkspaces(fromPrefix: string, toPrefix: string): number {
+    const result = this.#db
+      .prepare("UPDATE agents SET workspace = ? || substr(workspace, ?) WHERE substr(workspace, 1, ?) = ?")
+      .run(toPrefix, fromPrefix.length + 1, fromPrefix.length, fromPrefix);
+    return Number(result.changes);
+  }
+
   // ---------- meta ----------
 
   getMeta(key: string): string | null {

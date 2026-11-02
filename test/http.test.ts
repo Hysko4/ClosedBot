@@ -73,7 +73,7 @@ test("HTTP: archivos estáticos con cabeceras de seguridad y sin salir de public
     assert.match(index.headers.get("content-type") ?? "", /text\/html/);
     assert.match(index.headers.get("content-security-policy") ?? "", /script-src 'self'/);
     assert.equal(index.headers.get("x-frame-options"), "DENY");
-    assert.match(await index.text(), /Cuadrilla/);
+    assert.match(await index.text(), /ClosedBot/);
     const manifest = await fetch(`${s.base}/manifest.webmanifest`);
     assert.match(manifest.headers.get("content-type") ?? "", /manifest\+json/);
     for (const path of ["/..%2fpackage.json", "/%2e%2e/%2e%2e/etc/passwd", "/icons/../../package.json"]) {
@@ -355,7 +355,7 @@ test("HTTP: preguntas, rutinas, ajustes, adjuntos y leídos", async () => {
     assert.equal((await s.call("/api/routines")).json?.routines.length, 1);
     const state = await s.call("/api/state");
     assert.equal(state.json?.routines.length, 1);
-    assert.deepEqual(state.json?.settings, { botName: "Cuadrilla", userName: "" });
+    assert.deepEqual(state.json?.settings, { botName: "ClosedBot", userName: "" });
     const paused = await s.call(`/api/routines/${routineId}`, { method: "PATCH", body: { enabled: false } });
     assert.equal(paused.json?.routine.enabled, false);
     const ran = await s.call(`/api/routines/${routineId}/run`, { method: "POST" });
@@ -365,7 +365,7 @@ test("HTTP: preguntas, rutinas, ajustes, adjuntos y leídos", async () => {
 
     // Ajustes.
     const settings = await s.call("/api/settings", { method: "PATCH", body: { userName: "Jonathan" } });
-    assert.deepEqual(settings.json?.settings, { botName: "Cuadrilla", userName: "Jonathan" });
+    assert.deepEqual(settings.json?.settings, { botName: "ClosedBot", userName: "Jonathan" });
     assert.equal((await s.call("/api/settings", { method: "PATCH", body: { botName: 5 } })).status, 400);
 
     // Adjuntos.
@@ -383,6 +383,32 @@ test("HTTP: preguntas, rutinas, ajustes, adjuntos y leídos", async () => {
       headers: { "content-type": "application/octet-stream" },
     });
     assert.equal(missing.status, 404);
+  } finally {
+    await s.close();
+  }
+});
+
+test("HTTP: inicio de sesión de los proveedores, con sesión y cabecera CSRF", async () => {
+  const s = await startServer();
+  try {
+    const anonymous = await s.call("/api/providers/claude/login", { method: "POST", auth: false });
+    assert.equal(anonymous.status, 401);
+    await s.login();
+    const noHeader = await s.call("/api/providers/claude/login", { method: "POST", headers: { "x-cuadrilla": "" } });
+    assert.equal(noHeader.status, 403);
+    const demo = await s.call("/api/providers/demo/login", { method: "POST" });
+    assert.equal(demo.status, 400);
+    // El servicio de pruebas no sabe iniciar sesión: lo dice en vez de fallar.
+    const claude = await s.call("/api/providers/claude/login", { method: "POST" });
+    assert.equal(claude.status, 409);
+    assert.match(String(claude.json?.error), /no se puede iniciar sesión en Claude/);
+    const code = await s.call("/api/providers/claude/login/code", { method: "POST", body: { code: "codigo#estado" } });
+    assert.equal(code.status, 409);
+    const cancel = await s.call("/api/providers/claude/login/cancel", { method: "POST" });
+    assert.equal(cancel.status, 200);
+    assert.ok(Array.isArray(cancel.json?.providers));
+    const logout = await s.call("/api/providers/codex/logout", { method: "POST" });
+    assert.equal(logout.status, 409);
   } finally {
     await s.close();
   }

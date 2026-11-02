@@ -1466,6 +1466,81 @@ svg {
   color: var(--muted);
 }
 
+/* Inicio de sesión con la cuenta del proveedor */
+.signin {
+  margin-top: 10px;
+  display: grid;
+  /* Sin esto la columna crece con el ancho natural del campo y en el celular se sale de la tarjeta. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.signin-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.signin-text a,
+.connect-callout a {
+  color: var(--link);
+}
+
+.signin-code {
+  display: flex;
+  gap: 8px;
+}
+
+.signin-code input {
+  flex: 1;
+  min-width: 0;
+  background: #121212;
+  border: 1px solid #2c2c2c;
+  border-radius: 10px;
+  padding: 7px 10px;
+  font-size: 14px;
+  font-family: var(--mono);
+  outline: none;
+}
+
+.signin-code input::placeholder {
+  font-family: var(--font);
+}
+
+.signin-code input:focus {
+  border-color: var(--accent);
+}
+
+.signin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.button.small {
+  min-height: 32px;
+  padding: 6px 12px;
+  font-size: 13px;
+  border-radius: 10px;
+}
+
+.connect-callout {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid #2f2647;
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+}
+
+.connect-callout p {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-2);
+}
+
 .paths {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -1788,6 +1863,11 @@ svg {
 
   .dialog-footer:has(#logout) {
     flex-wrap: wrap;
+  }
+
+  /* 16 px: así el iPhone no acerca la pantalla al pegar el código. */
+  .signin-code input {
+    font-size: 16px;
   }
 
   .toast {

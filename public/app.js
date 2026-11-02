@@ -1,4 +1,4 @@
-// Cuadrilla — interfaz web (sin dependencias ni paso de compilación).
+// ClosedBot — interfaz web (sin dependencias ni paso de compilación).
 
 const $ = (selector) => document.querySelector(selector);
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -10,7 +10,7 @@ const state = {
   agents: [],
   providers: [],
   routines: [],
-  settings: { botName: "Cuadrilla", userName: "" },
+  settings: { botName: "ClosedBot", userName: "" },
   paths: null,
   version: "",
   maxHops: 0,
@@ -38,6 +38,8 @@ let editingAgentId = null;
 let routinesFilter = null;
 let recognition = null;
 let dictation = null; // { mode: "dictate" | "voice", base, final, agentId, cancelled }
+/** Código de inicio de sesión que se está escribiendo, por proveedor (sobrevive a los repintados). */
+const signInCodes = new Map();
 
 const coarsePointer = window.matchMedia("(pointer: coarse)").matches;
 
@@ -134,7 +136,7 @@ async function boot() {
     } catch (error) {
       if (error.status !== 401) {
         showLogin();
-        $("#login-error").textContent = `No se pudo cargar Cuadrilla: ${error.message}`;
+        $("#login-error").textContent = `No se pudo cargar ClosedBot: ${error.message}`;
       }
     }
   } else {
@@ -188,6 +190,7 @@ async function enterApp() {
   $("#app").hidden = false;
   renderIdentity();
   renderSidebar();
+  renderProviders();
   connectEvents();
   await route();
 }
@@ -255,6 +258,7 @@ function handleEvent(event) {
       if (event.settings) state.settings = event.settings;
       renderIdentity();
       renderSidebar();
+      renderProviders();
       renderRoutinesIfOpen();
       // Tras reconectar pudimos perder eventos: recargamos la conversación abierta.
       if (state.currentId) void loadConversation(state.currentId, { keepScroll: true });
@@ -486,7 +490,7 @@ function icon(name) {
 
 function renderIdentity() {
   const { botName, userName } = state.settings;
-  $("#bot-name").textContent = botName || "Cuadrilla";
+  $("#bot-name").textContent = botName || "ClosedBot";
   const name = userName?.trim() || "Tú";
   $("#user-name").textContent = name;
   $("#user-avatar").textContent = name.charAt(0).toUpperCase();
@@ -592,7 +596,7 @@ function agentRow(agent) {
 
 function updateTitle() {
   const count = state.agents.filter(isUnread).length;
-  document.title = count ? `(${count}) Cuadrilla` : "Cuadrilla";
+  document.title = count ? `(${count}) ClosedBot` : "ClosedBot";
 }
 
 function stateLabel(agent) {
@@ -1856,7 +1860,7 @@ function openSettings({ focusName = false } = {}) {
   renderProviders();
   const names = $("#names-form");
   names.elements.userName.value = state.settings.userName ?? "";
-  names.elements.botName.value = state.settings.botName === "Cuadrilla" ? "" : (state.settings.botName ?? "");
+  names.elements.botName.value = state.settings.botName === "ClosedBot" ? "" : (state.settings.botName ?? "");
   const paths = $("#paths");
   paths.replaceChildren();
   for (const [label, value] of [
@@ -1869,7 +1873,7 @@ function openSettings({ focusName = false } = {}) {
     dd.textContent = value ?? "—";
     paths.append(dt, dd);
   }
-  $("#version").textContent = `Cuadrilla ${state.version} · límite de ${state.maxHops} reenvíos seguidos entre agentes.`;
+  $("#version").textContent = `ClosedBot ${state.version} · límite de ${state.maxHops} reenvíos seguidos entre agentes.`;
   openDialog($("#settings-dialog"));
   if (focusName) names.elements.userName.focus();
 }
@@ -1895,8 +1899,11 @@ async function saveNames(event) {
 }
 
 function renderProviders() {
+  renderConnectCallout();
   const list = $("#provider-list");
   if (!list) return;
+  // Un evento puede repintar la lista mientras se escribe el código: se conserva el foco.
+  const focusKey = list.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
   list.replaceChildren();
   for (const provider of state.providers) {
     const item = document.createElement("li");
@@ -1907,7 +1914,10 @@ function renderProviders() {
     name.textContent = provider.label;
     const status = document.createElement("span");
     status.className = "state";
-    if (!provider.available) {
+    if (provider.signIn) {
+      status.textContent = "Esperando al navegador…";
+      status.dataset.tone = "warn";
+    } else if (!provider.available) {
       status.textContent = "No disponible";
       status.dataset.tone = "bad";
     } else if (provider.loggedIn === false) {
@@ -1924,9 +1934,182 @@ function renderProviders() {
     const detail = document.createElement("div");
     detail.className = "detail";
     detail.textContent = provider.detail;
-    item.append(title, detail);
+    // Mientras se espera al navegador, las instrucciones del inicio de sesión reemplazan al «Sin sesión…».
+    if (provider.signIn) item.append(title);
+    else item.append(title, detail);
+    const signIn = renderSignIn(provider);
+    if (signIn) item.append(signIn);
     list.append(item);
   }
+  if (focusKey) list.querySelector(`[data-focus-key="${focusKey}"]`)?.focus();
+}
+
+/** Botones para iniciar o cerrar sesión con la cuenta del proveedor (lo hace su propio CLI, como en OpenBot). */
+function renderSignIn(provider) {
+  if (!provider.canSignIn && !provider.signIn) return null;
+  const box = document.createElement("div");
+  box.className = "signin";
+  const pending = provider.signIn;
+  if (pending) {
+    const text = document.createElement("p");
+    text.className = "signin-text";
+    text.textContent = isThisComputer()
+      ? "Abrí el navegador para que entres con tu cuenta. Cuando termines, vuelve aquí: se conecta solo."
+      : "Abrí el navegador en el equipo donde corre la app: entra allí con tu cuenta, o usa el enlace de abajo.";
+    box.append(text);
+    if (pending.url) {
+      const help = document.createElement("p");
+      help.className = "signin-text muted";
+      const link = document.createElement("a");
+      link.href = pending.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = "abre la página de inicio de sesión";
+      help.append("¿No se abrió? ", link, pending.acceptsCode ? " y pega aquí el código que te muestre." : ".");
+      box.append(help);
+      if (pending.acceptsCode) box.append(signInCodeForm(provider));
+    }
+    const cancel = smallButton("Cancelar", "ghost");
+    cancel.addEventListener("click", () => void cancelSignIn(provider.id, cancel));
+    box.append(actionRow(cancel));
+  } else if (provider.loggedIn === true) {
+    const logout = smallButton(`Cerrar sesión de ${provider.label}`, "danger-soft");
+    logout.addEventListener("click", () => void signOutProvider(provider, logout));
+    box.append(actionRow(logout));
+  } else {
+    const login = smallButton(signInLabel(provider), "primary");
+    login.dataset.focusKey = `login-${provider.id}`;
+    login.addEventListener("click", () => void startSignIn(provider.id, login));
+    box.append(actionRow(login));
+  }
+  return box;
+}
+
+function signInCodeForm(provider) {
+  const form = document.createElement("form");
+  form.className = "signin-code";
+  form.noValidate = true;
+  const input = document.createElement("input");
+  input.name = "code";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.placeholder = "Pega el código";
+  input.setAttribute("aria-label", "Código de inicio de sesión");
+  input.dataset.focusKey = `code-${provider.id}`;
+  input.value = signInCodes.get(provider.id) ?? "";
+  input.addEventListener("input", () => signInCodes.set(provider.id, input.value));
+  const send = smallButton("Enviar código", "ghost");
+  send.type = "submit";
+  form.append(input, send);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void submitSignInCode(provider.id, input.value, send);
+  });
+  return form;
+}
+
+function smallButton(label, tone) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `button ${tone} small`;
+  button.textContent = label;
+  return button;
+}
+
+function actionRow(...buttons) {
+  const row = document.createElement("div");
+  row.className = "signin-actions";
+  row.append(...buttons);
+  return row;
+}
+
+function signInLabel(provider) {
+  return provider.id === "codex" ? "Iniciar sesión con ChatGPT" : `Iniciar sesión con ${provider.label}`;
+}
+
+/** El navegador que abre el inicio de sesión es el del equipo donde corre la app. */
+function isThisComputer() {
+  return ["127.0.0.1", "localhost", "[::1]", "::1"].includes(location.hostname);
+}
+
+async function startSignIn(providerId, button) {
+  if (button) button.disabled = true;
+  try {
+    const data = await api(`/api/providers/${encodeURIComponent(providerId)}/login`, { method: "POST" });
+    state.providers = data.providers;
+    signInCodes.delete(providerId);
+    renderProviders();
+  } catch (error) {
+    showToast(error.message, "error");
+    if (button) button.disabled = false;
+  }
+}
+
+async function submitSignInCode(providerId, code, button) {
+  button.disabled = true;
+  try {
+    const data = await api(`/api/providers/${encodeURIComponent(providerId)}/login/code`, { method: "POST", body: { code } });
+    state.providers = data.providers;
+    signInCodes.delete(providerId);
+    showToast("Código enviado. Terminando de conectar…");
+    renderProviders();
+  } catch (error) {
+    showToast(error.message, "error");
+    button.disabled = false;
+  }
+}
+
+async function cancelSignIn(providerId, button) {
+  button.disabled = true;
+  try {
+    const data = await api(`/api/providers/${encodeURIComponent(providerId)}/login/cancel`, { method: "POST" });
+    state.providers = data.providers;
+    signInCodes.delete(providerId);
+    renderProviders();
+  } catch (error) {
+    showToast(error.message, "error");
+    button.disabled = false;
+  }
+}
+
+async function signOutProvider(provider, button) {
+  const note =
+    provider.id === "claude"
+      ? "Tus agentes de Claude no podrán trabajar hasta que vuelvas a iniciar sesión. El Claude Code que uses aparte en este equipo no cambia."
+      : `Tus agentes de ${provider.label} no podrán trabajar hasta que vuelvas a iniciar sesión.`;
+  if (!(await confirmAction(`¿Cerrar la sesión de ${provider.label}?`, note, "Cerrar sesión"))) return;
+  button.disabled = true;
+  try {
+    const data = await api(`/api/providers/${encodeURIComponent(provider.id)}/logout`, { method: "POST" });
+    state.providers = data.providers;
+    state.models.delete(provider.id);
+    renderProviders();
+    showToast(`Cerraste la sesión de ${provider.label}.`);
+  } catch (error) {
+    showToast(error.message, "error");
+    button.disabled = false;
+  }
+}
+
+/** En la pantalla de inicio: invita a conectar Claude mientras ningún proveedor con IA esté listo. */
+function renderConnectCallout() {
+  const box = $("#connect-callout");
+  if (!box) return;
+  const claude = state.providers.find((provider) => provider.id === "claude");
+  const ready = state.providers.some((provider) => provider.id !== "demo" && provider.available && provider.loggedIn === true);
+  box.hidden = !claude?.canSignIn || ready || claude.loggedIn !== false;
+  if (box.hidden) return;
+  const waiting = Boolean(claude.signIn);
+  $("#connect-text").textContent = waiting
+    ? "Esperando que entres con tu cuenta de Claude en el navegador…"
+    : "Para que tus agentes usen IA, conecta tu cuenta de Claude. Se abre el navegador y entras con tu cuenta, sin claves.";
+  $("#connect-claude").textContent = waiting ? "Ver el inicio de sesión" : "Iniciar sesión con Claude";
+}
+
+async function connectClaude() {
+  const claude = state.providers.find((provider) => provider.id === "claude");
+  openSettings();
+  if (!claude?.signIn) await startSignIn("claude", null);
 }
 
 async function refreshProviders() {
@@ -1998,6 +2181,7 @@ function bindUi() {
   $("#settings-close").addEventListener("click", () => closeDialog($("#settings-dialog")));
   $("#names-form").addEventListener("submit", saveNames);
   $("#refresh-providers").addEventListener("click", refreshProviders);
+  $("#connect-claude").addEventListener("click", () => void connectClaude());
   $("#logout").addEventListener("click", logout);
   $("#back").addEventListener("click", goBack);
   $("#agent-menu-button").addEventListener("click", (event) => {

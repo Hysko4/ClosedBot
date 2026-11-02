@@ -1,12 +1,12 @@
 /**
- * Herramientas de Cuadrilla que ve cada agente: compañeros, preguntas al usuario y rutinas.
+ * Herramientas de ClosedBot que ve cada agente: compañeros, preguntas al usuario y rutinas.
  * Codex las recibe como herramientas dinámicas (`dynamicTools` en thread/start) y
  * Claude como un servidor MCP en proceso; ambos terminan en una petición `item/tool/call`.
  */
 
 import { MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES } from "./schedule.js";
 
-export const TEAM_NAMESPACE = "cuadrilla";
+export const TEAM_NAMESPACE = "closedbot";
 export const TOOL_LIST_AGENTS = "list_agents";
 export const TOOL_SEND_MESSAGE = "send_message";
 export const TOOL_ASK_USER = "ask_user";
@@ -40,7 +40,7 @@ export const QUESTION_LIMITS = { question: 300, label: 80, detail: 200, minOptio
 export const TEAM_DYNAMIC_TOOLS = {
   type: "namespace",
   name: TEAM_NAMESPACE,
-  description: "Habla con tus compañeros de Cuadrilla, pregúntale al usuario y programa rutinas.",
+  description: "Habla con tus compañeros de ClosedBot, pregúntale al usuario y programa rutinas.",
   tools: [
     {
       type: "function",

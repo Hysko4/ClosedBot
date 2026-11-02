@@ -1,6 +1,6 @@
-// Cuadrilla para Windows: hace que Cuadrilla se use como una app de escritorio.
+// ClosedBot para Windows: hace que ClosedBot se use como una app de escritorio.
 //
-//   - Arranca el servidor de Cuadrilla sin ventana de consola.
+//   - Arranca el servidor de ClosedBot sin ventana de consola.
 //   - Abre la interfaz en su propia ventana (Edge o Chrome en modo app, con un perfil aparte),
 //     entrando sola con un código de un solo uso.
 //   - Deja un icono en la bandeja para abrirla, iniciarla con Windows, ver el registro o salir.
@@ -9,11 +9,14 @@
 // Lo compila Instalar-escritorio.cmd en el propio equipo, con el compilador de C# que trae
 // .NET Framework 4. Por eso está escrito en C# 5: es lo que entiende ese compilador.
 //
-//   Cuadrilla.exe               abre Cuadrilla (o trae su ventana al frente)
-//   Cuadrilla.exe /sinventana   arranca solo en la bandeja (lo usa el inicio con Windows)
-//   Cuadrilla.exe /salir        cierra la Cuadrilla abierta y espera a que termine
-//   Cuadrilla.exe /instalar     crea los accesos directos del escritorio y del menú Inicio
-//   Cuadrilla.exe /desinstalar  quita los accesos directos
+//   ClosedBot.exe               abre ClosedBot (o trae su ventana al frente)
+//   ClosedBot.exe /sinventana   arranca solo en la bandeja (lo usa el inicio con Windows)
+//   ClosedBot.exe /salir        cierra la ClosedBot abierta y espera a que termine
+//   ClosedBot.exe /instalar     crea los accesos directos del escritorio y del menú Inicio
+//   ClosedBot.exe /desinstalar  quita los accesos directos
+//
+// Hasta la versión 0.2 la app se llamaba Cuadrilla (Cuadrilla.exe). Este programa cierra esa versión
+// si sigue abierta y, al instalar, reemplaza sus accesos directos y borra su carpeta local.
 
 using System;
 using System.Collections.Generic;
@@ -34,19 +37,22 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-[assembly: AssemblyTitle("Cuadrilla")]
-[assembly: AssemblyProduct("Cuadrilla")]
+[assembly: AssemblyTitle("ClosedBot")]
+[assembly: AssemblyProduct("ClosedBot")]
 [assembly: AssemblyDescription("Tu equipo personal de agentes de IA")]
-[assembly: AssemblyVersion("0.2.0.0")]
-[assembly: AssemblyFileVersion("0.2.0.0")]
+[assembly: AssemblyVersion("0.3.0.0")]
+[assembly: AssemblyFileVersion("0.3.0.0")]
 
-namespace CuadrillaEscritorio
+namespace ClosedBotEscritorio
 {
     static class Program
     {
-        const string MutexName = @"Local\Cuadrilla-Escritorio";
-        const string OpenSignalName = @"Local\Cuadrilla-Abrir";
-        const string QuitSignalName = @"Local\Cuadrilla-Salir";
+        const string MutexName = @"Local\ClosedBot-Escritorio";
+        const string OpenSignalName = @"Local\ClosedBot-Abrir";
+        const string QuitSignalName = @"Local\ClosedBot-Salir";
+        // Los del lanzador de antes del cambio de nombre (Cuadrilla.exe, hasta la 0.2).
+        const string LegacyMutexName = @"Local\Cuadrilla-Escritorio";
+        const string LegacyQuitSignalName = @"Local\Cuadrilla-Salir";
 
         [STAThread]
         static int Main(string[] args)
@@ -75,7 +81,7 @@ namespace CuadrillaEscritorio
             }
             catch (Exception error)
             {
-                Dialogs.Warn(error is UserError ? error.Message : "No pude leer la instalación de Cuadrilla.\n\n" + error.Message);
+                Dialogs.Warn(error is UserError ? error.Message : "No pude leer la instalación de ClosedBot.\n\n" + error.Message);
                 return 1;
             }
 
@@ -83,13 +89,18 @@ namespace CuadrillaEscritorio
             {
                 try
                 {
-                    if (install) Shortcuts.Install(paths);
+                    if (install)
+                    {
+                        CloseLegacy();
+                        Shortcuts.Install(paths);
+                        Legacy.CleanLocalDir(paths);
+                    }
                     else Shortcuts.Uninstall();
                     return 0;
                 }
                 catch (Exception error)
                 {
-                    Dialogs.Warn("No pude " + (install ? "crear" : "quitar") + " los accesos directos de Cuadrilla.\n\n" + error.Message);
+                    Dialogs.Warn("No pude " + (install ? "crear" : "quitar") + " los accesos directos de ClosedBot.\n\n" + error.Message);
                     return 1;
                 }
             }
@@ -109,7 +120,9 @@ namespace CuadrillaEscritorio
                     }
                     try
                     {
-                        if (quit) return 0;
+                        // La versión con el nombre anterior usaría el mismo puerto: se cierra antes.
+                        bool legacyClosed = CloseLegacy();
+                        if (quit) return legacyClosed ? 0 : 2;
                         using (var app = new TrayApp(paths, !hidden, openSignal, quitSignal))
                         {
                             Application.ThreadException += delegate(object sender, ThreadExceptionEventArgs e) { app.Unexpected(e.Exception); };
@@ -119,7 +132,7 @@ namespace CuadrillaEscritorio
                     }
                     catch (Exception error)
                     {
-                        Dialogs.Warn("Cuadrilla se cerró por un error inesperado.\n\n" + error.Message);
+                        Dialogs.Warn("ClosedBot se cerró por un error inesperado.\n\n" + error.Message);
                         return 1;
                     }
                     finally
@@ -130,7 +143,7 @@ namespace CuadrillaEscritorio
             }
         }
 
-        /// Otra Cuadrilla ya está en la bandeja: trae su ventana al frente o le pide que la abra.
+        /// Otra ClosedBot ya está en la bandeja: trae su ventana al frente o le pide que la abra.
         static void WakeRunning(Paths paths, EventWaitHandle openSignal)
         {
             Native.AllowSetForegroundWindow(Native.ASFW_ANY);
@@ -139,9 +152,44 @@ namespace CuadrillaEscritorio
             else openSignal.Set();
         }
 
-        /// /salir: pide a la Cuadrilla abierta que se cierre y espera a que suelte el mutex.
+        /// Cierra Cuadrilla.exe (esta app antes del cambio de nombre) si está abierto y espera a que termine.
+        /// Devuelve false si no terminó a tiempo.
+        static bool CloseLegacy()
+        {
+            try
+            {
+                EventWaitHandle signal;
+                if (!EventWaitHandle.TryOpenExisting(LegacyQuitSignalName, out signal)) return true;
+                using (signal)
+                {
+                    Mutex legacy;
+                    if (!Mutex.TryOpenExisting(LegacyMutexName, out legacy)) return true;
+                    using (legacy)
+                    {
+                        signal.Set();
+                        try
+                        {
+                            if (!legacy.WaitOne(TimeSpan.FromSeconds(40))) return false;
+                        }
+                        catch (AbandonedMutexException)
+                        {
+                            // Terminó sin soltarlo: igual quedó libre y ahora es nuestro.
+                        }
+                        legacy.ReleaseMutex();
+                        return true;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                return true;
+            }
+        }
+
+        /// /salir: pide a la ClosedBot abierta que se cierre y espera a que suelte el mutex.
         static int WaitUntilClosed(Mutex mutex, EventWaitHandle quitSignal)
         {
+            CloseLegacy();
             quitSignal.Set();
             try
             {
@@ -175,6 +223,8 @@ namespace CuadrillaEscritorio
         public readonly string ProfileDir;
         public readonly string TipMarker;
         public readonly string StartupMarker;
+        /// Carpeta local de la versión con el nombre anterior (%LOCALAPPDATA%\Cuadrilla).
+        public readonly string LegacyLocalDir;
         public readonly int Port;
         public readonly string BaseUrl;
 
@@ -183,16 +233,17 @@ namespace CuadrillaEscritorio
             Exe = Application.ExecutablePath;
             AppDir = FindAppDir(Path.GetDirectoryName(Exe));
             if (AppDir == null)
-                throw new UserError("No encuentro los archivos de Cuadrilla junto a este programa:\n" + Exe + "\n\nVuelve a abrir Instalar-escritorio.cmd en la carpeta de Cuadrilla.");
+                throw new UserError("No encuentro los archivos de ClosedBot junto a este programa:\n" + Exe + "\n\nVuelve a abrir Instalar-escritorio.cmd en la carpeta de ClosedBot.");
             ServerScript = Path.Combine(AppDir, "dist", "src", "server.js");
-            IconFile = Path.Combine(AppDir, "public", "icons", "cuadrilla.ico");
+            IconFile = Path.Combine(AppDir, "public", "icons", "closedbot.ico");
             Version = ReadVersion(Path.Combine(AppDir, "package.json"));
-            LocalDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Cuadrilla");
+            LocalDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClosedBot");
             Directory.CreateDirectory(LocalDir);
-            LogFile = Path.Combine(LocalDir, "cuadrilla.log");
+            LogFile = Path.Combine(LocalDir, "closedbot.log");
             ProfileDir = Path.Combine(LocalDir, "ventana");
             TipMarker = Path.Combine(LocalDir, "aviso-bandeja.txt");
             StartupMarker = Path.Combine(LocalDir, "inicio-con-windows.txt");
+            LegacyLocalDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Cuadrilla");
             Port = ReadPort();
             BaseUrl = "http://127.0.0.1:" + Port.ToString(CultureInfo.InvariantCulture);
         }
@@ -203,7 +254,7 @@ namespace CuadrillaEscritorio
             for (int level = 0; level < 4 && dir != null; level++, dir = dir.Parent)
             {
                 string package = Path.Combine(dir.FullName, "package.json");
-                if (File.Exists(package) && Regex.IsMatch(File.ReadAllText(package), "\"name\"\\s*:\\s*\"cuadrilla\"")) return dir.FullName;
+                if (File.Exists(package) && Regex.IsMatch(File.ReadAllText(package), "\"name\"\\s*:\\s*\"(closedbot|cuadrilla)\"")) return dir.FullName;
             }
             return null;
         }
@@ -217,13 +268,14 @@ namespace CuadrillaEscritorio
         static int ReadPort()
         {
             int port;
-            string raw = Environment.GetEnvironmentVariable("CUADRILLA_PORT");
+            string raw = Environment.GetEnvironmentVariable("CLOSEDBOT_PORT");
+            if (string.IsNullOrEmpty(raw)) raw = Environment.GetEnvironmentVariable("CUADRILLA_PORT");
             if (!string.IsNullOrEmpty(raw) && int.TryParse(raw.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out port) && port > 0 && port < 65536) return port;
             return 8787;
         }
     }
 
-    /// Registro compartido por el lanzador y el servidor, en %LOCALAPPDATA%\Cuadrilla\cuadrilla.log.
+    /// Registro compartido por el lanzador y el servidor, en %LOCALAPPDATA%\ClosedBot\closedbot.log.
     sealed class Log : IDisposable
     {
         const long MaxBytes = 5L * 1024 * 1024;
@@ -237,7 +289,7 @@ namespace CuadrillaEscritorio
                 FileInfo info = new FileInfo(path);
                 if (info.Exists && info.Length > MaxBytes)
                 {
-                    string previous = Path.Combine(info.DirectoryName, "cuadrilla.anterior.log");
+                    string previous = Path.Combine(info.DirectoryName, "closedbot.anterior.log");
                     if (File.Exists(previous)) File.Delete(previous);
                     File.Move(path, previous);
                 }
@@ -295,7 +347,7 @@ namespace CuadrillaEscritorio
 
     static class Http
     {
-        /// Petición a Cuadrilla en este equipo, sin proxy. Devuelve el cuerpo o null si no hubo respuesta.
+        /// Petición a ClosedBot en este equipo, sin proxy. Devuelve el cuerpo o null si no hubo respuesta.
         public static string Send(Paths paths, string method, string path, string controlToken, int timeoutMs, out int status)
         {
             status = 0;
@@ -341,7 +393,7 @@ namespace CuadrillaEscritorio
         }
     }
 
-    /// El servidor de Cuadrilla (node dist\src\server.js), sin ventana y atado a este programa.
+    /// El servidor de ClosedBot (node dist\src\server.js), sin ventana y atado a este programa.
     sealed class Server
     {
         readonly Paths paths;
@@ -365,7 +417,7 @@ namespace CuadrillaEscritorio
             get { lock (gate) return process != null; }
         }
 
-        /// Se está usando una Cuadrilla que arrancó otro (por ejemplo, con npm start).
+        /// Se está usando una ClosedBot que arrancó otro (por ejemplo, con npm start).
         public bool External
         {
             get { lock (gate) return external; }
@@ -395,7 +447,7 @@ namespace CuadrillaEscritorio
             }
         }
 
-        /// Versión de la Cuadrilla que responde en el puerto, o null si no responde ninguna.
+        /// Versión de la ClosedBot que responde en el puerto, o null si no responde ninguna.
         public string RunningVersion()
         {
             int status;
@@ -405,7 +457,7 @@ namespace CuadrillaEscritorio
             return match.Success ? match.Groups[1].Value : null;
         }
 
-        /// Deja Cuadrilla respondiendo. Devuelve null si quedó lista, o el problema explicado.
+        /// Deja ClosedBot respondiendo. Devuelve null si quedó lista, o el problema explicado.
         public string Ensure()
         {
             if (Owned && !HasExited) return null;
@@ -415,10 +467,10 @@ namespace CuadrillaEscritorio
             if (version != null)
             {
                 if (version != paths.Version)
-                    return "Ya hay otra Cuadrilla abierta en este equipo (versión " + version + "; esta es la " + paths.Version + ").\n\n" +
-                        "Ciérrala y vuelve a abrir Cuadrilla. Si la abriste con «Iniciar Cuadrilla.cmd», cierra esa ventana negra.";
+                    return "Ya hay otra ClosedBot abierta en este equipo (versión " + version + "; esta es la " + paths.Version + ").\n\n" +
+                        "Ciérrala y vuelve a abrir ClosedBot. Si la abriste desde una ventana negra (npm start), cierra esa ventana.";
                 lock (gate) external = true;
-                log.Info("Ya había una Cuadrilla " + version + " en " + paths.BaseUrl + "; uso esa.");
+                log.Info("Ya había una ClosedBot " + version + " en " + paths.BaseUrl + "; uso esa.");
                 return null;
             }
             lock (gate) external = false;
@@ -435,9 +487,9 @@ namespace CuadrillaEscritorio
         {
             string node = Locate.Node();
             if (node == null)
-                throw new UserError("No encontré Node.js en este equipo.\n\nInstálalo con «winget install OpenJS.NodeJS.LTS» y vuelve a abrir Cuadrilla.");
+                throw new UserError("No encontré Node.js en este equipo.\n\nInstálalo con «winget install OpenJS.NodeJS.LTS» y vuelve a abrir ClosedBot.");
             if (!File.Exists(paths.ServerScript))
-                throw new UserError("Cuadrilla aún no está compilada.\n\nAbre Instalar-escritorio.cmd en " + paths.AppDir + ".");
+                throw new UserError("ClosedBot aún no está compilada.\n\nAbre Instalar-escritorio.cmd en " + paths.AppDir + ".");
 
             string newToken = NewToken();
             ProcessStartInfo info = new ProcessStartInfo(node, "--disable-warning=ExperimentalWarning \"" + paths.ServerScript + "\"");
@@ -451,7 +503,7 @@ namespace CuadrillaEscritorio
             info.StandardErrorEncoding = Encoding.UTF8;
             // Con este token el lanzador abre sesión y cierra el servidor. El servidor lo quita de su
             // entorno al arrancar, así que los agentes no lo heredan.
-            info.EnvironmentVariables["CUADRILLA_CONTROL_TOKEN"] = newToken;
+            info.EnvironmentVariables["CLOSEDBOT_CONTROL_TOKEN"] = newToken;
 
             Process started = new Process();
             started.StartInfo = info;
@@ -477,7 +529,7 @@ namespace CuadrillaEscritorio
                 job = newJob;
                 token = newToken;
             }
-            log.Info("Arranqué el servidor de Cuadrilla " + paths.Version + " (proceso " + started.Id + ").");
+            log.Info("Arranqué el servidor de ClosedBot " + paths.Version + " (proceso " + started.Id + ").");
         }
 
         void OnOutput(object sender, DataReceivedEventArgs e)
@@ -498,7 +550,7 @@ namespace CuadrillaEscritorio
             {
                 Process current;
                 lock (gate) current = process;
-                if (current == null) return "Se canceló el arranque de Cuadrilla.";
+                if (current == null) return "Se canceló el arranque de ClosedBot.";
                 if (current.HasExited)
                 {
                     int code = current.ExitCode;
@@ -507,14 +559,14 @@ namespace CuadrillaEscritorio
                 }
                 if (RunningVersion() != null)
                 {
-                    log.Info("Cuadrilla está lista en " + paths.BaseUrl + ".");
+                    log.Info("ClosedBot está lista en " + paths.BaseUrl + ".");
                     return null;
                 }
                 Thread.Sleep(300);
             }
             log.Error("El servidor no respondió a tiempo; lo cierro.");
             Kill();
-            return "Cuadrilla tardó demasiado en arrancar.";
+            return "ClosedBot tardó demasiado en arrancar.";
         }
 
         string Explain(int code)
@@ -523,14 +575,14 @@ namespace CuadrillaEscritorio
             lock (recent) lines = recent.ToArray();
             string output = string.Join("\n", lines);
             if (output.Contains("EADDRINUSE"))
-                return "Cuadrilla no pudo arrancar porque otro programa ya usa el puerto " + paths.Port + ".";
+                return "ClosedBot no pudo arrancar porque otro programa ya usa el puerto " + paths.Port + ".";
             if (output.Contains("necesita una contraseña"))
-                return "Cuadrilla aún no tiene contraseña.\n\nAbre Instalar-escritorio.cmd en " + paths.AppDir + " y se creará una.";
+                return "ClosedBot aún no tiene contraseña.\n\nAbre Instalar-escritorio.cmd en " + paths.AppDir + " y se creará una.";
             string last = null;
             foreach (string line in lines)
                 if (line.Trim().Length > 0) last = line.Trim();
             if (last != null && last.Length > 300) last = last.Substring(0, 300) + "…";
-            return "Cuadrilla no pudo arrancar (código " + code + ")." + (last != null ? "\n\n" + last : "");
+            return "ClosedBot no pudo arrancar (código " + code + ")." + (last != null ? "\n\n" + last : "");
         }
 
         /// Enlace de un solo uso para entrar sin contraseña, o null si este programa no arrancó el servidor.
@@ -713,7 +765,7 @@ namespace CuadrillaEscritorio
         }
     }
 
-    /// La ventana de Cuadrilla: Edge (o Chrome) en modo app, con un perfil solo para ella.
+    /// La ventana de ClosedBot: Edge (o Chrome) en modo app, con un perfil solo para ella.
     static class Browser
     {
         public static void Open(Paths paths, string path, Log log)
@@ -739,7 +791,7 @@ namespace CuadrillaEscritorio
             log.Info("Abrí la ventana con " + Path.GetFileName(exe) + ".");
         }
 
-        /// La ventana de Cuadrilla si está abierta, o IntPtr.Zero.
+        /// La ventana de ClosedBot si está abierta, o IntPtr.Zero.
         public static IntPtr FindWindow(Paths paths)
         {
             IntPtr found = IntPtr.Zero;
@@ -771,7 +823,7 @@ namespace CuadrillaEscritorio
             }
         }
 
-        /// Procesos principales de Edge o Chrome abiertos con el perfil de Cuadrilla.
+        /// Procesos principales de Edge o Chrome abiertos con el perfil de ClosedBot.
         static List<Process> OwnBrowsers(Paths paths)
         {
             List<Process> result = new List<Process>();
@@ -802,8 +854,22 @@ namespace CuadrillaEscritorio
     /// Accesos directos del escritorio, del menú Inicio y del inicio con Windows.
     static class Shortcuts
     {
-        const string FileName = "Cuadrilla.lnk";
-        const string Description = "Cuadrilla: tu equipo personal de agentes de IA";
+        const string FileName = "ClosedBot.lnk";
+        const string LegacyFileName = "Cuadrilla.lnk";
+        const string Description = "ClosedBot: tu equipo personal de agentes de IA";
+
+        static string[] Folders
+        {
+            get
+            {
+                return new[]
+                {
+                    Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                    Environment.GetFolderPath(Environment.SpecialFolder.Programs),
+                    Environment.GetFolderPath(Environment.SpecialFolder.Startup),
+                };
+            }
+        }
 
         static string DesktopLink
         {
@@ -827,12 +893,16 @@ namespace CuadrillaEscritorio
 
         public static void Install(Paths paths)
         {
+            // Lo que se eligió con el nombre anterior: si se apagó el inicio con Windows, sigue apagado.
+            bool legacyStartup = File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), LegacyFileName));
+            bool legacyChoice = File.Exists(Path.Combine(paths.LegacyLocalDir, "inicio-con-windows.txt"));
+            RemoveLegacy();
             Create(DesktopLink, paths, "");
             Create(StartMenuLink, paths, "");
             // Solo la primera vez: después se respeta lo que elijas en el menú de la bandeja.
             if (!File.Exists(paths.StartupMarker))
             {
-                SetStartup(paths, true);
+                SetStartup(paths, legacyStartup || !legacyChoice);
                 File.WriteAllText(paths.StartupMarker, "El inicio con Windows se activó al instalar. Se cambia desde el icono de la bandeja.\r\n");
             }
             else if (StartupEnabled)
@@ -845,6 +915,17 @@ namespace CuadrillaEscritorio
         {
             foreach (string link in new[] { DesktopLink, StartMenuLink, StartupLink })
             {
+                if (File.Exists(link)) File.Delete(link);
+            }
+            RemoveLegacy();
+        }
+
+        /// Quita los accesos directos «Cuadrilla.lnk» de la versión con el nombre anterior.
+        static void RemoveLegacy()
+        {
+            foreach (string folder in Folders)
+            {
+                string link = Path.Combine(folder, LegacyFileName);
                 if (File.Exists(link)) File.Delete(link);
             }
         }
@@ -871,6 +952,36 @@ namespace CuadrillaEscritorio
             finally
             {
                 Marshal.FinalReleaseComObject(link);
+            }
+        }
+    }
+
+    /// Lo que dejó en este equipo la versión con el nombre anterior (Cuadrilla).
+    static class Legacy
+    {
+        /// Borra %LOCALAPPDATA%\Cuadrilla: el perfil de su ventana, su registro y sus marcas. Nada más.
+        public static void CleanLocalDir(Paths paths)
+        {
+            string dir = paths.LegacyLocalDir;
+            if (!Directory.Exists(dir)) return;
+            // La ventana de la versión anterior puede tardar un poco en soltar su perfil.
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                try
+                {
+                    string profile = Path.Combine(dir, "ventana");
+                    if (Directory.Exists(profile)) Directory.Delete(profile, true);
+                    foreach (string name in new[] { "cuadrilla.log", "cuadrilla.anterior.log", "aviso-bandeja.txt", "inicio-con-windows.txt" })
+                    {
+                        string file = Path.Combine(dir, name);
+                        if (File.Exists(file)) File.Delete(file);
+                    }
+                    if (Directory.GetFileSystemEntries(dir).Length == 0) Directory.Delete(dir);
+                    return;
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+                Thread.Sleep(1000);
             }
         }
     }
@@ -923,7 +1034,7 @@ namespace CuadrillaEscritorio
             {
                 owner.TopMost = true;
                 owner.ShowInTaskbar = false;
-                return MessageBox.Show(owner, message, "Cuadrilla", buttons, MessageBoxIcon.Warning);
+                return MessageBox.Show(owner, message, "ClosedBot", buttons, MessageBoxIcon.Warning);
             }
         }
     }
@@ -954,11 +1065,11 @@ namespace CuadrillaEscritorio
             this.openSignal = openSignal;
             this.quitSignal = quitSignal;
             log = new Log(paths.LogFile);
-            log.Info("Cuadrilla " + paths.Version + " para Windows, en " + paths.AppDir + ".");
+            log.Info("ClosedBot " + paths.Version + " para Windows, en " + paths.AppDir + ".");
             server = new Server(paths, log);
 
             menu = new ContextMenuStrip();
-            ToolStripMenuItem openItem = new ToolStripMenuItem("Abrir Cuadrilla");
+            ToolStripMenuItem openItem = new ToolStripMenuItem("Abrir ClosedBot");
             openItem.Font = new Font(menu.Font, FontStyle.Bold);
             openItem.Click += delegate { RequestOpen(); };
             startupItem = new ToolStripMenuItem("Iniciar con Windows");
@@ -972,7 +1083,7 @@ namespace CuadrillaEscritorio
 
             tray = new NotifyIcon();
             tray.Icon = LoadIcon();
-            tray.Text = "Cuadrilla";
+            tray.Text = "ClosedBot";
             tray.ContextMenuStrip = menu;
             tray.MouseClick += delegate(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.Left) RequestOpen(); };
             tray.BalloonTipClicked += delegate { RequestOpen(); };
@@ -1008,7 +1119,7 @@ namespace CuadrillaEscritorio
             string problem = null;
             try
             {
-                if (!server.Owned && !server.External) SetStatus("Cuadrilla · arrancando…");
+                if (!server.Owned && !server.External) SetStatus("ClosedBot · arrancando…");
                 problem = await Task.Run(() => server.Ensure());
                 if (problem == null && wantOpen && !quitting)
                 {
@@ -1038,14 +1149,14 @@ namespace CuadrillaEscritorio
             {
                 if (problem != null)
                 {
-                    SetStatus("Cuadrilla · detenida");
+                    SetStatus("ClosedBot · detenida");
                     log.Error(problem.Replace("\n\n", " ").Replace("\n", " "));
                     if (Dialogs.WarnWithLog(problem)) OpenLog();
                     wantOpen = false;
                 }
                 else
                 {
-                    SetStatus("Cuadrilla");
+                    SetStatus("ClosedBot");
                 }
             }
             working = false;
@@ -1057,7 +1168,7 @@ namespace CuadrillaEscritorio
             if (quitting) return;
             if (quitSignal.WaitOne(0))
             {
-                log.Info("Me pidieron cerrar (Cuadrilla.exe /salir).");
+                log.Info("Me pidieron cerrar (ClosedBot.exe /salir).");
                 Quit();
                 return;
             }
@@ -1088,11 +1199,11 @@ namespace CuadrillaEscritorio
                 Run();
                 return;
             }
-            SetStatus("Cuadrilla · detenida");
-            tray.ShowBalloonTip(10000, "Cuadrilla se detuvo", "Haz clic aquí para volver a abrirla. Si vuelve a pasar, mira el registro (clic derecho en este icono).", ToolTipIcon.Warning);
+            SetStatus("ClosedBot · detenida");
+            tray.ShowBalloonTip(10000, "ClosedBot se detuvo", "Haz clic aquí para volver a abrirla. Si vuelve a pasar, mira el registro (clic derecho en este icono).", ToolTipIcon.Warning);
         }
 
-        /// Si se usaba una Cuadrilla ajena y deja de responder, arranca la propia (para las rutinas).
+        /// Si se usaba una ClosedBot ajena y deja de responder, arranca la propia (para las rutinas).
         async void CheckExternal()
         {
             working = true;
@@ -1105,7 +1216,7 @@ namespace CuadrillaEscritorio
             working = false;
             if (!alive && !quitting)
             {
-                log.Info("La otra Cuadrilla dejó de responder; arranco la mía.");
+                log.Info("La otra ClosedBot dejó de responder; arranco la mía.");
                 server.ForgetExternal();
                 Run();
             }
@@ -1116,8 +1227,8 @@ namespace CuadrillaEscritorio
             if (quitting) return;
             quitting = true;
             timer.Stop();
-            SetStatus("Cuadrilla · cerrando…");
-            log.Info("Cerrando Cuadrilla.");
+            SetStatus("ClosedBot · cerrando…");
+            log.Info("Cerrando ClosedBot.");
             try
             {
                 await Task.Run(() =>
@@ -1138,7 +1249,7 @@ namespace CuadrillaEscritorio
         {
             if (quitting) return;
             quitting = true;
-            log.Info("Windows se está cerrando; cierro Cuadrilla.");
+            log.Info("Windows se está cerrando; cierro ClosedBot.");
             try { server.Stop(4000); }
             catch (Exception) { }
         }
@@ -1175,8 +1286,8 @@ namespace CuadrillaEscritorio
             if (File.Exists(paths.TipMarker)) return;
             try { File.WriteAllText(paths.TipMarker, "Ya se mostró el aviso de la bandeja.\r\n"); }
             catch (Exception) { return; }
-            tray.ShowBalloonTip(15000, "Cuadrilla sigue aquí",
-                "Si cierras la ventana, Cuadrilla sigue funcionando para tus rutinas. Para volver, haz clic en este icono; para cerrarla del todo, clic derecho y «Salir».",
+            tray.ShowBalloonTip(15000, "ClosedBot sigue aquí",
+                "Si cierras la ventana, ClosedBot sigue funcionando para tus rutinas. Para volver, haz clic en este icono; para cerrarla del todo, clic derecho y «Salir».",
                 ToolTipIcon.Info);
         }
 

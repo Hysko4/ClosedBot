@@ -1,6 +1,6 @@
 /**
  * Horarios de las rutinas: horas fijas (opcionalmente solo algunos días) o cada N minutos.
- * Las horas son locales del equipo donde corre Cuadrilla.
+ * Las horas son locales del equipo donde corre ClosedBot.
  */
 export interface Schedule {
   /** Horas locales «HH:MM», ordenadas y sin repetir. */

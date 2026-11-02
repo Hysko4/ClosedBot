@@ -1,6 +1,6 @@
 // Derivado de OpenBot v0.1.11 (src/backend/claude-client.ts), Copyright 2026 Norbert Bodziony,
 // con licencia Apache-2.0 (ver licenses/OPENBOT-APACHE-2.0.txt y NOTICE).
-// Modificado para Cuadrilla: niveles de acceso con sandbox, herramientas del equipo,
+// Modificado para ClosedBot: niveles de acceso con sandbox, herramientas del equipo,
 // actividad de herramientas, reinicio por cambio de esfuerzo, cierre por inactividad y
 // fallos aislados por hilo.
 
@@ -115,7 +115,7 @@ const NO_SHELL_NOTE =
   "En este equipo (Windows) el modo «solo su carpeta» no tiene terminal: no puedes ejecutar comandos. Trabaja leyendo y escribiendo archivos en tus carpetas, con búsquedas web y con tus compañeros. Si una tarea exige comandos, explícale al usuario por qué.";
 
 const NO_USER_MESSAGE =
-  "El usuario no está mirando en vivo. Si la decisión le corresponde, pregúntale con la herramienta ask_user del grupo «cuadrilla» (te responderá en un mensaje nuevo) y termina tu turno; si no, decide con tu mejor criterio y explica tus supuestos.";
+  "El usuario no está mirando en vivo. Si la decisión le corresponde, pregúntale con la herramienta ask_user del grupo «closedbot» (te responderá en un mensaje nuevo) y termina tu turno; si no, decide con tu mejor criterio y explica tus supuestos.";
 
 export const CLAUDE_MODELS = [
   { model: "claude-opus-5-5", displayName: "Claude Opus 5.5", isDefault: true },
@@ -242,7 +242,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
     const allowedDirs = [...new Set([config.cwd, ...config.additionalDirectories].map((dir) => resolve(dir)))];
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(this.#options.env ?? process.env)) if (typeof value === "string") env[key] = value;
-    env.CLAUDE_AGENT_SDK_CLIENT_APP = `cuadrilla/${VERSION}`;
+    env.CLAUDE_AGENT_SDK_CLIENT_APP = `closedbot/${VERSION}`;
 
     const mcpServers: NonNullable<Options["mcpServers"]> = { [TEAM_NAMESPACE]: this.#createTeamServer(threadId) };
     if (this.#options.playwright) {

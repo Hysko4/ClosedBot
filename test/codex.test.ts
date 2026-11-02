@@ -19,7 +19,7 @@ function readLog(path: string): Array<Record<string, unknown>> {
 
 async function codexHarness() {
   chmodSync(fixture, 0o755);
-  const temp = tempDir("cuadrilla-codex-");
+  const temp = tempDir("closedbot-codex-");
   const log = join(temp.path, "requests.jsonl");
   // En Windows un script .mjs no se ejecuta solo: se envuelve en un .cmd que llama a node.
   let executable = fixture;
@@ -62,7 +62,7 @@ test("Codex: hilo, turno, herramientas del equipo y aprobaciones", async () => {
     const start = requests.find((item) => item.method === "thread/start") as { params: Record<string, unknown> };
     assert.equal(start.params.sandbox, "workspace-write");
     assert.equal(start.params.approvalPolicy, "never");
-    assert.equal((start.params.dynamicTools as Array<{ name: string }>)[0]?.name, "cuadrilla");
+    assert.equal((start.params.dynamicTools as Array<{ name: string }>)[0]?.name, "closedbot");
     assert.equal(start.params.effort, undefined, "Codex recibe el esfuerzo por turno, no al crear el hilo");
     const turn = requests.find((item) => item.method === "turn/start") as { params: Record<string, unknown> };
     assert.deepEqual((turn.params.input as Array<Record<string, unknown>>)[0]?.text_elements, []);

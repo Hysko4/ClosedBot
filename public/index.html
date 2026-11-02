@@ -3,13 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
-    <title>Cuadrilla</title>
+    <title>ClosedBot</title>
     <meta name="description" content="Tu equipo personal de agentes de IA." />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#171717" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-title" content="Cuadrilla" />
+    <meta name="apple-mobile-web-app-title" content="ClosedBot" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
@@ -25,7 +25,7 @@
     <section id="login" class="login" hidden>
       <form id="login-form" class="login-card" autocomplete="on">
         <div class="login-mascot" id="login-mascot" aria-hidden="true"></div>
-        <h1 class="login-title">Cuadrilla</h1>
+        <h1 class="login-title">ClosedBot</h1>
         <p class="muted">Tu equipo personal de agentes de IA.</p>
         <label class="field">
           <span>Contraseña</span>
@@ -54,7 +54,7 @@
           <div class="bot-avatar" id="bot-avatar" aria-hidden="true">
             <span class="bot-badge" id="connection" data-state="connecting" title="Conectando…"></span>
           </div>
-          <div class="bot-name" id="bot-name">Cuadrilla</div>
+          <div class="bot-name" id="bot-name">ClosedBot</div>
         </div>
 
         <div class="search-box" id="search-box" hidden>
@@ -86,6 +86,10 @@
             Cada agente trabaja en su propia carpeta y puede pedir ayuda a sus compañeros. Si le escribes mientras trabaja, tu mensaje queda en
             cola y lo atiende en orden.
           </p>
+          <div class="connect-callout" id="connect-callout" hidden>
+            <p id="connect-text"></p>
+            <button type="button" class="button primary" id="connect-claude">Iniciar sesión con Claude</button>
+          </div>
         </div>
 
         <section class="conversation" id="conversation" hidden>
@@ -205,7 +209,7 @@
             </p>
             <p class="warning" id="access-warning" hidden>
               Con acceso total el agente puede borrar, instalar o leer cualquier cosa del equipo, incluidas credenciales. Úsalo solo en una
-              máquina dedicada a Cuadrilla.
+              máquina dedicada a ClosedBot.
             </p>
           </fieldset>
           <p class="form-error" id="agent-error" role="alert"></p>
@@ -221,7 +225,7 @@
       <div>
         <header class="dialog-header">
           <h2 id="routines-title">Rutinas</h2>
-          <p class="muted small">Tareas que un agente repite solo a ciertas horas. Corren mientras Cuadrilla esté abierta.</p>
+          <p class="muted small">Tareas que un agente repite solo a ciertas horas. Corren mientras ClosedBot esté abierta.</p>
         </header>
         <div class="dialog-body">
           <ul class="routine-list" id="routine-list"></ul>
@@ -295,7 +299,7 @@
               </label>
               <label class="field">
                 <span>Nombre del asistente</span>
-                <input name="botName" maxlength="40" placeholder="Cuadrilla" autocomplete="off" />
+                <input name="botName" maxlength="40" placeholder="ClosedBot" autocomplete="off" />
               </label>
             </div>
             <div class="form-actions">

@@ -1,18 +1,18 @@
-# Servicio de systemd para Cuadrilla.
-# Copia este archivo a /etc/systemd/system/cuadrilla.service y ajusta User y WorkingDirectory
-# si instalaste la app en otro lugar. Las claves van en /etc/cuadrilla.env (permisos 600).
+# Servicio de systemd para ClosedBot.
+# Copia este archivo a /etc/systemd/system/closedbot.service y ajusta User y WorkingDirectory
+# si instalaste la app en otro lugar. Las claves van en /etc/closedbot.env (permisos 600).
 
 [Unit]
-Description=Cuadrilla, equipo personal de agentes de IA
+Description=ClosedBot, equipo personal de agentes de IA
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=cuadrilla
-Group=cuadrilla
-WorkingDirectory=/home/cuadrilla/cuadrilla
-EnvironmentFile=/etc/cuadrilla.env
+User=closedbot
+Group=closedbot
+WorkingDirectory=/home/closedbot/closedbot
+EnvironmentFile=/etc/closedbot.env
 ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning dist/src/server.js
 Restart=on-failure
 RestartSec=5
