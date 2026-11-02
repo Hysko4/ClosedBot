@@ -1,6 +1,6 @@
 # Cuadrilla
 
-Tu equipo personal de agentes de IA. Cada agente tiene nombre, rol e instrucciones, trabaja con **Claude** o **Codex** en su propia carpeta de un servidor tuyo, y puede pedirles ayuda a sus compañeros. Lo manejas desde el navegador o desde el teléfono, como una app instalada.
+Tu equipo personal de agentes de IA. Cada agente tiene nombre, rol e instrucciones, trabaja con **Claude** o **Codex** en su propia carpeta, y puede pedirles ayuda a sus compañeros. Lo manejas como una app de escritorio en Windows (ventana propia e icono en la bandeja), desde el navegador o desde el teléfono, como una app instalada.
 
 Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su versión 0.1.11, publicada con licencia Apache 2.0 (ver [Licencias](#licencias)).
 
@@ -10,6 +10,10 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
 - **Cola por agente**: si le escribes mientras trabaja, el mensaje espera su turno. Puedes quitar mensajes de la cola, pausarla o detener el turno en curso.
 - **Trabajo en equipo**: los agentes se escriben entre sí con las herramientas `list_agents` y `send_message`. Si un compañero termina sin contestar, su resultado vuelve solo a quien se lo pidió. Hay un límite de reenvíos seguidos (6 por defecto) para cortar bucles.
 - **Respuestas en vivo**, con el historial guardado en SQLite. Cada agente retoma su conversación aunque reinicies el servidor.
+- **Preguntas con opciones**: un agente puede preguntarte algo con una tarjeta de 2 a 4 opciones (con una recomendada). Tocas una y tu respuesta le llega como un mensaje nuevo.
+- **Rutinas**: tareas que se repiten solas, a horas fijas (por ejemplo, de lunes a viernes a las 08:30) o cada cierto tiempo (desde 15 minutos). Las creas tú o se las pides a un agente. Solo corren mientras Cuadrilla está abierta; si una se atrasa más de 2 horas, se salta y queda el aviso.
+- **Lista de agentes como en una app de chat**: agrupados por proyecto, con su último mensaje y un punto en los que tienen novedades.
+- **Dictado por voz y adjuntos**: el micrófono escribe lo que dices (en Edge o Chrome) y puedes adjuntar archivos, que quedan en la carpeta del agente.
 - **App instalable** (PWA) en Android y iPhone, a través de tu red privada de Tailscale.
 - **Dos niveles de acceso**:
   - *Solo su carpeta* (por defecto): el agente escribe en su carpeta y en la carpeta compartida, y sus comandos corren dentro de un sandbox.
@@ -89,18 +93,25 @@ En el teléfono, instala la app de Tailscale y entra con la misma cuenta. Luego 
 - **Android (Chrome)**: menú ⋮ → «Instalar app».
 - **iPhone (Safari)**: botón Compartir → «Añadir a pantalla de inicio».
 
-## Windows (en tu PC, para uso personal)
+## Windows: app de escritorio (en tu PC, para uso personal)
 
-También funciona en Windows 10 u 11, sin servidor aparte:
+También funciona en Windows 10 u 11, sin servidor aparte, como una app con su propia ventana:
 
-```powershell
-winget install OpenJS.NodeJS.LTS      # Node.js 22 o superior; luego abre otra ventana de PowerShell
-cd C:\ruta\donde\descomprimiste\cuadrilla
-npm ci
-npm run build
-npm run password -- --generate        # guarda la contraseña que muestra
-npm start                             # abre http://127.0.0.1:8787
-```
+1. Instala Node.js 22 o superior: `winget install OpenJS.NodeJS.LTS`.
+2. Descarga el código en una carpeta tuya (por ejemplo, `C:\Users\<tú>\cuadrilla`).
+3. Abre **`Instalar-escritorio.cmd`** con doble clic. Instala las dependencias, compila, crea el programa `Cuadrilla.exe`, crea una contraseña si no tenías (queda en `CONTRASENA-CUADRILLA.txt`) y pone el acceso directo **Cuadrilla** en el escritorio y en el menú Inicio.
+
+Cómo se usa:
+
+- El acceso directo abre Cuadrilla en **su propia ventana**, sin barras del navegador y sin pedir la contraseña (entra con un código de un solo uso). Usa Edge, o Chrome si no hay Edge, con un perfil solo para Cuadrilla.
+- Queda un **icono en la bandeja**, junto al reloj. Clic: abre la ventana. Clic derecho: *Iniciar con Windows*, *Ver registro* y *Salir*.
+- Si cierras la ventana, Cuadrilla sigue funcionando en segundo plano para tus rutinas. Para cerrarla del todo, usa *Salir*.
+- Arranca con Windows (sin abrir la ventana) desde la primera instalación. Lo cambias en el menú de la bandeja.
+- El registro está en `%LOCALAPPDATA%\Cuadrilla\cuadrilla.log`. Si el servidor se cae, el programa lo vuelve a arrancar (hasta 3 veces en 15 minutos) y te avisa si no puede.
+- **Actualizar**: reemplaza el código por la versión nueva (tus datos están en `C:\Users\<tú>\.cuadrilla` y no se tocan) y vuelve a abrir `Instalar-escritorio.cmd`.
+- **Quitar los accesos directos**: `Cuadrilla.exe /desinstalar`.
+
+Si prefieres la consola: `npm ci`, `npm run build`, `npm run password -- --generate` y `npm start`, y abre <http://127.0.0.1:8787>.
 
 Diferencias en Windows:
 
@@ -116,7 +127,12 @@ Diferencias en Windows:
 - **Cola**: si el agente está ocupado, verás «N mensajes esperando turno». Desde ahí puedes quitar mensajes. En el menú ⋯ puedes pausar la cola, empezar de cero, editar o eliminar el agente. «Detener» corta el turno en curso.
 - **Equipo**: pídele a un agente que consulte a otro, por ejemplo: «Pídele a Beto que revise esto». En su chat verás «Enviado a Beto» y después «Respuesta de Beto».
 - **Carpetas**: cada agente trabaja en `~/.cuadrilla/agentes/<nombre>`, y todos comparten `~/.cuadrilla/compartida`.
-- **Probar sin IA**: con el proveedor Demo, una línea `@Nombre: texto` envía `texto` a ese compañero, `/equipo` lista a los compañeros y `/lento` responde despacio, para probar «Detener».
+- **Preguntas**: cuando un agente necesita que elijas, verás una tarjeta con opciones (A, B, C…). La recomendada lleva una etiqueta. Al tocar una, el agente sigue con tu respuesta.
+- **Rutinas**: botón del reloj en la barra lateral, o pídeselo a un agente («todos los días a las 9, revisa…»). Puedes pausarlas, ejecutarlas al momento o borrarlas. Cada agente tiene hasta 20.
+- **Proyectos**: al crear o editar un agente, escribe un proyecto para agruparlo en la barra lateral.
+- **Voz**: el micrófono dicta en el cuadro de texto. Con el cuadro vacío, el botón morado graba y envía al terminar. El dictado usa el reconocimiento de voz del navegador, que en Edge y Chrome procesa el audio en los servidores de Microsoft o Google.
+- **Adjuntos**: clip, pegar o arrastrar. Hasta 25 MB por archivo; se guardan en `adjuntos/` dentro de la carpeta del agente.
+- **Probar sin IA**: con el proveedor Demo, una línea `@Nombre: texto` envía `texto` a ese compañero, `/equipo` lista a los compañeros, `/lento` responde despacio (para probar «Detener»), `/pregunta ¿Texto? | A | B` muestra una tarjeta de opciones y `/rutina 09:00 Nombre` crea una rutina.
 
 ## Configuración
 
@@ -138,6 +154,7 @@ Se configura con variables de entorno, en `/etc/cuadrilla.env` si usas systemd.
 | `CUADRILLA_SESSION_DAYS` | `30` | Días que dura la sesión en cada dispositivo. |
 | `CUADRILLA_SECURE_COOKIES` | `auto` | `auto` marca la cookie como `Secure` cuando llega por HTTPS (Tailscale). |
 | `CUADRILLA_PASSWORD` | — | Contraseña por variable de entorno. Solo se usa si no creaste una con `npm run password`. |
+| `CUADRILLA_CONTROL_TOKEN` | — | La pone `Cuadrilla.exe` al arrancar el servidor (mínimo 32 caracteres) para entrar sin contraseña y cerrarlo con calma. Solo funciona desde el mismo equipo y los agentes no la heredan. No hace falta configurarla. |
 
 ## Actualizar
 
@@ -165,7 +182,7 @@ npm ci
 npm test        # compila y corre las pruebas
 ```
 
-Las pruebas usan el proveedor Demo y simulaciones del SDK de Claude y del `codex app-server`, así que no gastan créditos. Cubren la cola, los mensajes entre agentes, el límite de reenvíos, la interrupción, el reinicio, el login, la protección CSRF y los eventos en vivo.
+Las pruebas usan el proveedor Demo y simulaciones del SDK de Claude y del `codex app-server`, así que no gastan créditos. Cubren la cola, los mensajes entre agentes, el límite de reenvíos, la interrupción, el reinicio, el login, la protección CSRF, los eventos en vivo, las preguntas con opciones, las rutinas y sus horarios, los adjuntos y el control del lanzador de escritorio.
 
 ```
 src/
@@ -175,19 +192,23 @@ src/
   service.ts           orquestador: colas, hilos, mensajes entre agentes
   db.ts                SQLite (node:sqlite)
   instructions.ts      instrucciones de sistema de cada agente
-  team.ts              herramientas list_agents y send_message
+  team.ts              herramientas del equipo: mensajes, preguntas y rutinas
+  schedule.ts          horarios de las rutinas
+  version.ts           versión de la app
   providers/           Claude (Agent SDK), Codex (app-server), Demo, detección
   cli/password.ts      npm run password
 public/                interfaz web (sin dependencias ni compilación)
+scripts/windows/       Cuadrilla.exe: ventana propia e icono en la bandeja (C#)
 deploy/                servicio de systemd y plantilla de entorno
 test/                  pruebas (node:test)
 ```
 
 ## Estado y límites conocidos
 
-- Versión 0.1.0. Se probó con el proveedor Demo y con simulaciones de Claude y Codex. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
+- Versión 0.2.0. Se probó con el proveedor Demo y con simulaciones de Claude y Codex. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
 - Un solo usuario y sin notificaciones push por ahora.
-- Los agentes no pueden hacerte preguntas a mitad de un turno: se les indica que decidan con su criterio y expliquen sus supuestos.
+- Las preguntas con opciones terminan el turno del agente: tu respuesta le llega como un mensaje nuevo.
+- Las rutinas solo corren con Cuadrilla abierta (en Windows, basta con el icono de la bandeja).
 
 ## Licencias
 

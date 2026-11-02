@@ -1,10 +1,11 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, resolve, sep } from "node:path";
-import { type Auth, clearSessionCookie, hashToken, readCookie, SESSION_COOKIE, serializeSessionCookie } from "./auth.js";
+import { type Auth, clearSessionCookie, hashToken, type LoginResult, readCookie, SESSION_COOKIE, serializeSessionCookie } from "./auth.js";
 import { isRecord } from "./providers/protocol.js";
-import { type AgentInput, type AgentService, ServiceError, type ServiceEvent, VERSION } from "./service.js";
+import { type AgentInput, type AgentService, MAX_UPLOAD_BYTES, ServiceError, type ServiceEvent, VERSION } from "./service.js";
 
 export interface AppOptions {
   service: AgentService;
@@ -14,6 +15,13 @@ export interface AppOptions {
   workspacesDir: string;
   maxHops: number;
   secureCookies: "auto" | "always" | "never";
+  /**
+   * Token del lanzador de escritorio: con él, y solo desde este equipo, se pide un código de acceso de un solo uso
+   * o se apaga la app. Sin token, esas rutas no existen.
+   */
+  controlToken?: string | null;
+  /** Se llama tras responder a /api/control/shutdown. */
+  onShutdown?: () => void;
   log?: (level: "info" | "warn" | "error", message: string) => void;
 }
 
@@ -93,22 +101,69 @@ export function createApp(options: AppOptions): App {
 
   route("GET", "/api/session", (ctx) => ({ authenticated: auth.validate(ctx.token), version: VERSION }), true);
 
+  const finishLogin = (ctx: Context, result: LoginResult, invalidMessage: string) => {
+    if (!result.ok) {
+      if (result.reason === "locked") {
+        ctx.res.setHeader("retry-after", String(result.retryAfterSeconds ?? 900));
+        throw new HttpError(429, `Demasiados intentos fallidos. Espera ${Math.ceil((result.retryAfterSeconds ?? 900) / 60)} min.`);
+      }
+      if (result.reason === "unconfigured") throw new HttpError(503, "Falta crear la contraseña: ejecuta «npm run password» en el servidor.");
+      throw new HttpError(401, invalidMessage);
+    }
+    ctx.res.setHeader("set-cookie", serializeSessionCookie(result.token, result.maxAgeSeconds, secureRequest(ctx.req, options.secureCookies)));
+    return { authenticated: true };
+  };
+
   route(
     "POST",
     "/api/login",
     async (ctx) => {
       const body = await readJson(ctx.req);
-      const result = await auth.login(body.password, clientKey(ctx.req), header(ctx.req, "user-agent"));
-      if (!result.ok) {
-        if (result.reason === "locked") {
-          ctx.res.setHeader("retry-after", String(result.retryAfterSeconds ?? 900));
-          throw new HttpError(429, `Demasiados intentos fallidos. Espera ${Math.ceil((result.retryAfterSeconds ?? 900) / 60)} min.`);
-        }
-        if (result.reason === "unconfigured") throw new HttpError(503, "Falta crear la contraseña: ejecuta «npm run password» en el servidor.");
-        throw new HttpError(401, "Contraseña incorrecta.");
-      }
-      ctx.res.setHeader("set-cookie", serializeSessionCookie(result.token, result.maxAgeSeconds, secureRequest(ctx.req, options.secureCookies)));
-      return { authenticated: true };
+      return finishLogin(ctx, await auth.login(body.password, clientKey(ctx.req), header(ctx.req, "user-agent")), "Contraseña incorrecta.");
+    },
+    true,
+  );
+
+  route(
+    "POST",
+    "/api/login/code",
+    async (ctx) => {
+      const body = await readJson(ctx.req);
+      const result = auth.redeemLoginCode(body.code, clientKey(ctx.req), header(ctx.req, "user-agent"));
+      return finishLogin(ctx, result, "El enlace de acceso venció o ya se usó. Entra con tu contraseña.");
+    },
+    true,
+  );
+
+  // ---------- control del lanzador de escritorio ----------
+
+  /** Solo el lanzador local (mismo equipo, sin proxy) con el token que le pasó al servidor al arrancarlo. */
+  const requireControl = (req: IncomingMessage) => {
+    const expected = options.controlToken;
+    if (!expected) throw new HttpError(404, "Ruta no encontrada.");
+    const proxied = header(req, "x-forwarded-for") || header(req, "x-forwarded-host") || header(req, "forwarded");
+    if (!isLoopback(req.socket.remoteAddress) || proxied) throw new HttpError(403, "Solo disponible desde este equipo.");
+    const given = createHash("sha256").update(header(req, "x-cuadrilla-control") ?? "").digest();
+    if (!timingSafeEqual(given, createHash("sha256").update(expected).digest())) throw new HttpError(403, "Token de control inválido.");
+  };
+
+  route(
+    "POST",
+    "/api/control/login-link",
+    (ctx) => {
+      requireControl(ctx.req);
+      return { path: `/?acceso=${encodeURIComponent(auth.createLoginCode())}` };
+    },
+    true,
+  );
+
+  route(
+    "POST",
+    "/api/control/shutdown",
+    (ctx) => {
+      requireControl(ctx.req);
+      ctx.res.once("finish", () => options.onShutdown?.());
+      return { ok: true };
     },
     true,
   );
@@ -131,10 +186,19 @@ export function createApp(options: AppOptions): App {
     version: VERSION,
     agents: service.listAgents(),
     providers: service.providers(),
+    routines: service.listRoutines(),
+    settings: service.getSettings(),
     paths: { shared: options.sharedDir, workspaces: options.workspacesDir },
     maxHops: options.maxHops,
     platform: process.platform,
   }));
+
+  route("GET", "/api/settings", () => ({ settings: service.getSettings() }));
+
+  route("PATCH", "/api/settings", async (ctx) => {
+    const body = await readJson(ctx.req);
+    return { settings: service.updateSettings({ botName: body.botName, userName: body.userName }) };
+  });
 
   route("POST", "/api/providers/refresh", async () => ({ providers: await service.refreshProviders() }));
 
@@ -191,12 +255,61 @@ export function createApp(options: AppOptions): App {
     return service.sendUserMessage(param(ctx, 0), body.text);
   });
 
+  route("POST", "/api/agents/:id/read", (ctx) => ({ agent: service.markRead(param(ctx, 0)) }));
+
+  route("POST", "/api/agents/:id/decisions/:messageId", async (ctx) => {
+    const body = await readJson(ctx.req);
+    const { decision, message } = service.answerDecision(param(ctx, 0), param(ctx, 1), body.choice);
+    return { decision, message };
+  });
+
+  route("POST", "/api/agents/:id/files", async (ctx) => {
+    const agentId = param(ctx, 0);
+    service.getAgent(agentId);
+    const name = ctx.url.searchParams.get("name") ?? "";
+    const data = await readBody(ctx.req, MAX_UPLOAD_BYTES, MAX_UPLOAD_BYTES);
+    ctx.res.statusCode = 201;
+    return { file: service.saveAttachment(agentId, name, data) };
+  });
+
   route("GET", "/api/agents/:id/queue", (ctx) => ({ queue: service.listQueue(param(ctx, 0)) }));
 
   route("DELETE", "/api/agents/:id/queue/:deliveryId", (ctx) => {
     service.cancelQueued(param(ctx, 0), param(ctx, 1));
     return NO_CONTENT;
   });
+
+  // ---------- rutinas ----------
+
+  route("GET", "/api/routines", () => ({ routines: service.listRoutines() }));
+
+  route("POST", "/api/routines", async (ctx) => {
+    const body = await readJson(ctx.req);
+    if (typeof body.agentId !== "string" || !body.agentId) throw new HttpError(400, "Indica el agente de la rutina.");
+    ctx.res.statusCode = 201;
+    return {
+      routine: service.createRoutine(body.agentId, {
+        name: body.name,
+        prompt: body.prompt,
+        times: body.times,
+        days: body.days,
+        everyMinutes: body.everyMinutes,
+      }),
+    };
+  });
+
+  route("PATCH", "/api/routines/:id", async (ctx) => {
+    const body = await readJson(ctx.req);
+    if (typeof body.enabled !== "boolean") throw new HttpError(400, "Indica enabled: true o false.");
+    return { routine: service.setRoutineEnabled(param(ctx, 0), body.enabled) };
+  });
+
+  route("DELETE", "/api/routines/:id", (ctx) => {
+    service.deleteRoutine(param(ctx, 0));
+    return NO_CONTENT;
+  });
+
+  route("POST", "/api/routines/:id/run", (ctx) => ({ routine: service.runRoutineNow(param(ctx, 0)) }));
 
   // ---------- eventos en vivo (SSE) ----------
 
@@ -224,7 +337,14 @@ export function createApp(options: AppOptions): App {
       }
       res.write(`data: ${JSON.stringify(event)}\n\n`);
     };
-    send({ type: "hello", version: VERSION, agents: service.listAgents(), providers: service.providers() });
+    send({
+      type: "hello",
+      version: VERSION,
+      agents: service.listAgents(),
+      providers: service.providers(),
+      routines: service.listRoutines(),
+      settings: service.getSettings(),
+    });
     const listener = (event: ServiceEvent) => send(event);
     service.on("event", listener);
     const heartbeat = setInterval(() => {
@@ -358,7 +478,8 @@ function setSecurityHeaders(res: ServerResponse): void {
   res.setHeader("x-frame-options", "DENY");
   res.setHeader("cross-origin-opener-policy", "same-origin");
   res.setHeader("cross-origin-resource-policy", "same-origin");
-  res.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
+  // El micrófono solo para el dictado por voz de la propia app.
+  res.setHeader("permissions-policy", "camera=(), microphone=(self), geolocation=(), payment=(), usb=()");
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -387,11 +508,11 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 /**
  * Lee el cuerpo entero. Si pasa de `limit`, sigue leyendo y descartando el resto, y solo al final rechaza con 413:
  * si el servidor respondiera y cerrara con datos sin leer, el sistema cortaría con un RST y el cliente (sobre todo en
- * Windows) perdería la respuesta. Lo que pase de DISCARD_LIMIT ya no se lee y la conexión se cierra.
+ * Windows) perdería la respuesta. Lo que pase de `discardLimit` ya no se lee y la conexión se cierra.
  */
-function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
+function readBody(req: IncomingMessage, limit: number, discardLimit = DISCARD_LIMIT): Promise<Buffer> {
   const tooLarge = () => new HttpError(413, "La solicitud es demasiado grande.");
-  if (Number(header(req, "content-length") ?? "0") > DISCARD_LIMIT) return Promise.reject(tooLarge());
+  if (Number(header(req, "content-length") ?? "0") > discardLimit) return Promise.reject(tooLarge());
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -405,7 +526,7 @@ function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
     };
     const onData = (chunk: Buffer) => {
       size += chunk.length;
-      if (size > DISCARD_LIMIT) finish(tooLarge());
+      if (size > discardLimit) finish(tooLarge());
       else if (size <= limit) chunks.push(chunk);
     };
     const onEnd = () => finish(size > limit ? tooLarge() : null);
@@ -444,6 +565,8 @@ function agentInput(body: Record<string, unknown>, creating: boolean): Partial<A
   if (model !== undefined) input.model = model;
   const effort = optional("effort");
   if (effort !== undefined) input.effort = effort;
+  const project = text("project");
+  if (project !== undefined) input.project = project;
   const access = text("access");
   if (access !== undefined) {
     if (access !== "carpeta" && access !== "total") throw new HttpError(400, "El acceso debe ser «carpeta» o «total».");

@@ -1,10 +1,16 @@
 // Cuadrilla — interfaz web (sin dependencias ni paso de compilación).
 
 const $ = (selector) => document.querySelector(selector);
+const SVG_NS = "http://www.w3.org/2000/svg";
+const LETTERS = "ABCD";
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition || null;
 
 const state = {
   agents: [],
   providers: [],
+  routines: [],
+  settings: { botName: "Cuadrilla", userName: "" },
   paths: null,
   version: "",
   maxHops: 0,
@@ -13,19 +19,25 @@ const state = {
   messages: new Map(), // agentId -> array de mensajes en orden
   hasMore: new Map(),
   queues: new Map(),
-  unread: new Set(),
+  attachments: new Map(), // agentId -> archivos adjuntos aún sin enviar
   models: new Map(), // proveedor -> modelos
   queueOpen: false,
   navigatedInApp: false,
+  search: "",
 };
 
 const elements = new Map(); // id de mensaje -> elemento del DOM (solo el agente abierto)
 const dirty = new Set();
+const answering = new Set(); // tarjetas de decisión con la respuesta en camino
 let renderScheduled = false;
 let events = null;
 let reconnectTimer = null;
 let toastTimer = null;
+let readTimer = null;
 let editingAgentId = null;
+let routinesFilter = null;
+let recognition = null;
+let dictation = null; // { mode: "dictate" | "voice", base, final, agentId, cancelled }
 
 const coarsePointer = window.matchMedia("(pointer: coarse)").matches;
 
@@ -55,12 +67,33 @@ async function api(path, { method = "GET", body } = {}) {
   }
   if (response.status === 204) return null;
   const data = await response.json().catch(() => ({}));
-  if (response.status === 401 && path !== "/api/login") {
+  if (response.status === 401 && !path.startsWith("/api/login")) {
     showLogin();
     throw new ApiError(data.error || "Inicia sesión.", 401);
   }
   if (!response.ok) throw new ApiError(data.error || `Error ${response.status}`, response.status);
   return data;
+}
+
+async function uploadFile(agentId, file) {
+  let response;
+  try {
+    response = await fetch(`/api/agents/${encodeURIComponent(agentId)}/files?name=${encodeURIComponent(file.name)}`, {
+      method: "POST",
+      headers: { "x-cuadrilla": "1", "content-type": "application/octet-stream" },
+      body: file,
+      credentials: "same-origin",
+    });
+  } catch {
+    throw new ApiError("No hay conexión con el servidor.", 0);
+  }
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    showLogin();
+    throw new ApiError(data.error || "Inicia sesión.", 401);
+  }
+  if (!response.ok) throw new ApiError(data.error || `Error ${response.status}`, response.status);
+  return data.file;
 }
 
 // ---------- arranque y sesión ----------
@@ -70,15 +103,44 @@ async function boot() {
     navigator.serviceWorker.register("/sw.js").catch(() => undefined);
   }
   bindUi();
+  renderMascots();
+  // El acceso directo de escritorio abre la app con un código de un solo uso en ?acceso=.
+  const params = new URLSearchParams(location.search);
+  const code = params.get("acceso");
+  if (code !== null) {
+    params.delete("acceso");
+    const query = params.toString();
+    history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
+  }
   let session = null;
   try {
     session = await api("/api/session");
   } catch {
     session = null;
   }
+  let problem = "";
+  if (!session?.authenticated && code) {
+    try {
+      await api("/api/login/code", { method: "POST", body: { code } });
+      session = { authenticated: true };
+    } catch (error) {
+      problem = error.message;
+    }
+  }
   $("#boot").hidden = true;
-  if (session?.authenticated) await enterApp();
-  else showLogin();
+  if (session?.authenticated) {
+    try {
+      await enterApp();
+    } catch (error) {
+      if (error.status !== 401) {
+        showLogin();
+        $("#login-error").textContent = `No se pudo cargar Cuadrilla: ${error.message}`;
+      }
+    }
+  } else {
+    showLogin();
+    if (problem) $("#login-error").textContent = problem;
+  }
 }
 
 function showLogin() {
@@ -87,6 +149,7 @@ function showLogin() {
     events = null;
   }
   clearTimeout(reconnectTimer);
+  stopDictation({ cancel: true });
   $("#app").hidden = true;
   $("#boot").hidden = true;
   $("#login").hidden = false;
@@ -115,12 +178,15 @@ async function enterApp() {
   const data = await api("/api/state");
   state.agents = data.agents;
   state.providers = data.providers;
+  state.routines = data.routines ?? [];
+  state.settings = data.settings ?? state.settings;
   state.paths = data.paths;
   state.version = data.version;
   state.maxHops = data.maxHops;
   state.platform = data.platform ?? "";
   $("#login").hidden = true;
   $("#app").hidden = false;
+  renderIdentity();
   renderSidebar();
   connectEvents();
   await route();
@@ -173,10 +239,11 @@ function connectEvents() {
 }
 
 function setConnection(value) {
-  const label = { live: "En vivo", connecting: "Conectando…", offline: "Sin conexión" }[value];
+  const label = { live: "Conectado", connecting: "Conectando…", offline: "Sin conexión con el servidor" }[value];
   const node = $("#connection");
   node.dataset.state = value;
-  node.textContent = label;
+  node.title = label;
+  node.setAttribute("aria-label", label);
 }
 
 function handleEvent(event) {
@@ -184,7 +251,11 @@ function handleEvent(event) {
     case "hello":
       state.agents = event.agents;
       state.providers = event.providers;
+      if (event.routines) state.routines = event.routines;
+      if (event.settings) state.settings = event.settings;
+      renderIdentity();
       renderSidebar();
+      renderRoutinesIfOpen();
       // Tras reconectar pudimos perder eventos: recargamos la conversación abierta.
       if (state.currentId) void loadConversation(state.currentId, { keepScroll: true });
       break;
@@ -193,11 +264,21 @@ function handleEvent(event) {
       renderSidebar();
       renderHeader();
       updateWorkingIndicator();
+      updateActionButton();
       if (state.currentId && !findAgent(state.currentId)) void navigate(null);
+      else if (state.currentId && findAgent(state.currentId)?.unread) scheduleMarkRead(state.currentId);
       break;
     case "providers":
       state.providers = event.providers;
       renderProviders();
+      break;
+    case "routines":
+      state.routines = event.routines;
+      renderRoutinesIfOpen();
+      break;
+    case "settings":
+      state.settings = event.settings;
+      renderIdentity();
       break;
     case "queue":
       state.queues.set(event.agentId, event.queue);
@@ -236,6 +317,7 @@ async function route() {
   const agent = id ? findAgent(id) : null;
   closeMenu();
   if (!agent) {
+    if (state.currentId) stopDictation({ cancel: true });
     state.currentId = null;
     elements.clear();
     document.body.classList.remove("show-chat");
@@ -245,8 +327,8 @@ async function route() {
     return;
   }
   const changed = state.currentId !== agent.id;
+  if (changed) stopDictation({ cancel: true });
   state.currentId = agent.id;
-  state.unread.delete(agent.id);
   document.body.classList.add("show-chat");
   $("#chat-empty").hidden = true;
   $("#conversation").hidden = false;
@@ -254,9 +336,11 @@ async function route() {
   renderHeader();
   if (changed) {
     restoreDraft();
+    renderAttachments();
     await loadConversation(agent.id);
     if (!coarsePointer) $("#composer-input").focus();
   }
+  scheduleMarkRead(agent.id, 0);
 }
 
 function goBack() {
@@ -264,7 +348,150 @@ function goBack() {
   else location.replace("#/");
 }
 
-// ---------- barra lateral ----------
+/** Avisa al servidor de que el usuario ya vio la conversación abierta. */
+function scheduleMarkRead(agentId, delay = 700) {
+  clearTimeout(readTimer);
+  readTimer = setTimeout(() => {
+    const agent = findAgent(agentId);
+    if (!agent?.unread || agentId !== state.currentId || document.hidden) return;
+    api(`/api/agents/${encodeURIComponent(agentId)}/read`, { method: "POST" }).catch(() => undefined);
+  }, delay);
+}
+
+// ---------- avatares ----------
+
+const BLOB_COLORS = ["#8b5cf6", "#e5484d", "#4cbb73", "#ef9f3a", "#6f6f6f", "#3b82f6", "#e0609d", "#22b3a3", "#c9a227", "#a07cf0"];
+
+const TENT = "M15.6 11.4Q20 3.6 24.4 11.4L34 28.2Q38.2 35 30.6 35H9.4Q1.8 35 6 28.2Z";
+
+/** Figuras con ojos al estilo de la app de referencia (viewBox 40×40). */
+const BLOB_SHAPES = [
+  {
+    body: [["rect", { x: 3.5, y: 10.5, width: 33, height: 20, rx: 10, transform: "rotate(-12 20 20.5)" }]],
+    eyes: [[22.6, 18.6], [28.2, 17.4]],
+    eye: { rx: 1.25, ry: 2.5, rotate: -12 },
+  },
+  { body: [["circle", { cx: 20, cy: 20, r: 15.5 }]], eyes: [[15.8, 20.5], [23.4, 20.5]], eye: { rx: 1.9, ry: 3.1, rotate: 0 } },
+  { body: [["path", { d: TENT }]], eyes: [[16.9, 25.5], [23.1, 25.5]], eye: { rx: 1.5, ry: 2.7, rotate: 0 } },
+  {
+    body: [["path", { d: "M16.2 12.6Q20 6.6 23.8 12.6L35.4 29Q38.9 34.4 32.4 34.4H7.6Q1.1 34.4 4.6 29Z" }]],
+    eyes: [[17.3, 27.2], [22.7, 27.2]],
+    eye: { rx: 1.35, ry: 1.35, rotate: 0 },
+  },
+  { body: [["path", { d: TENT, transform: "rotate(26 20 23)" }]], eyes: [[19.6, 19.8], [24.2, 22.2]], eye: { rx: 1.15, ry: 2.4, rotate: -64 } },
+  {
+    body: [
+      ["circle", { cx: 14.5, cy: 15.5, r: 8.5 }],
+      ["circle", { cx: 24.5, cy: 13.5, r: 8 }],
+      ["circle", { cx: 30, cy: 23, r: 7.8 }],
+      ["circle", { cx: 21, cy: 27.5, r: 9.2 }],
+      ["circle", { cx: 10.5, cy: 25, r: 7.8 }],
+    ],
+    eyes: [[18.4, 23.8], [25.2, 21.6]],
+    eye: { rx: 2.3, ry: 3.6, rotate: -38 },
+  },
+  {
+    body: [["rect", { x: 7, y: 7.5, width: 26, height: 25, rx: 9, transform: "rotate(-16 20 20)" }]],
+    eyes: [[17.2, 21.4], [22.4, 19.8]],
+    eye: { rx: 1.1, ry: 2.2, rotate: -16 },
+  },
+];
+
+const MASCOT = { body: [["circle", { cx: 20, cy: 20, r: 17.5 }]], eyes: [[22.6, 13.8], [28.6, 12.9]], eye: { rx: 1.7, ry: 3, rotate: -22 } };
+
+function svgElement(tag, attributes = {}) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [key, value] of Object.entries(attributes)) if (value !== null && value !== undefined) node.setAttribute(key, String(value));
+  return node;
+}
+
+function hashString(text) {
+  let hash = 2166136261;
+  for (const char of text) {
+    hash ^= char.codePointAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function drawBlob(shape, color) {
+  const svg = svgElement("svg", { viewBox: "0 0 40 40", class: "blob", "aria-hidden": "true", focusable: "false" });
+  const body = svgElement("g", { class: "body", fill: color });
+  for (const [tag, attributes] of shape.body) body.append(svgElement(tag, attributes));
+  svg.append(body);
+  for (const [cx, cy] of shape.eyes) {
+    svg.append(
+      svgElement("ellipse", {
+        class: "eye",
+        cx,
+        cy,
+        rx: shape.eye.rx,
+        ry: shape.eye.ry,
+        transform: shape.eye.rotate ? `rotate(${shape.eye.rotate} ${cx} ${cy})` : null,
+      }),
+    );
+  }
+  return svg;
+}
+
+/** Primeras combinaciones (figura, color): los primeros agentes salen todos distintos, como en la referencia. */
+const AVATAR_SEQUENCE = [
+  [0, "#8b5cf6"],
+  [1, "#e5484d"],
+  [2, "#4cbb73"],
+  [3, "#ef9f3a"],
+  [4, "#7a7a7a"],
+  [5, "#e0609d"],
+  [6, "#3b82f6"],
+  [1, "#22b3a3"],
+  [0, "#c9a227"],
+  [2, "#a07cf0"],
+  [5, "#ef9f3a"],
+  [6, "#4cbb73"],
+];
+
+/** Avatar estable de un agente: sale del número que le dio el servidor al crearlo (o de su id). */
+function blobAvatar(agent) {
+  const index = Number.isInteger(agent.avatar) ? agent.avatar : hashString(agent.id ?? String(agent));
+  const [shape, color] =
+    AVATAR_SEQUENCE[index] ?? [index % BLOB_SHAPES.length, BLOB_COLORS[Math.floor(index / BLOB_SHAPES.length) % BLOB_COLORS.length]];
+  return drawBlob(BLOB_SHAPES[shape], color);
+}
+
+function renderMascots() {
+  $("#login-mascot").replaceChildren(drawBlob(MASCOT, "#f2f2f2"));
+  $("#empty-mascot").replaceChildren(drawBlob(MASCOT, "#f2f2f2"));
+  $("#bot-avatar").prepend(drawBlob(MASCOT, "#f2f2f2"));
+}
+
+// ---------- iconos ----------
+
+const ICONS = {
+  clock: ["M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16", "M12 8v4.2l2.6 1.6"],
+  terminal: ["M5 7l4.5 5L5 17", "M12 17h7"],
+  file: ["M7.5 3.5h6.5l4.5 4.5v12.5h-11z", "M14 3.5V8h4.5"],
+  search: ["M11 5a6 6 0 1 0 0 12a6 6 0 1 0 0-12", "M16 16l4 4"],
+  spark: ["M12 4.5l1.7 5.8 5.8 1.7-5.8 1.7-1.7 5.8-1.7-5.8-5.8-1.7 5.8-1.7z"],
+  clip: ["M8.5 12.5l6-6a3 3 0 0 1 4.2 4.2l-7.4 7.4a5 5 0 0 1-7-7L11 4.4"],
+  close: ["M7 7l10 10M17 7L7 17"],
+};
+
+function icon(name) {
+  const svg = svgElement("svg", { viewBox: "0 0 24 24", "aria-hidden": "true", focusable: "false" });
+  for (const d of ICONS[name] ?? []) svg.append(svgElement("path", { d }));
+  return svg;
+}
+
+// ---------- identidad y barra lateral ----------
+
+function renderIdentity() {
+  const { botName, userName } = state.settings;
+  $("#bot-name").textContent = botName || "Cuadrilla";
+  const name = userName?.trim() || "Tú";
+  $("#user-name").textContent = name;
+  $("#user-avatar").textContent = name.charAt(0).toUpperCase();
+  updateTitle();
+}
 
 function findAgent(id) {
   return state.agents.find((agent) => agent.id === id) ?? null;
@@ -274,93 +501,120 @@ function agentName(id) {
   return findAgent(id)?.name ?? "un agente eliminado";
 }
 
-function renderSidebar() {
-  const list = $("#agent-list");
-  list.replaceChildren();
-  $("#sidebar-empty").hidden = state.agents.length > 0;
-  for (const agent of state.agents) {
-    const item = document.createElement("li");
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "agent-item";
-    button.setAttribute("aria-current", String(agent.id === state.currentId));
-    button.addEventListener("click", () => navigate(agent.id));
-
-    const body = document.createElement("div");
-    const nameLine = document.createElement("div");
-    nameLine.className = "name-line";
-    const name = document.createElement("span");
-    name.className = "name";
-    name.textContent = agent.name;
-    nameLine.append(name, providerBadge(agent.provider));
-    const preview = document.createElement("div");
-    preview.className = "preview";
-    preview.textContent = agentSubtitle(agent);
-    body.append(nameLine, preview);
-
-    const side = document.createElement("div");
-    side.className = "side";
-    const dot = document.createElement("span");
-    dot.className = "status-dot";
-    dot.dataset.state = agent.state;
-    dot.title = stateLabel(agent);
-    side.append(dot);
-    if (agent.queued > 0) {
-      const count = document.createElement("span");
-      count.className = "count";
-      count.textContent = `${agent.queued} en cola`;
-      side.append(count);
-    }
-    if (state.unread.has(agent.id)) {
-      const unread = document.createElement("span");
-      unread.className = "unread";
-      unread.title = "Mensajes nuevos";
-      side.append(unread);
-    }
-    button.append(avatar(agent.name), body, side);
-    item.append(button);
-    list.append(item);
-  }
-  document.title = state.unread.size ? `(${state.unread.size}) Cuadrilla` : "Cuadrilla";
+/** El agente abierto en una ventana visible no cuenta como no leído. */
+function isUnread(agent) {
+  return Boolean(agent.unread) && !(agent.id === state.currentId && !document.hidden);
 }
 
-function agentSubtitle(agent) {
-  if (agent.state === "working") return "Trabajando…";
-  if (agent.state === "paused") return "Cola en pausa";
-  return agent.preview || agent.role || "Sin mensajes todavía";
+function fold(text) {
+  return text
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase();
+}
+
+function renderSidebar() {
+  const container = $("#agent-groups");
+  container.replaceChildren();
+  $("#sidebar-empty").hidden = state.agents.length > 0;
+  const query = fold(state.search.trim());
+  const visible = state.agents.filter((agent) => !query || fold(`${agent.name} ${agent.role} ${agent.project}`).includes(query));
+  const groups = new Map();
+  for (const agent of visible) {
+    const key = agent.project || "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(agent);
+  }
+  const onlyUngrouped = groups.size === 1 && groups.has("");
+  for (const [project, agents] of groups) {
+    const section = document.createElement("section");
+    const title = document.createElement("h2");
+    title.className = "group-title";
+    title.textContent = project || (onlyUngrouped ? "Tu equipo" : "General");
+    const list = document.createElement("ul");
+    list.className = "agent-list";
+    for (const agent of agents) list.append(agentRow(agent));
+    section.append(title, list);
+    container.append(section);
+  }
+  if (query && !visible.length) {
+    const empty = document.createElement("p");
+    empty.className = "sidebar-empty";
+    empty.textContent = "Ningún agente coincide con la búsqueda.";
+    container.append(empty);
+  }
+  updateTitle();
+}
+
+function agentRow(agent) {
+  const item = document.createElement("li");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "agent-row";
+  button.setAttribute("aria-current", String(agent.id === state.currentId));
+  button.addEventListener("click", () => navigate(agent.id));
+
+  const texts = document.createElement("span");
+  texts.className = "texts";
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = agent.name;
+  const preview = document.createElement("span");
+  preview.className = "preview";
+  if (agent.state === "working") {
+    preview.textContent = "Trabajando…";
+    preview.dataset.tone = "working";
+  } else if (agent.state === "paused") {
+    preview.textContent = "Cola en pausa";
+    preview.dataset.tone = "paused";
+  } else {
+    preview.textContent = agent.preview || agent.role || "Sin mensajes todavía";
+  }
+  texts.append(name, preview);
+
+  const mark = document.createElement("span");
+  mark.className = "mark";
+  if (isUnread(agent)) {
+    mark.dataset.kind = "unread";
+    mark.title = "Mensajes nuevos";
+  } else if (agent.state === "working") {
+    mark.dataset.kind = "working";
+    mark.title = "Trabajando";
+  } else if (agent.queued > 0) {
+    mark.dataset.kind = "queued";
+    mark.title = `${agent.queued} en cola`;
+  }
+  button.append(blobAvatar(agent), texts, mark);
+  button.title = [agent.name, agent.role].filter(Boolean).join(" · ");
+  item.append(button);
+  return item;
+}
+
+function updateTitle() {
+  const count = state.agents.filter(isUnread).length;
+  document.title = count ? `(${count}) Cuadrilla` : "Cuadrilla";
 }
 
 function stateLabel(agent) {
   return { working: "Trabajando", queued: "Con mensajes en cola", paused: "En pausa", idle: "Libre" }[agent.state] ?? "";
 }
 
-function providerBadge(provider) {
-  const badge = document.createElement("span");
-  badge.className = "badge";
-  badge.dataset.provider = provider;
-  badge.textContent = { claude: "Claude", codex: "Codex", demo: "Demo" }[provider] ?? provider;
-  return badge;
+function providerLabel(provider) {
+  return { claude: "Claude", codex: "Codex", demo: "Demo" }[provider] ?? provider;
 }
 
-function avatar(name) {
-  const node = document.createElement("div");
-  node.className = "avatar";
-  node.setAttribute("aria-hidden", "true");
-  node.textContent = initials(name);
-  node.style.setProperty("--avatar", avatarColor(name));
-  return node;
-}
-
-function initials(name) {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  const letters = parts.length > 1 ? parts[0][0] + parts[1][0] : (parts[0] ?? "?").slice(0, 2);
-  return letters.toUpperCase();
-}
-
-function avatarColor(name) {
-  let hash = 0;
-  for (const char of name) hash = (hash * 31 + char.codePointAt(0)) % 360;
-  return `hsl(${hash} 52% 46%)`;
+function toggleSearch(force) {
+  const box = $("#search-box");
+  const open = force ?? box.hidden;
+  box.hidden = !open;
+  $("#search-toggle").setAttribute("aria-expanded", String(open));
+  if (open) {
+    $("#search-input").focus();
+  } else {
+    state.search = "";
+    $("#search-input").value = "";
+    renderSidebar();
+  }
 }
 
 // ---------- conversación ----------
@@ -368,19 +622,35 @@ function avatarColor(name) {
 function renderHeader() {
   const agent = findAgent(state.currentId);
   if (!agent) return;
-  const avatarNode = $("#chat-avatar");
-  avatarNode.textContent = initials(agent.name);
-  avatarNode.style.setProperty("--avatar", avatarColor(agent.name));
+  const avatar = $("#chat-avatar");
+  if (avatar.dataset.agent !== agent.id) {
+    avatar.replaceChildren(blobAvatar(agent));
+    avatar.dataset.agent = agent.id;
+  }
   $("#chat-name").textContent = agent.name;
-  const parts = [agent.role || "Asistente general", { claude: "Claude", codex: "Codex", demo: "Demo" }[agent.provider]];
+  const label =
+    agent.state === "working" ? "trabajando…" : agent.state === "paused" ? "en pausa" : agent.queued > 0 ? `${agent.queued} en cola` : "";
+  const stateNode = $("#chat-state");
+  stateNode.textContent = label;
+  stateNode.hidden = !label;
+  const parts = [agent.role || "Asistente general", providerLabel(agent.provider)];
   if (agent.model) parts.push(agent.model);
   if (agent.access === "total") parts.push("acceso total");
-  parts.push(stateLabel(agent).toLowerCase());
+  if (agent.project) parts.push(agent.project);
   $("#chat-meta").textContent = parts.filter(Boolean).join(" · ");
-  $("#stop").hidden = agent.state !== "working";
   const pause = document.querySelector('#agent-menu [data-action="pause"]');
   pause.textContent = agent.paused ? "Reanudar la cola" : "Pausar la cola";
-  $("#composer-input").placeholder = `Escribe a ${agent.name}…`;
+  updatePlaceholder();
+}
+
+function hasPendingDecision(agentId) {
+  return (state.messages.get(agentId) ?? []).some((message) => message.role === "decision" && !Number.isInteger(message.payload?.answer));
+}
+
+function updatePlaceholder() {
+  const agent = findAgent(state.currentId);
+  if (!agent) return;
+  $("#composer-input").placeholder = hasPendingDecision(agent.id) ? "Escribe tu respuesta o habla de otra cosa" : `Escribe a ${agent.name}…`;
 }
 
 async function loadConversation(agentId, { keepScroll = false } = {}) {
@@ -397,6 +667,7 @@ async function loadConversation(agentId, { keepScroll = false } = {}) {
     state.queues.set(agentId, queue.queue);
     renderAllMessages();
     renderQueue();
+    updatePlaceholder();
     if (!keepScroll || atBottom) scrollToBottom(true);
   } catch (error) {
     if (error.status !== 401) showToast(error.message, "error");
@@ -448,15 +719,6 @@ function upsertMessage(agentId, message) {
     if (index >= 0) list[index] = { ...list[index], ...message };
     else list.push(message);
   }
-  const notable =
-    (message.role === "assistant" && message.status === "completed" && message.text.trim()) ||
-    (message.role === "teammate" && message.status === "queued");
-  if (notable && (agentId !== state.currentId || document.hidden)) {
-    if (agentId !== state.currentId) {
-      state.unread.add(agentId);
-      renderSidebar();
-    }
-  }
   if (agentId !== state.currentId || !list) return;
   const scroller = $("#messages");
   const atBottom = isNearBottom(scroller);
@@ -467,7 +729,18 @@ function upsertMessage(agentId, message) {
   else $("#message-list").append(node);
   elements.set(message.id, node);
   updateWorkingIndicator();
+  if (message.role === "decision") updatePlaceholder();
   if (atBottom || (!existing && message.role === "user")) scrollToBottom();
+}
+
+function refreshMessage(agentId, messageId) {
+  if (agentId !== state.currentId) return;
+  const message = (state.messages.get(agentId) ?? []).find((item) => item.id === messageId);
+  const existing = elements.get(messageId);
+  if (!message || !existing) return;
+  const node = buildMessage(message);
+  existing.replaceWith(node);
+  elements.set(messageId, node);
 }
 
 function applyDelta(agentId, messageId, delta) {
@@ -502,15 +775,44 @@ function flushDirty() {
 }
 
 function buildMessage(message) {
+  if (message.role === "decision") return buildDecision(message);
   const node = document.createElement("div");
   node.dataset.id = message.id;
   node.dataset.status = message.status;
   const time = formatTime(message.createdAt);
+  node.title = time;
 
   if (message.role === "activity") {
     node.className = "msg msg-activity";
-    node.textContent = `⚙ ${message.text}`;
-    node.title = time;
+    const created = message.text.match(/^(Creó|Creaste) la rutina «(.+)» · (.+)$/s);
+    if (created) {
+      const what = document.createElement("span");
+      what.className = "what";
+      what.textContent = created[2];
+      node.append(`${created[1]} la rutina`, icon("clock"), what, `· ${created[3]}`);
+    } else {
+      const kind = /^Ejecutó/.test(message.text) ? "terminal" : /^Modificó/.test(message.text) ? "file" : /^Buscó/.test(message.text) ? "search" : "spark";
+      const text = document.createElement("span");
+      text.textContent = message.text;
+      node.append(icon(kind), text);
+    }
+    return node;
+  }
+
+  if (message.role === "routine") {
+    node.className = "msg msg-routine";
+    const what = document.createElement("span");
+    what.className = "what";
+    what.textContent = message.text;
+    node.append(message.payload?.manual ? "Rutina (a mano)" : "Rutina", icon("clock"), what);
+    const status = routineStatus(message.status);
+    if (status) {
+      const statusNode = document.createElement("span");
+      statusNode.className = "status";
+      statusNode.textContent = `· ${status}`;
+      node.append(statusNode);
+    }
+    node.title = [message.payload?.schedule, time].filter(Boolean).join(" · ");
     return node;
   }
 
@@ -530,26 +832,25 @@ function buildMessage(message) {
     case "user":
       node.className = "msg msg-user";
       bubble.textContent = message.text;
-      meta.textContent = [time, userStatus(message.status)].filter(Boolean).join(" · ");
+      meta.textContent = userStatus(message.status);
       break;
     case "assistant":
       node.className = "msg msg-assistant";
       if (!message.text && message.status === "streaming") bubble.append(thinkingDots());
       else renderMarkdown(message.text, bubble);
       if (message.status === "streaming" && message.text) bubble.classList.add("typing");
-      meta.textContent = [time, assistantStatus(message.status)].filter(Boolean).join(" · ");
+      meta.textContent = assistantStatus(message.status);
       break;
     case "teammate":
       node.className = "msg msg-teammate";
       label = `${message.replyTo ? "Respuesta de" : "Mensaje de"} ${agentName(message.fromAgentId)}`;
       renderMarkdown(message.text, bubble);
-      meta.textContent = [time, teammateStatus(message.status)].filter(Boolean).join(" · ");
+      meta.textContent = teammateStatus(message.status);
       break;
     case "notice":
       node.className = "msg msg-outgoing";
       label = `${message.replyTo ? "Respuesta para" : "Enviado a"} ${message.toAgentIds.map(agentName).join(", ")}`;
       renderMarkdown(message.text, bubble);
-      meta.textContent = time;
       break;
     default:
       node.className = "msg msg-notice";
@@ -563,9 +864,88 @@ function buildMessage(message) {
     labelNode.textContent = label;
     bubble.prepend(labelNode);
   }
-  bubble.classList.add("md");
+  if (message.role !== "user") bubble.classList.add("md");
   node.append(bubble, meta);
   return node;
+}
+
+function buildDecision(message) {
+  const node = document.createElement("div");
+  node.className = "msg msg-decision";
+  node.dataset.id = message.id;
+  const payload = message.payload ?? {};
+  const options = Array.isArray(payload.options) ? payload.options : [];
+  const answered = Number.isInteger(payload.answer);
+  const card = document.createElement("div");
+  card.className = "decision";
+  card.dataset.answered = String(answered);
+  const question = document.createElement("p");
+  question.className = "decision-question";
+  question.textContent = message.text;
+  const list = document.createElement("ul");
+  list.className = "decision-options";
+  options.forEach((option, index) => {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "decision-option";
+    button.disabled = answered || answering.has(message.id);
+    if (answered) button.dataset.chosen = String(payload.answer === index);
+    const letter = document.createElement("span");
+    letter.className = "decision-letter";
+    letter.textContent = LETTERS[index] ?? String(index + 1);
+    const text = document.createElement("span");
+    const labelNode = document.createElement("span");
+    labelNode.className = "decision-label";
+    labelNode.textContent = option.label ?? "";
+    text.append(labelNode);
+    if (!answered && payload.recommended === index) {
+      const tag = document.createElement("span");
+      tag.className = "decision-tag";
+      tag.textContent = "Recomendada";
+      text.append(tag);
+    }
+    if (option.detail) {
+      const detail = document.createElement("span");
+      detail.className = "decision-detail";
+      detail.textContent = option.detail;
+      text.append(detail);
+    }
+    button.append(letter, text);
+    button.addEventListener("click", () => void answerDecision(message, index));
+    item.append(button);
+    list.append(item);
+  });
+  card.append(question, list);
+  if (answered && payload.answeredAt) {
+    const note = document.createElement("p");
+    note.className = "decision-note";
+    note.textContent = `Respondiste ${formatTime(payload.answeredAt)}`;
+    card.append(note);
+  }
+  node.append(card);
+  return node;
+}
+
+async function answerDecision(message, index) {
+  if (answering.has(message.id)) return;
+  answering.add(message.id);
+  refreshMessage(message.agentId, message.id);
+  try {
+    const result = await api(`/api/agents/${encodeURIComponent(message.agentId)}/decisions/${encodeURIComponent(message.id)}`, {
+      method: "POST",
+      body: { choice: index },
+    });
+    upsertMessage(message.agentId, result.decision);
+    upsertMessage(message.agentId, result.message);
+    scrollToBottom();
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    answering.delete(message.id);
+    refreshMessage(message.agentId, message.id);
+    updatePlaceholder();
+  }
 }
 
 function thinkingDots() {
@@ -612,6 +992,10 @@ function teammateStatus(status) {
   return { queued: "en cola", running: "atendiendo…", failed: "falló", cancelled: "cancelado", interrupted: "detenido" }[status] ?? "";
 }
 
+function routineStatus(status) {
+  return { queued: "en cola", running: "en curso…", failed: "falló", cancelled: "cancelada", interrupted: "detenida" }[status] ?? "";
+}
+
 function formatTime(timestamp) {
   if (!timestamp) return "";
   const date = new Date(timestamp);
@@ -620,6 +1004,11 @@ function formatTime(timestamp) {
   return sameDay
     ? date.toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" })
     : date.toLocaleString("es", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function formatWhen(timestamp) {
+  if (!timestamp) return "";
+  return new Date(timestamp).toLocaleString("es", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
 function isNearBottom(scroller) {
@@ -761,8 +1150,7 @@ function renderQueue() {
   const waiting = queue.filter((delivery) => delivery.status === "queued");
   const bar = $("#queue-bar");
   bar.hidden = waiting.length === 0;
-  $("#queue-summary").textContent =
-    waiting.length === 1 ? "1 mensaje esperando turno" : `${waiting.length} mensajes esperando turno`;
+  $("#queue-summary").textContent = waiting.length === 1 ? "1 mensaje esperando turno" : `${waiting.length} mensajes esperando turno`;
   const toggle = $("#queue-toggle");
   toggle.setAttribute("aria-expanded", String(state.queueOpen));
   const list = $("#queue-list");
@@ -832,20 +1220,76 @@ function restoreDraft() {
   const input = $("#composer-input");
   input.value = value;
   autosize(input);
+  updateActionButton();
 }
 
 function autosize(textarea) {
+  if (!textarea.value) {
+    // Vacío: una sola línea aunque el texto de ayuda sea largo.
+    textarea.style.height = "";
+    return;
+  }
   textarea.style.height = "auto";
   textarea.style.height = `${Math.min(textarea.scrollHeight + 2, window.innerHeight * 0.4)}px`;
 }
 
-async function sendMessage(event) {
-  event?.preventDefault();
+function currentAttachments() {
+  return state.attachments.get(state.currentId) ?? [];
+}
+
+/** Modo del botón morado: enviar, hablar (dictado que se envía solo) o detener al agente. */
+function updateActionButton() {
+  const button = $("#send");
+  const agent = findAgent(state.currentId);
+  const text = $("#composer-input").value.trim();
+  const files = currentAttachments();
+  const ready = files.some((file) => file.status === "ready");
+  const uploading = files.some((file) => file.status === "uploading");
+  const voiceActive = dictation?.mode === "voice";
+  let mode = "send";
+  if (voiceActive) mode = "voice";
+  else if (text || ready || uploading) mode = "send";
+  else if (agent?.state === "working") mode = "stop";
+  else if (Recognition) mode = "voice";
+  button.dataset.mode = mode;
+  const label = {
+    send: "Enviar",
+    voice: voiceActive ? "Terminar y enviar" : "Hablar y enviar al terminar",
+    stop: `Detener a ${agent?.name ?? "el agente"}`,
+  }[mode];
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  button.setAttribute("aria-pressed", String(voiceActive));
+  button.disabled = !agent || (mode === "send" && (uploading || (!text && !ready)));
+}
+
+function onComposerSubmit(event) {
+  event.preventDefault();
+  const mode = $("#send").dataset.mode;
+  if (mode === "stop") void stopAgent();
+  else if (mode === "voice") toggleDictation("voice");
+  else void sendMessage();
+}
+
+async function sendMessage() {
   const input = $("#composer-input");
-  const original = input.value;
-  const text = original.trim();
-  if (!text || !state.currentId) return;
   const agentId = state.currentId;
+  if (!agentId) return;
+  const files = currentAttachments();
+  if (files.some((file) => file.status === "uploading")) {
+    showToast("Espera a que terminen de subir los archivos.");
+    return;
+  }
+  const ready = files.filter((file) => file.status === "ready");
+  const original = input.value;
+  let text = original.trim();
+  if (ready.length) {
+    const list = ready.map((file) => `- ${file.relativePath}`).join("\n");
+    const intro = ready.length === 1 ? "Adjunté este archivo en tu carpeta:" : "Adjunté estos archivos en tu carpeta:";
+    text = `${text ? `${text}\n\n` : ""}${intro}\n${list}`;
+  }
+  if (!text) return;
+  stopDictation({ cancel: true });
   const button = $("#send");
   button.disabled = true;
   try {
@@ -856,14 +1300,170 @@ async function sendMessage(event) {
       autosize(input);
       saveDraft();
     }
+    state.attachments.set(
+      agentId,
+      (state.attachments.get(agentId) ?? []).filter((file) => !ready.includes(file)),
+    );
+    if (state.currentId === agentId) renderAttachments();
     upsertMessage(agentId, result.message);
     scrollToBottom();
   } catch (error) {
     showToast(error.message, "error");
   } finally {
-    button.disabled = false;
+    updateActionButton();
     if (!coarsePointer) input.focus();
   }
+}
+
+// ---------- archivos adjuntos ----------
+
+function renderAttachments() {
+  const box = $("#attachments");
+  box.replaceChildren();
+  const files = currentAttachments();
+  box.hidden = files.length === 0;
+  for (const file of files) {
+    const chip = document.createElement("span");
+    chip.className = "attachment";
+    chip.dataset.state = file.status;
+    const name = document.createElement("span");
+    name.className = "file-name";
+    name.textContent = file.status === "uploading" ? `${file.name} · subiendo…` : file.name;
+    name.title = file.relativePath ?? file.name;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Quitar ${file.name}`);
+    remove.title = "Quitar";
+    remove.append(icon("close"));
+    remove.addEventListener("click", () => {
+      state.attachments.set(
+        file.agentId,
+        (state.attachments.get(file.agentId) ?? []).filter((item) => item !== file),
+      );
+      renderAttachments();
+    });
+    chip.append(icon("clip"), name, remove);
+    box.append(chip);
+  }
+  updateActionButton();
+}
+
+async function addFiles(fileList) {
+  const agentId = state.currentId;
+  if (!agentId) return;
+  for (const file of [...fileList]) {
+    if (file.size > MAX_UPLOAD_BYTES) {
+      showToast(`«${file.name}» supera los 25 MB.`, "error");
+      continue;
+    }
+    if (file.size === 0) {
+      showToast(`«${file.name}» está vacío.`, "error");
+      continue;
+    }
+    const entry = { agentId, name: file.name, status: "uploading", relativePath: null };
+    state.attachments.set(agentId, [...(state.attachments.get(agentId) ?? []), entry]);
+    if (state.currentId === agentId) renderAttachments();
+    try {
+      const saved = await uploadFile(agentId, file);
+      entry.status = "ready";
+      entry.name = saved.name;
+      entry.relativePath = saved.relativePath;
+    } catch (error) {
+      state.attachments.set(
+        agentId,
+        (state.attachments.get(agentId) ?? []).filter((item) => item !== entry),
+      );
+      if (error.status !== 401) showToast(`No se pudo subir «${file.name}»: ${error.message}`, "error");
+    }
+    if (state.currentId === agentId) renderAttachments();
+  }
+}
+
+// ---------- dictado por voz ----------
+
+function speechLanguage() {
+  const language = navigator.language || "es-ES";
+  return language.toLowerCase().startsWith("es") ? language : "es-ES";
+}
+
+function toggleDictation(mode) {
+  if (dictation) {
+    stopDictation();
+    return;
+  }
+  startDictation(mode);
+}
+
+/** mode «dictate» escribe en el cuadro; «voice» además envía el mensaje al terminar de hablar. */
+function startDictation(mode) {
+  if (!Recognition || !state.currentId) return;
+  const input = $("#composer-input");
+  const rec = new Recognition();
+  rec.lang = speechLanguage();
+  rec.interimResults = true;
+  rec.continuous = mode === "dictate";
+  rec.maxAlternatives = 1;
+  const base = input.value && !/\s$/.test(input.value) ? `${input.value} ` : input.value;
+  const session = { mode, base, final: "", agentId: state.currentId, cancelled: false };
+  rec.onresult = (event) => {
+    if (dictation !== session) return;
+    let interim = "";
+    for (let index = event.resultIndex; index < event.results.length; index += 1) {
+      const result = event.results[index];
+      if (result.isFinal) session.final += result[0].transcript;
+      else interim += result[0].transcript;
+    }
+    if (state.currentId !== session.agentId) return;
+    input.value = session.base + session.final + interim;
+    autosize(input);
+    updateActionButton();
+  };
+  rec.onerror = (event) => {
+    const messages = {
+      "not-allowed": "Permite el uso del micrófono para dictar.",
+      "service-not-allowed": "El navegador no permite el dictado aquí.",
+      "audio-capture": "No se encontró un micrófono.",
+      network: "El dictado necesita conexión a internet (lo procesa el servicio de voz del navegador).",
+      "language-not-supported": "El dictado no está disponible en español en este navegador.",
+    };
+    if (event.error === "no-speech" || event.error === "aborted") return;
+    showToast(messages[event.error] ?? `El dictado falló (${event.error}).`, "error");
+  };
+  rec.onend = () => {
+    if (dictation !== session) return;
+    dictation = null;
+    recognition = null;
+    updateDictationUi();
+    saveDraft();
+    if (session.mode === "voice" && !session.cancelled && state.currentId === session.agentId && input.value.trim()) void sendMessage();
+  };
+  try {
+    rec.start();
+  } catch (error) {
+    showToast(`No se pudo iniciar el dictado: ${error.message}`, "error");
+    return;
+  }
+  dictation = session;
+  recognition = rec;
+  updateDictationUi();
+}
+
+function stopDictation({ cancel = false } = {}) {
+  if (!dictation || !recognition) return;
+  if (cancel) dictation.cancelled = true;
+  try {
+    recognition.stop();
+  } catch {
+    // Ya estaba detenido.
+  }
+}
+
+function updateDictationUi() {
+  const button = $("#dictate");
+  const active = dictation?.mode === "dictate";
+  button.setAttribute("aria-pressed", String(active));
+  button.title = active ? "Dejar de dictar" : "Dictar";
+  updateActionButton();
 }
 
 // ---------- acciones del agente ----------
@@ -888,13 +1488,15 @@ async function agentAction(action) {
   try {
     if (action === "edit") {
       await openAgentDialog(agent);
+    } else if (action === "routines") {
+      openRoutines(agent.id);
     } else if (action === "pause") {
       await api(`${path}/pause`, { method: "POST", body: { paused: !agent.paused } });
       showToast(agent.paused ? "Cola reanudada." : "Cola en pausa: los mensajes nuevos esperarán.");
     } else if (action === "reset") {
       const ok = await confirmAction(
         "¿Empezar de cero?",
-        `Se borra el historial de ${agent.name} y su cola, y empieza una conversación nueva. Los archivos de su carpeta no se tocan.`,
+        `Se borra el historial de ${agent.name} y su cola, y empieza una conversación nueva. Los archivos de su carpeta y sus rutinas no se tocan.`,
         "Empezar de cero",
       );
       if (!ok) return;
@@ -903,15 +1505,17 @@ async function agentAction(action) {
       state.hasMore.set(agent.id, false);
       renderAllMessages();
       renderQueue();
+      updatePlaceholder();
     } else if (action === "delete") {
       const ok = await confirmAction(
         `¿Eliminar a ${agent.name}?`,
-        "Se borran el agente, su historial y su cola. Su carpeta de trabajo queda en el servidor por si la necesitas.",
+        "Se borran el agente, su historial, su cola y sus rutinas. Su carpeta de trabajo queda en el equipo por si la necesitas.",
         "Eliminar",
       );
       if (!ok) return;
       await api(path, { method: "DELETE" });
       state.messages.delete(agent.id);
+      state.attachments.delete(agent.id);
       await navigate(null);
     }
   } catch (error) {
@@ -938,9 +1542,12 @@ async function openAgentDialog(agent = null) {
   $("#agent-error").textContent = "";
   $("#agent-dialog-title").textContent = agent ? `Editar a ${agent.name}` : "Nuevo agente";
   form.elements.name.value = agent?.name ?? "";
+  form.elements.project.value = agent ? agent.project : (findAgent(state.currentId)?.project ?? "");
   form.elements.role.value = agent?.role ?? "";
   form.elements.instructions.value = agent?.instructions ?? "";
   form.elements.access.value = agent?.access ?? "carpeta";
+  const projects = [...new Set(state.agents.map((item) => item.project).filter(Boolean))];
+  $("#project-options").replaceChildren(...projects.map((project) => new Option(project, project)));
   fillProviders(agent?.provider);
   updateAccessWarning();
   openDialog($("#agent-dialog"));
@@ -1029,6 +1636,7 @@ async function saveAgent(event) {
   }
   const body = {
     name,
+    project: form.elements.project.value,
     role: form.elements.role.value,
     instructions: form.elements.instructions.value,
     provider: form.elements.provider.value,
@@ -1056,10 +1664,199 @@ async function saveAgent(event) {
   }
 }
 
+// ---------- rutinas ----------
+
+const DAYS = [
+  [1, "L", "lunes"],
+  [2, "M", "martes"],
+  [3, "M", "miércoles"],
+  [4, "J", "jueves"],
+  [5, "V", "viernes"],
+  [6, "S", "sábado"],
+  [0, "D", "domingo"],
+];
+
+function buildDayPicker() {
+  const picker = $("#day-picker");
+  for (const [value, short, long] of DAYS) {
+    const label = document.createElement("label");
+    label.title = long;
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = "days";
+    input.value = String(value);
+    input.checked = true;
+    input.setAttribute("aria-label", long);
+    const text = document.createElement("span");
+    text.textContent = short;
+    label.append(input, text);
+    picker.append(label);
+  }
+}
+
+function openRoutines(agentId = null) {
+  routinesFilter = agentId;
+  $("#routines-title").textContent = agentId ? `Rutinas de ${agentName(agentId)}` : "Rutinas";
+  const form = $("#routine-form");
+  form.reset();
+  $("#routine-error").textContent = "";
+  const select = form.elements.agentId;
+  select.replaceChildren(...state.agents.map((agent) => new Option(agent.name, agent.id)));
+  const preselect = agentId ?? state.currentId;
+  if (preselect && findAgent(preselect)) select.value = preselect;
+  updateRoutineKind();
+  renderRoutines();
+  openDialog($("#routines-dialog"));
+}
+
+function renderRoutinesIfOpen() {
+  if ($("#routines-dialog").open) renderRoutines();
+}
+
+function renderRoutines() {
+  const list = $("#routine-list");
+  list.replaceChildren();
+  const routines = state.routines.filter((routine) => !routinesFilter || routine.agentId === routinesFilter);
+  $("#routines-empty").hidden = routines.length > 0;
+  for (const routine of routines) list.append(routineItem(routine));
+  const form = $("#routine-form");
+  const noAgents = state.agents.length === 0;
+  form.hidden = noAgents;
+  if (noAgents) $("#routines-empty").textContent = "Crea un agente primero: las rutinas siempre las hace un agente.";
+}
+
+function routineItem(routine) {
+  const item = document.createElement("li");
+  item.className = "routine";
+  item.dataset.enabled = String(routine.enabled);
+  const title = document.createElement("div");
+  title.className = "r-title";
+  title.textContent = routine.name;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "switch";
+  toggle.setAttribute("role", "switch");
+  toggle.setAttribute("aria-checked", String(routine.enabled));
+  toggle.setAttribute("aria-label", routine.enabled ? `Pausar «${routine.name}»` : `Activar «${routine.name}»`);
+  toggle.title = routine.enabled ? "Activa" : "En pausa";
+  toggle.addEventListener("click", () => void routineRequest(`/api/routines/${encodeURIComponent(routine.id)}`, "PATCH", { enabled: !routine.enabled }));
+  const meta = document.createElement("div");
+  meta.className = "r-meta";
+  const when = routine.enabled ? (routine.nextRunAt ? `próxima: ${formatWhen(routine.nextRunAt)}` : "sin próxima ejecución") : "en pausa";
+  meta.textContent = [routine.agentName, routine.description, routine.running ? "en curso…" : when].filter(Boolean).join(" · ");
+  const prompt = document.createElement("div");
+  prompt.className = "r-prompt";
+  prompt.textContent = routine.prompt;
+  const actions = document.createElement("div");
+  actions.className = "r-actions";
+  const run = document.createElement("button");
+  run.type = "button";
+  run.className = "button ghost";
+  run.textContent = "Ejecutar ahora";
+  run.disabled = routine.running;
+  run.addEventListener("click", async () => {
+    if (await routineRequest(`/api/routines/${encodeURIComponent(routine.id)}/run`, "POST")) showToast(`«${routine.name}» quedó en la cola de ${routine.agentName}.`);
+  });
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "button ghost";
+  open.textContent = "Ver conversación";
+  open.addEventListener("click", () => {
+    closeDialog($("#routines-dialog"));
+    void navigate(routine.agentId);
+  });
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "button danger-soft";
+  remove.textContent = "Eliminar";
+  remove.addEventListener("click", async () => {
+    const ok = await confirmAction(`¿Eliminar la rutina «${routine.name}»?`, "Deja de ejecutarse. Lo que ya hizo queda en la conversación.", "Eliminar");
+    if (ok) await routineRequest(`/api/routines/${encodeURIComponent(routine.id)}`, "DELETE");
+  });
+  actions.append(run, open, remove);
+  item.append(title, toggle, meta, prompt, actions);
+  return item;
+}
+
+async function routineRequest(path, method, body) {
+  try {
+    await api(path, { method, body });
+    return true;
+  } catch (error) {
+    showToast(error.message, "error");
+    return false;
+  }
+}
+
+function updateRoutineKind() {
+  const form = $("#routine-form");
+  const interval = form.elements.kind.value === "interval";
+  $("#routine-times").hidden = interval;
+  $("#routine-interval").hidden = !interval;
+}
+
+/** Acepta «9», «9:30», «9.30» o «9h» y los deja como HH:MM; lo demás lo valida el servidor. */
+function parseTimes(raw) {
+  return raw
+    .split(/[,;\s]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const match = part.match(/^(\d{1,2})(?:[:.h](\d{2})?)?$/i);
+      return match ? `${match[1].padStart(2, "0")}:${match[2] ?? "00"}` : part;
+    });
+}
+
+async function saveRoutine(event) {
+  event.preventDefault();
+  const form = $("#routine-form");
+  const error = $("#routine-error");
+  error.textContent = "";
+  const body = {
+    agentId: form.elements.agentId.value,
+    name: form.elements.name.value.trim(),
+    prompt: form.elements.prompt.value.trim(),
+  };
+  if (!body.name || !body.prompt) {
+    error.textContent = "Ponle un nombre y escribe qué debe hacer.";
+    return;
+  }
+  if (form.elements.kind.value === "interval") {
+    body.everyMinutes = Number(form.elements.everyMinutes.value);
+  } else {
+    body.times = parseTimes(form.elements.times.value);
+    if (!body.times.length) {
+      error.textContent = "Indica al menos una hora, por ejemplo 09:00.";
+      return;
+    }
+    const days = [...form.querySelectorAll('input[name="days"]:checked')].map((input) => Number(input.value));
+    if (!days.length) {
+      error.textContent = "Elige al menos un día.";
+      return;
+    }
+    if (days.length < 7) body.days = days;
+  }
+  const button = $("#routine-save");
+  button.disabled = true;
+  try {
+    const result = await api("/api/routines", { method: "POST", body });
+    form.elements.name.value = "";
+    form.elements.prompt.value = "";
+    showToast(`Rutina creada: ${result.routine.description}.`);
+  } catch (problem) {
+    error.textContent = problem.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 // ---------- ajustes ----------
 
-function openSettings() {
+function openSettings({ focusName = false } = {}) {
   renderProviders();
+  const names = $("#names-form");
+  names.elements.userName.value = state.settings.userName ?? "";
+  names.elements.botName.value = state.settings.botName === "Cuadrilla" ? "" : (state.settings.botName ?? "");
   const paths = $("#paths");
   paths.replaceChildren();
   for (const [label, value] of [
@@ -1074,6 +1871,27 @@ function openSettings() {
   }
   $("#version").textContent = `Cuadrilla ${state.version} · límite de ${state.maxHops} reenvíos seguidos entre agentes.`;
   openDialog($("#settings-dialog"));
+  if (focusName) names.elements.userName.focus();
+}
+
+async function saveNames(event) {
+  event.preventDefault();
+  const form = $("#names-form");
+  const button = $("#names-save");
+  button.disabled = true;
+  try {
+    const result = await api("/api/settings", {
+      method: "PATCH",
+      body: { userName: form.elements.userName.value, botName: form.elements.botName.value },
+    });
+    state.settings = result.settings;
+    renderIdentity();
+    showToast("Nombres guardados.");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderProviders() {
@@ -1154,21 +1972,34 @@ function showToast(message, tone = "info") {
   toast.dataset.tone = tone;
   toast.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => {
-    toast.hidden = true;
-  }, tone === "error" ? 6_000 : 3_500);
+  toastTimer = setTimeout(
+    () => {
+      toast.hidden = true;
+    },
+    tone === "error" ? 6_000 : 3_500,
+  );
 }
 
 function bindUi() {
   $("#login-form").addEventListener("submit", login);
   $("#new-agent").addEventListener("click", () => openAgentDialog());
   $("#first-agent").addEventListener("click", () => openAgentDialog());
-  $("#open-settings").addEventListener("click", openSettings);
+  $("#search-toggle").addEventListener("click", () => toggleSearch());
+  $("#search-input").addEventListener("input", (event) => {
+    state.search = event.target.value;
+    renderSidebar();
+  });
+  $("#search-input").addEventListener("keydown", (event) => {
+    if (event.key === "Escape") toggleSearch(false);
+  });
+  $("#open-settings").addEventListener("click", () => openSettings());
+  $("#open-profile").addEventListener("click", () => openSettings({ focusName: true }));
+  $("#open-routines").addEventListener("click", () => openRoutines());
   $("#settings-close").addEventListener("click", () => closeDialog($("#settings-dialog")));
+  $("#names-form").addEventListener("submit", saveNames);
   $("#refresh-providers").addEventListener("click", refreshProviders);
   $("#logout").addEventListener("click", logout);
   $("#back").addEventListener("click", goBack);
-  $("#stop").addEventListener("click", stopAgent);
   $("#agent-menu-button").addEventListener("click", (event) => {
     event.stopPropagation();
     toggleMenu();
@@ -1190,10 +2021,11 @@ function bindUi() {
   $("#load-more").addEventListener("click", loadOlder);
 
   const input = $("#composer-input");
-  $("#composer").addEventListener("submit", sendMessage);
+  $("#composer").addEventListener("submit", onComposerSubmit);
   input.addEventListener("input", () => {
     autosize(input);
     saveDraft();
+    updateActionButton();
   });
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !coarsePointer) {
@@ -1201,6 +2033,32 @@ function bindUi() {
       void sendMessage();
     }
   });
+  input.addEventListener("paste", (event) => {
+    const files = event.clipboardData?.files;
+    if (files?.length) {
+      event.preventDefault();
+      void addFiles(files);
+    }
+  });
+  $("#attach").addEventListener("click", () => $("#file-input").click());
+  $("#file-input").addEventListener("change", (event) => {
+    const files = [...event.target.files];
+    event.target.value = "";
+    void addFiles(files);
+  });
+  const conversation = $("#conversation");
+  conversation.addEventListener("dragover", (event) => {
+    if (event.dataTransfer?.types?.includes("Files")) event.preventDefault();
+  });
+  conversation.addEventListener("drop", (event) => {
+    if (!event.dataTransfer?.files?.length) return;
+    event.preventDefault();
+    void addFiles(event.dataTransfer.files);
+  });
+  if (Recognition) {
+    $("#dictate").hidden = false;
+    $("#dictate").addEventListener("click", () => toggleDictation("dictate"));
+  }
 
   const form = $("#agent-form");
   form.addEventListener("submit", saveAgent);
@@ -1213,14 +2071,18 @@ function bindUi() {
   form.elements.model.addEventListener("change", () => refreshEffortOptions());
   for (const radio of form.querySelectorAll('input[name="access"]')) radio.addEventListener("change", updateAccessWarning);
 
+  buildDayPicker();
+  const routineForm = $("#routine-form");
+  routineForm.addEventListener("submit", saveRoutine);
+  for (const radio of routineForm.querySelectorAll('input[name="kind"]')) radio.addEventListener("change", updateRoutineKind);
+  $("#routines-close").addEventListener("click", () => closeDialog($("#routines-dialog")));
+
   window.addEventListener("hashchange", () => void route());
   document.addEventListener("visibilitychange", () => {
     if (document.hidden || $("#app").hidden) return;
     if (!events || events.readyState === EventSource.CLOSED) connectEvents();
-    if (state.currentId) {
-      state.unread.delete(state.currentId);
-      renderSidebar();
-    }
+    renderSidebar();
+    if (state.currentId) scheduleMarkRead(state.currentId, 0);
   });
 }
 

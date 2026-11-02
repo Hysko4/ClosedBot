@@ -5,6 +5,10 @@ export const SESSION_COOKIE = "cuadrilla_sesion";
 export const PASSWORD_META = "password_hash";
 export const MIN_PASSWORD_LENGTH = 10;
 
+/** Un código de acceso de un solo uso (el que usa el acceso directo de Windows) vale este tiempo. */
+export const LOGIN_CODE_TTL_MS = 2 * 60_000;
+const MAX_LOGIN_CODES = 20;
+
 const SCRYPT_N = 1 << 15;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
@@ -81,6 +85,8 @@ export class Auth {
   readonly #now: () => number;
   readonly #envHash: Promise<string> | null;
   readonly #limiter: LoginLimiter;
+  /** Códigos de un solo uso pendientes: hash → vencimiento. Solo en memoria. */
+  readonly #codes = new Map<string, number>();
 
   constructor(options: AuthOptions) {
     this.#store = options.store;
@@ -106,6 +112,41 @@ export class Auth {
       return { ok: false, reason: "invalid" };
     }
     this.#limiter.succeed(clientKey);
+    return this.#createSession(userAgent);
+  }
+
+  /**
+   * Crea un código de un solo uso que abre sesión sin contraseña. Solo lo pide el lanzador de escritorio,
+   * con el token de control, para abrir la ventana de la app ya dentro.
+   */
+  createLoginCode(): string {
+    const now = this.#now();
+    for (const [hash, expiresAt] of this.#codes) if (expiresAt <= now) this.#codes.delete(hash);
+    while (this.#codes.size >= MAX_LOGIN_CODES) {
+      const oldest = this.#codes.keys().next().value;
+      if (oldest === undefined) break;
+      this.#codes.delete(oldest);
+    }
+    const code = randomBytes(32).toString("base64url");
+    this.#codes.set(hashToken(code), now + LOGIN_CODE_TTL_MS);
+    return code;
+  }
+
+  redeemLoginCode(code: unknown, clientKey: string, userAgent: string | null): LoginResult {
+    const blocked = this.#limiter.blockedFor(clientKey);
+    if (blocked > 0) return { ok: false, reason: "locked", retryAfterSeconds: Math.ceil(blocked / 1_000) };
+    const hash = typeof code === "string" && code.length <= 200 ? hashToken(code) : null;
+    const expiresAt = hash ? this.#codes.get(hash) : undefined;
+    if (hash) this.#codes.delete(hash);
+    if (!expiresAt || expiresAt <= this.#now()) {
+      this.#limiter.fail(clientKey);
+      return { ok: false, reason: "invalid" };
+    }
+    this.#limiter.succeed(clientKey);
+    return this.#createSession(userAgent);
+  }
+
+  #createSession(userAgent: string | null): LoginResult {
     const token = randomBytes(32).toString("base64url");
     const now = this.#now();
     this.#store.purgeExpiredSessions(now);

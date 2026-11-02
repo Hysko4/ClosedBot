@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { TEAM_NAMESPACE, TOOL_LIST_AGENTS, TOOL_SEND_MESSAGE } from "../team.js";
+import {
+  TEAM_NAMESPACE,
+  TOOL_ASK_USER,
+  TOOL_CREATE_ROUTINE,
+  TOOL_LIST_AGENTS,
+  TOOL_LIST_ROUTINES,
+  TOOL_SEND_MESSAGE,
+} from "../team.js";
 import type { AgentClient, ProviderId } from "./client.js";
 import {
   type AppServerNotification,
@@ -25,9 +32,11 @@ export interface DemoClientOptions {
 
 /**
  * Proveedor de demostración sin IA: sirve para probar la app (cola, mensajes entre agentes,
- * transmisión en vivo) sin cuentas. Entiende dos comandos en el mensaje:
+ * transmisión en vivo, preguntas y rutinas) sin cuentas. Entiende estos comandos en el mensaje:
  *   - una línea `@Nombre: texto` envía `texto` al compañero Nombre;
- *   - `/equipo` lista a los compañeros; `/lento` transmite la respuesta despacio.
+ *   - `/equipo` lista a los compañeros; `/lento` transmite la respuesta despacio;
+ *   - `/pregunta [¿Texto? | Opción A | Opción B]` hace una pregunta con opciones al usuario;
+ *   - `/rutina HH:MM Nombre` o `/rutina cada N Nombre` crea una rutina; `/rutinas` las lista.
  */
 export class DemoAgentClient extends EventEmitter<ClientEvents> implements AgentClient {
   readonly provider: ProviderId = "demo";
@@ -125,6 +134,45 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
       if (/(^|\s)\/equipo(\s|$)/.test(body)) {
         notes.push(`Compañeros: ${await this.#callTool(threadId, state.turnId, TOOL_LIST_AGENTS, {})}`);
       }
+      const question = /^\/pregunta\b(.*)$/m.exec(body);
+      if (question) {
+        const parts = (question[1] ?? "").split("|").map((part) => part.trim()).filter(Boolean);
+        const args =
+          parts.length >= 3
+            ? { question: parts[0], options: parts.slice(1, 5).map((label) => ({ label })), recommended: 0 }
+            : {
+                question: "¿Cómo seguimos con la demo?",
+                options: [
+                  { label: "Seguir probando", detail: "Te muestro otra función de la demo." },
+                  { label: "Terminar por hoy", detail: "Dejo la conversación aquí." },
+                ],
+                recommended: 0,
+              };
+        try {
+          await this.#callTool(threadId, state.turnId, TOOL_ASK_USER, args);
+          notes.push("Te dejé una pregunta: elige una opción en la tarjeta.");
+        } catch (error) {
+          notes.push(`No pude preguntarte: ${errorMessage(error)}`);
+        }
+      }
+      const routine = /^\/rutina\s+(?:(\d{1,2}:\d{2})|cada\s+(\d+))\s+(.+)$/m.exec(body);
+      if (routine) {
+        const name = (routine[3] ?? "").trim();
+        const args = {
+          name,
+          prompt: `Rutina de prueba «${name}»: avisa que corrió.`,
+          ...(routine[1] ? { times: [routine[1]] } : { everyMinutes: Number(routine[2]) }),
+        };
+        try {
+          await this.#callTool(threadId, state.turnId, TOOL_CREATE_ROUTINE, args);
+          notes.push(`Creé la rutina «${name}».`);
+        } catch (error) {
+          notes.push(`No pude crear la rutina: ${errorMessage(error)}`);
+        }
+      }
+      if (/(^|\s)\/rutinas(\s|$)/.test(body)) {
+        notes.push(`Rutinas: ${await this.#callTool(threadId, state.turnId, TOOL_LIST_ROUTINES, {})}`);
+      }
       for (const match of body.matchAll(/^@([^:\n]+):\s*(.+)$/gm)) {
         const name = (match[1] ?? "").trim();
         const text = (match[2] ?? "").trim();
@@ -132,7 +180,7 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
           await this.#callTool(threadId, state.turnId, TOOL_SEND_MESSAGE, { to: [name], text });
           notes.push(`Le envié a ${name}: «${text}».`);
         } catch (error) {
-          notes.push(`No pude escribirle a ${name}: ${error instanceof Error ? error.message : String(error)}`);
+          notes.push(`No pude escribirle a ${name}: ${errorMessage(error)}`);
         }
       }
       const fromTeammate = input.startsWith("Mensaje de tu compañero") || input.startsWith("Respuesta de tu compañero");
@@ -209,6 +257,10 @@ function readInputText(params: unknown): string {
     .filter((item) => item.type === "text" && typeof item.text === "string")
     .map((item) => item.text as string)
     .join("\n");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function sleep(ms: number): Promise<void> {

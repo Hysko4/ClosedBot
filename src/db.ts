@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type { AccessLevel, ProviderId } from "./providers/client.js";
+import type { Schedule } from "./schedule.js";
 
 export interface AgentRecord {
   id: string;
@@ -15,11 +16,20 @@ export interface AgentRecord {
   threadId: string | null;
   paused: boolean;
   preview: string;
+  /** Grupo en la barra lateral (como los proyectos de la app de referencia); vacío = sin grupo. */
+  project: string;
+  /** Número de avatar (figura y color en la interfaz), distinto para cada agente nuevo. */
+  avatar: number;
+  /** Última vez que el usuario abrió la conversación (para el aviso de no leído). */
+  readAt: number;
+  /** Último mensaje del agente (o para el usuario) en su conversación. */
+  lastAt: number;
   createdAt: number;
   updatedAt: number;
 }
 
-export type MessageRole = "user" | "assistant" | "teammate" | "activity" | "notice";
+/** decision = pregunta de opción múltiple al usuario; routine = aviso de que corrió una rutina. */
+export type MessageRole = "user" | "assistant" | "teammate" | "activity" | "notice" | "decision" | "routine";
 export type MessageStatus =
   | "queued"
   | "running"
@@ -40,6 +50,22 @@ export interface MessageRecord {
   status: MessageStatus;
   turnId: string | null;
   deliveryId: string | null;
+  /** Datos extra según el rol (opciones de una decisión, rutina asociada…). */
+  payload: Record<string, unknown> | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface RoutineRecord {
+  id: string;
+  agentId: string;
+  name: string;
+  prompt: string;
+  schedule: Schedule;
+  enabled: boolean;
+  nextRunAt: number | null;
+  lastRunAt: number | null;
+  lastDeliveryId: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -84,6 +110,9 @@ CREATE TABLE IF NOT EXISTS agents (
   thread_id TEXT,
   paused INTEGER NOT NULL DEFAULT 0,
   preview TEXT NOT NULL DEFAULT '',
+  project TEXT NOT NULL DEFAULT '',
+  read_at INTEGER NOT NULL DEFAULT 0,
+  avatar INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -100,6 +129,7 @@ CREATE TABLE IF NOT EXISTS messages (
   status TEXT NOT NULL,
   turn_id TEXT,
   delivery_id TEXT,
+  payload TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -124,6 +154,20 @@ CREATE TABLE IF NOT EXISTS deliveries (
 );
 CREATE INDEX IF NOT EXISTS deliveries_queue ON deliveries(agent_id, status, seq);
 CREATE INDEX IF NOT EXISTS deliveries_turn ON deliveries(turn_id);
+CREATE TABLE IF NOT EXISTS routines (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  schedule TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  next_run_at INTEGER,
+  last_run_at INTEGER,
+  last_delivery_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS routines_due ON routines(enabled, next_run_at);
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL,
@@ -131,6 +175,27 @@ CREATE TABLE IF NOT EXISTS sessions (
   user_agent TEXT
 );
 `;
+
+/** Columnas añadidas después de la 0.1: una base creada antes las recibe al abrirse (y `backfill` las rellena). */
+const ADDED_COLUMNS: Array<{ table: string; column: string; ddl: string; backfill?: string }> = [
+  { table: "agents", column: "project", ddl: "ALTER TABLE agents ADD COLUMN project TEXT NOT NULL DEFAULT ''" },
+  { table: "agents", column: "read_at", ddl: "ALTER TABLE agents ADD COLUMN read_at INTEGER NOT NULL DEFAULT 0" },
+  {
+    table: "agents",
+    column: "avatar",
+    ddl: "ALTER TABLE agents ADD COLUMN avatar INTEGER NOT NULL DEFAULT 0",
+    // Los agentes que ya existían reciben avatares distintos, por orden de creación.
+    backfill: `UPDATE agents SET avatar = (
+      SELECT COUNT(*) FROM agents b WHERE b.created_at < agents.created_at OR (b.created_at = agents.created_at AND b.rowid < agents.rowid)
+    )`,
+  },
+  { table: "messages", column: "payload", ddl: "ALTER TABLE messages ADD COLUMN payload TEXT" },
+];
+
+const SCHEMA_VERSION = "2";
+
+/** Roles cuyos mensajes cuentan como novedad para el aviso de no leído. */
+const UNREAD_ROLES = "('assistant', 'teammate', 'notice', 'decision', 'routine')";
 
 /** Almacenamiento local en SQLite (módulo `node:sqlite`, sin dependencias nativas). */
 export class Store {
@@ -140,7 +205,17 @@ export class Store {
     this.#db = new DatabaseSync(path);
     this.#db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
     this.#db.exec(SCHEMA);
-    if (!this.getMeta("schema_version")) this.setMeta("schema_version", "1");
+    this.#migrate();
+  }
+
+  #migrate(): void {
+    for (const { table, column, ddl, backfill } of ADDED_COLUMNS) {
+      const columns = this.#db.prepare(`PRAGMA table_info(${table})`).all() as Row[];
+      if (columns.some((row) => row.name === column)) continue;
+      this.#db.exec(ddl);
+      if (backfill) this.#db.exec(backfill);
+    }
+    if (this.getMeta("schema_version") !== SCHEMA_VERSION) this.setMeta("schema_version", SCHEMA_VERSION);
   }
 
   close(): void {
@@ -175,34 +250,40 @@ export class Store {
   // ---------- agentes ----------
 
   listAgents(): AgentRecord[] {
-    return (this.#db.prepare("SELECT * FROM agents ORDER BY created_at, rowid").all() as Row[]).map(toAgent);
+    return (this.#db.prepare(`${AGENT_SELECT} ORDER BY a.created_at, a.rowid`).all() as Row[]).map(toAgent);
   }
 
   getAgent(id: string): AgentRecord | null {
-    const row = this.#db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Row | undefined;
+    const row = this.#db.prepare(`${AGENT_SELECT} WHERE a.id = ?`).get(id) as Row | undefined;
     return row ? toAgent(row) : null;
   }
 
   findAgentByName(name: string): AgentRecord | null {
-    const row = this.#db.prepare("SELECT * FROM agents WHERE name = ? COLLATE NOCASE").get(name) as Row | undefined;
+    const row = this.#db.prepare(`${AGENT_SELECT} WHERE a.name = ? COLLATE NOCASE`).get(name) as Row | undefined;
     return row ? toAgent(row) : null;
   }
 
-  createAgent(input: Omit<AgentRecord, "id" | "threadId" | "paused" | "preview" | "createdAt" | "updatedAt">): AgentRecord {
+  createAgent(
+    input: Omit<AgentRecord, "id" | "threadId" | "paused" | "preview" | "project" | "avatar" | "readAt" | "lastAt" | "createdAt" | "updatedAt"> & {
+      project?: string;
+    },
+  ): AgentRecord {
     const now = Date.now();
     const id = randomUUID();
     this.#db
       .prepare(
-        `INSERT INTO agents (id, name, role, instructions, provider, model, effort, access, workspace, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO agents (id, name, role, instructions, provider, model, effort, access, workspace, project, read_at, avatar, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(avatar) + 1, 0) FROM agents), ?, ?)`,
       )
-      .run(id, input.name, input.role, input.instructions, input.provider, input.model, input.effort, input.access, input.workspace, now, now);
+      .run(id, input.name, input.role, input.instructions, input.provider, input.model, input.effort, input.access, input.workspace, input.project ?? "", now, now, now);
     return this.getAgent(id) as AgentRecord;
   }
 
   updateAgent(
     id: string,
-    patch: Partial<Pick<AgentRecord, "name" | "role" | "instructions" | "provider" | "model" | "effort" | "access" | "threadId" | "paused" | "preview">>,
+    patch: Partial<
+      Pick<AgentRecord, "name" | "role" | "instructions" | "provider" | "model" | "effort" | "access" | "threadId" | "paused" | "preview" | "project" | "readAt">
+    >,
   ): AgentRecord {
     const columns: Record<string, string> = {
       name: "name",
@@ -215,6 +296,8 @@ export class Store {
       threadId: "thread_id",
       paused: "paused",
       preview: "preview",
+      project: "project",
+      readAt: "read_at",
     };
     const sets: string[] = [];
     const values: SQLInputValue[] = [];
@@ -267,13 +350,14 @@ export class Store {
     replyTo?: string | null;
     turnId?: string | null;
     deliveryId?: string | null;
+    payload?: Record<string, unknown> | null;
   }): MessageRecord {
     const now = Date.now();
     const id = input.id ?? randomUUID();
     this.#db
       .prepare(
-        `INSERT INTO messages (id, agent_id, role, from_agent_id, to_agent_ids, reply_to, text, status, turn_id, delivery_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (id, agent_id, role, from_agent_id, to_agent_ids, reply_to, text, status, turn_id, delivery_id, payload, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -286,13 +370,17 @@ export class Store {
         input.status,
         input.turnId ?? null,
         input.deliveryId ?? null,
+        input.payload ? JSON.stringify(input.payload) : null,
         now,
         now,
       );
     return this.getMessage(id) as MessageRecord;
   }
 
-  updateMessage(id: string, patch: Partial<Pick<MessageRecord, "text" | "status" | "turnId" | "deliveryId">>): MessageRecord | null {
+  updateMessage(
+    id: string,
+    patch: Partial<Pick<MessageRecord, "text" | "status" | "turnId" | "deliveryId" | "payload">>,
+  ): MessageRecord | null {
     const sets: string[] = [];
     const values: SQLInputValue[] = [];
     if (patch.text !== undefined) {
@@ -310,6 +398,10 @@ export class Store {
     if (patch.deliveryId !== undefined) {
       sets.push("delivery_id = ?");
       values.push(patch.deliveryId);
+    }
+    if (patch.payload !== undefined) {
+      sets.push("payload = ?");
+      values.push(patch.payload ? JSON.stringify(patch.payload) : null);
     }
     if (sets.length) {
       sets.push("updated_at = ?");
@@ -442,6 +534,77 @@ export class Store {
     return queued.length;
   }
 
+  // ---------- rutinas ----------
+
+  insertRoutine(input: { agentId: string; name: string; prompt: string; schedule: Schedule; nextRunAt: number | null }): RoutineRecord {
+    const now = Date.now();
+    const id = randomUUID();
+    this.#db
+      .prepare(
+        `INSERT INTO routines (id, agent_id, name, prompt, schedule, enabled, next_run_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+      )
+      .run(id, input.agentId, input.name, input.prompt, JSON.stringify(input.schedule), input.nextRunAt, now, now);
+    return this.getRoutine(id) as RoutineRecord;
+  }
+
+  getRoutine(id: string): RoutineRecord | null {
+    const row = this.#db.prepare("SELECT * FROM routines WHERE id = ?").get(id) as Row | undefined;
+    return row ? toRoutine(row) : null;
+  }
+
+  listRoutines(agentId?: string): RoutineRecord[] {
+    const rows = (
+      agentId
+        ? this.#db.prepare("SELECT * FROM routines WHERE agent_id = ? ORDER BY created_at, rowid").all(agentId)
+        : this.#db.prepare("SELECT * FROM routines ORDER BY created_at, rowid").all()
+    ) as Row[];
+    return rows.map(toRoutine);
+  }
+
+  dueRoutines(now: number): RoutineRecord[] {
+    return (
+      this.#db
+        .prepare("SELECT * FROM routines WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at")
+        .all(now) as Row[]
+    ).map(toRoutine);
+  }
+
+  nextRoutineAt(): number | null {
+    const row = this.#db.prepare("SELECT MIN(next_run_at) AS next FROM routines WHERE enabled = 1 AND next_run_at IS NOT NULL").get() as Row;
+    return row.next === null || row.next === undefined ? null : Number(row.next);
+  }
+
+  updateRoutine(
+    id: string,
+    patch: Partial<Pick<RoutineRecord, "enabled" | "nextRunAt" | "lastRunAt" | "lastDeliveryId">>,
+  ): RoutineRecord | null {
+    const columns: Record<string, string> = {
+      enabled: "enabled",
+      nextRunAt: "next_run_at",
+      lastRunAt: "last_run_at",
+      lastDeliveryId: "last_delivery_id",
+    };
+    const sets: string[] = [];
+    const values: SQLInputValue[] = [];
+    for (const [key, value] of Object.entries(patch)) {
+      const column = columns[key];
+      if (!column || value === undefined) continue;
+      sets.push(`${column} = ?`);
+      values.push(typeof value === "boolean" ? (value ? 1 : 0) : (value as SQLInputValue));
+    }
+    if (sets.length) {
+      sets.push("updated_at = ?");
+      values.push(Date.now(), id);
+      this.#db.prepare(`UPDATE routines SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    }
+    return this.getRoutine(id);
+  }
+
+  deleteRoutine(id: string): void {
+    this.#db.prepare("DELETE FROM routines WHERE id = ?").run(id);
+  }
+
   // ---------- sesiones ----------
 
   insertSession(tokenHash: string, expiresAt: number, userAgent: string | null): void {
@@ -472,6 +635,36 @@ function str(value: SQLInputValue | undefined): string | null {
   return value === null || value === undefined ? null : String(value);
 }
 
+const AGENT_SELECT = `SELECT a.*, (
+  SELECT MAX(m.updated_at) FROM messages m WHERE m.agent_id = a.id AND m.role IN ${UNREAD_ROLES}
+) AS last_at FROM agents a`;
+
+function parseJsonRecord(value: SQLInputValue | undefined): Record<string, unknown> | null {
+  if (value === null || value === undefined) return null;
+  try {
+    const parsed: unknown = JSON.parse(String(value));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function toRoutine(row: Row): RoutineRecord {
+  return {
+    id: String(row.id),
+    agentId: String(row.agent_id),
+    name: String(row.name),
+    prompt: String(row.prompt),
+    schedule: (parseJsonRecord(row.schedule) ?? {}) as Schedule,
+    enabled: Number(row.enabled) === 1,
+    nextRunAt: row.next_run_at === null || row.next_run_at === undefined ? null : Number(row.next_run_at),
+    lastRunAt: row.last_run_at === null || row.last_run_at === undefined ? null : Number(row.last_run_at),
+    lastDeliveryId: str(row.last_delivery_id),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
+
 function toAgent(row: Row): AgentRecord {
   return {
     id: String(row.id),
@@ -486,6 +679,10 @@ function toAgent(row: Row): AgentRecord {
     threadId: str(row.thread_id),
     paused: Number(row.paused) === 1,
     preview: String(row.preview ?? ""),
+    project: String(row.project ?? ""),
+    avatar: Number(row.avatar ?? 0),
+    readAt: Number(row.read_at ?? 0),
+    lastAt: row.last_at === null || row.last_at === undefined ? 0 : Number(row.last_at),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
@@ -510,6 +707,7 @@ function toMessage(row: Row): MessageRecord {
     status: String(row.status) as MessageStatus,
     turnId: str(row.turn_id),
     deliveryId: str(row.delivery_id),
+    payload: parseJsonRecord(row.payload),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };

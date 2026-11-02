@@ -20,13 +20,25 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES } from "../schedule.js";
 import {
+  ASK_USER_DESCRIPTION,
+  CREATE_ROUTINE_DESCRIPTION,
+  DELETE_ROUTINE_DESCRIPTION,
   LIST_AGENTS_DESCRIPTION,
+  LIST_ROUTINES_DESCRIPTION,
+  QUESTION_LIMITS,
+  ROUTINE_LIMITS,
   SEND_MESSAGE_DESCRIPTION,
   TEAM_NAMESPACE,
+  TOOL_ASK_USER,
+  TOOL_CREATE_ROUTINE,
+  TOOL_DELETE_ROUTINE,
   TOOL_LIST_AGENTS,
+  TOOL_LIST_ROUTINES,
   TOOL_SEND_MESSAGE,
 } from "../team.js";
+import { VERSION } from "../version.js";
 import type { AccessLevel, AgentClient, ProviderId } from "./client.js";
 import {
   type AppServerNotification,
@@ -103,7 +115,7 @@ const NO_SHELL_NOTE =
   "En este equipo (Windows) el modo «solo su carpeta» no tiene terminal: no puedes ejecutar comandos. Trabaja leyendo y escribiendo archivos en tus carpetas, con búsquedas web y con tus compañeros. Si una tarea exige comandos, explícale al usuario por qué.";
 
 const NO_USER_MESSAGE =
-  "No hay una persona disponible para responder preguntas en este momento. Decide con tu mejor criterio y explica tus supuestos en la respuesta.";
+  "El usuario no está mirando en vivo. Si la decisión le corresponde, pregúntale con la herramienta ask_user del grupo «cuadrilla» (te responderá en un mensaje nuevo) y termina tu turno; si no, decide con tu mejor criterio y explica tus supuestos.";
 
 export const CLAUDE_MODELS = [
   { model: "claude-opus-5-5", displayName: "Claude Opus 5.5", isDefault: true },
@@ -230,7 +242,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
     const allowedDirs = [...new Set([config.cwd, ...config.additionalDirectories].map((dir) => resolve(dir)))];
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(this.#options.env ?? process.env)) if (typeof value === "string") env[key] = value;
-    env.CLAUDE_AGENT_SDK_CLIENT_APP = "cuadrilla/0.1.1";
+    env.CLAUDE_AGENT_SDK_CLIENT_APP = `cuadrilla/${VERSION}`;
 
     const mcpServers: NonNullable<Options["mcpServers"]> = { [TEAM_NAMESPACE]: this.#createTeamServer(threadId) };
     if (this.#options.playwright) {
@@ -502,7 +514,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
     const call = (name: string, args: unknown) => this.#callDynamicTool(threadId, name, args);
     return createSdkMcpServer({
       name: TEAM_NAMESPACE,
-      version: "0.1.0",
+      version: VERSION,
       tools: [
         tool(TOOL_LIST_AGENTS, LIST_AGENTS_DESCRIPTION, {}, (args) => call(TOOL_LIST_AGENTS, args)),
         tool(
@@ -515,6 +527,42 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
           },
           (args) => call(TOOL_SEND_MESSAGE, args),
         ),
+        tool(
+          TOOL_ASK_USER,
+          ASK_USER_DESCRIPTION,
+          {
+            question: z.string().min(1).max(QUESTION_LIMITS.question),
+            options: z
+              .array(
+                z.object({
+                  label: z.string().min(1).max(QUESTION_LIMITS.label),
+                  detail: z.string().max(QUESTION_LIMITS.detail).optional(),
+                }),
+              )
+              .min(QUESTION_LIMITS.minOptions)
+              .max(QUESTION_LIMITS.maxOptions),
+            recommended: z.number().int().min(0).max(QUESTION_LIMITS.maxOptions - 1).nullable().optional(),
+          },
+          (args) => call(TOOL_ASK_USER, args),
+        ),
+        tool(
+          TOOL_CREATE_ROUTINE,
+          CREATE_ROUTINE_DESCRIPTION,
+          {
+            name: z.string().min(1).max(ROUTINE_LIMITS.name),
+            prompt: z.string().min(1).max(ROUTINE_LIMITS.prompt),
+            times: z
+              .array(z.string().regex(/^\d{1,2}:\d{2}$/))
+              .min(1)
+              .max(ROUTINE_LIMITS.times)
+              .optional(),
+            days: z.array(z.number().int().min(0).max(6)).max(7).optional(),
+            everyMinutes: z.number().int().min(MIN_INTERVAL_MINUTES).max(MAX_INTERVAL_MINUTES).optional(),
+          },
+          (args) => call(TOOL_CREATE_ROUTINE, args),
+        ),
+        tool(TOOL_LIST_ROUTINES, LIST_ROUTINES_DESCRIPTION, {}, (args) => call(TOOL_LIST_ROUTINES, args)),
+        tool(TOOL_DELETE_ROUTINE, DELETE_ROUTINE_DESCRIPTION, { id: z.string().min(1) }, (args) => call(TOOL_DELETE_ROUTINE, args)),
       ],
     });
   }

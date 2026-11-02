@@ -7,3 +7,6 @@ data/
 
 # Contraseña guardada junto a la app en una instalación local
 CONTRASENA-CUADRILLA.txt
+
+# App de escritorio de Windows (la compila Instalar-escritorio.cmd)
+/Cuadrilla.exe

@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentRecord, DeliveryRecord, MessageRecord, Store } from "./db.js";
+import type { AgentRecord, DeliveryRecord, MessageRecord, RoutineRecord, Store } from "./db.js";
 import { buildInstructions, composeDeliveryInput } from "./instructions.js";
 import type { AccessLevel, AgentClient, ProviderId } from "./providers/client.js";
 import {
@@ -17,10 +17,37 @@ import {
   type ThreadResponse,
   type TurnResponse,
 } from "./providers/protocol.js";
-import { parseSendMessageArgs, TEAM_DYNAMIC_TOOLS, TEAM_NAMESPACE, TOOL_LIST_AGENTS, TOOL_SEND_MESSAGE } from "./team.js";
+import { describeSchedule, nextRun, normalizeSchedule } from "./schedule.js";
+import {
+  type AskUserArgs,
+  parseAskUserArgs,
+  parseCreateRoutineArgs,
+  parseRoutineIdArgs,
+  parseSendMessageArgs,
+  type QuestionOption,
+  TEAM_DYNAMIC_TOOLS,
+  TEAM_NAMESPACE,
+  TOOL_ASK_USER,
+  TOOL_CREATE_ROUTINE,
+  TOOL_DELETE_ROUTINE,
+  TOOL_LIST_AGENTS,
+  TOOL_LIST_ROUTINES,
+  TOOL_SEND_MESSAGE,
+} from "./team.js";
+import { VERSION } from "./version.js";
 
-export const VERSION = "0.1.1";
+export { VERSION };
 export const PROVIDERS: ProviderId[] = ["claude", "codex", "demo"];
+
+/** Rutinas: tope por agente y en total, y cuánto retraso se tolera antes de saltarse una ejecución. */
+export const MAX_ROUTINES_PER_AGENT = 20;
+export const MAX_ROUTINES = 100;
+export const ROUTINE_GRACE_MS = 2 * 60 * 60_000;
+const ROUTINE_CHECK_MS = 60_000;
+/** Tamaño máximo de un archivo adjunto. */
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const SETTINGS_META = "settings";
+const OPTION_LETTERS = "ABCD";
 
 export interface ProviderStatus {
   id: ProviderId;
@@ -35,6 +62,21 @@ export type AgentState = "idle" | "working" | "queued" | "paused";
 export interface AgentView extends AgentRecord {
   state: AgentState;
   queued: number;
+  /** Hay mensajes del agente que el usuario aún no vio. */
+  unread: boolean;
+}
+
+export interface RoutineView extends RoutineRecord {
+  description: string;
+  agentName: string;
+  /** La última ejecución sigue en cola o en curso. */
+  running: boolean;
+}
+
+/** Nombres que muestra la interfaz (el del asistente arriba a la izquierda y el del usuario abajo). */
+export interface Settings {
+  botName: string;
+  userName: string;
 }
 
 export type ServiceEvent =
@@ -43,6 +85,8 @@ export type ServiceEvent =
   | { type: "delta"; agentId: string; messageId: string; delta: string }
   | { type: "queue"; agentId: string; queue: DeliveryRecord[] }
   | { type: "providers"; providers: ProviderStatus[] }
+  | { type: "routines"; routines: RoutineView[] }
+  | { type: "settings"; settings: Settings }
   | { type: "notice"; level: "error" | "info"; message: string; agentId?: string };
 
 export interface ServiceOptions {
@@ -63,6 +107,16 @@ export interface AgentInput {
   model?: string | null;
   effort?: string | null;
   access?: AccessLevel;
+  /** Grupo en la barra lateral. */
+  project?: string;
+}
+
+export interface RoutineInput {
+  name?: unknown;
+  prompt?: unknown;
+  times?: unknown;
+  days?: unknown;
+  everyMinutes?: unknown;
 }
 
 interface TurnState {
@@ -75,6 +129,8 @@ interface TurnState {
   sentTo: Set<string>;
   assistantMessageIds: Set<string>;
   lastAssistantText: string;
+  /** Pregunta que el agente le hizo al usuario en este turno (para la vista previa). */
+  askedQuestion: string | null;
 }
 
 export class ServiceError extends Error {
@@ -115,6 +171,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     detail: id === "demo" ? "Siempre disponible (sin IA)." : "Comprobando…",
   }));
   #stopping = false;
+  #routineTimer: NodeJS.Timeout | null = null;
 
   constructor(options: ServiceOptions) {
     super();
@@ -131,11 +188,14 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       this.#notice(delivery.agentId, "La app se reinició mientras este agente trabajaba; ese turno quedó interrumpido.");
     }
     for (const agentId of this.#store.agentsWithQueuedWork()) this.#scheduleDrain(agentId);
+    this.#armRoutines();
     void this.refreshProviders();
   }
 
   async stop(): Promise<void> {
     this.#stopping = true;
+    if (this.#routineTimer) clearTimeout(this.#routineTimer);
+    this.#routineTimer = null;
     const clients = [...this.#clients.values()];
     this.#clients.clear();
     this.#clientReady.clear();
@@ -204,6 +264,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       effort: cleanOptional(input.effort, 20),
       access: input.access === "total" ? "total" : "carpeta",
       workspace,
+      project: cleanProject(input.project),
     });
     this.#emitAgents();
     return this.#view(agent);
@@ -223,6 +284,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (patch.model !== undefined) next.model = cleanOptional(patch.model, 120);
     if (patch.effort !== undefined) next.effort = cleanOptional(patch.effort, 20);
     if (patch.access !== undefined) next.access = patch.access === "total" ? "total" : "carpeta";
+    if (patch.project !== undefined) next.project = cleanProject(patch.project);
     if (patch.provider !== undefined) {
       const provider = validProvider(patch.provider);
       if (provider !== agent.provider) {
@@ -250,6 +312,9 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     await this.#closeThread(agent);
     this.#store.deleteAgent(id);
     this.#emitAgents();
+    // Sus rutinas se borran con él (ON DELETE CASCADE).
+    this.#emitRoutines();
+    this.#armRoutines();
   }
 
   async resetConversation(id: string): Promise<AgentView> {
@@ -270,6 +335,209 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#emitAgents();
     if (!paused) this.#scheduleDrain(id);
     return this.#view(updated);
+  }
+
+  /** El usuario abrió la conversación: deja de marcarla como no leída. */
+  markRead(id: string): AgentView {
+    const agent = this.#requireAgent(id);
+    if (agent.lastAt <= agent.readAt) return this.#view(agent);
+    const updated = this.#store.updateAgent(id, { readAt: Math.max(Date.now(), agent.lastAt) });
+    this.#emitAgents();
+    return this.#view(updated);
+  }
+
+  // ---------- ajustes ----------
+
+  getSettings(): Settings {
+    let stored: Record<string, unknown> = {};
+    try {
+      const parsed: unknown = JSON.parse(this.#store.getMeta(SETTINGS_META) ?? "{}");
+      if (isRecord(parsed)) stored = parsed;
+    } catch {
+      stored = {};
+    }
+    return {
+      botName: typeof stored.botName === "string" && stored.botName ? stored.botName : "Cuadrilla",
+      userName: typeof stored.userName === "string" ? stored.userName : "",
+    };
+  }
+
+  updateSettings(patch: { botName?: unknown; userName?: unknown }): Settings {
+    const current = this.getSettings();
+    const next: Settings = {
+      botName: patch.botName === undefined ? current.botName : cleanSettingName(patch.botName) || "Cuadrilla",
+      userName: patch.userName === undefined ? current.userName : cleanSettingName(patch.userName),
+    };
+    this.#store.setMeta(SETTINGS_META, JSON.stringify(next));
+    this.#emit({ type: "settings", settings: next });
+    return next;
+  }
+
+  // ---------- preguntas al usuario ----------
+
+  /** El usuario eligió una opción de una tarjeta de decisión: la respuesta le llega al agente como mensaje. */
+  answerDecision(agentId: string, messageId: string, choice: unknown): { decision: MessageRecord; message: MessageRecord; delivery: DeliveryRecord } {
+    this.#requireAgent(agentId);
+    const result = this.#store.transaction(() => {
+      const decision = this.#store.getMessage(messageId);
+      if (!decision || decision.agentId !== agentId || decision.role !== "decision") throw new ServiceError("Pregunta no encontrada.", 404);
+      const payload = decision.payload ?? {};
+      if (payload.answer !== null && payload.answer !== undefined) throw new ServiceError("Esa pregunta ya tiene respuesta.", 409);
+      const options = readOptions(payload);
+      const index = typeof choice === "number" ? choice : Number.NaN;
+      const option = Number.isInteger(index) ? options[index] : undefined;
+      if (!option) throw new ServiceError("Elige una de las opciones de la tarjeta.");
+      const letter = OPTION_LETTERS[index] ?? String(index + 1);
+      const updated = this.#store.updateMessage(messageId, { payload: { ...payload, answer: index, answeredAt: Date.now() } }) as MessageRecord;
+      const agentText = [
+        `Respuesta del usuario a tu pregunta «${decision.text}»: eligió la opción ${letter}, «${option.label}».`,
+        option.detail ? `(${option.detail})` : null,
+        "Sigue con la tarea según su elección.",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const message = this.#store.insertMessage({
+        agentId,
+        role: "user",
+        text: `${letter}. ${option.label}`,
+        status: "queued",
+        payload: { decisionId: messageId, choice: index },
+      });
+      const { delivery } = this.#store.enqueueDelivery({
+        agentId,
+        messageId: message.id,
+        senderKind: "user",
+        text: agentText,
+        idempotencyKey: `decision:${messageId}`,
+      });
+      const linked = this.#store.updateMessage(message.id, { deliveryId: delivery.id }) as MessageRecord;
+      return { decision: updated, message: linked, delivery };
+    });
+    this.#store.updateAgent(agentId, { readAt: Date.now() });
+    this.#emit({ type: "message", agentId, message: result.decision });
+    this.#emit({ type: "message", agentId, message: result.message });
+    this.#emitQueue(agentId);
+    this.#emitAgents();
+    this.#scheduleDrain(agentId);
+    return result;
+  }
+
+  // ---------- rutinas ----------
+
+  listRoutines(agentId?: string): RoutineView[] {
+    return this.#store.listRoutines(agentId).map((routine) => this.#routineView(routine));
+  }
+
+  createRoutine(agentId: string, input: RoutineInput, createdBy: "user" | "agent" = "user"): RoutineView {
+    const agent = this.#requireAgent(agentId);
+    const { args, schedule } = asServiceError(() => {
+      const parsed = parseCreateRoutineArgs(input);
+      return { args: parsed, schedule: normalizeSchedule(parsed) };
+    });
+    if (this.#store.listRoutines(agent.id).length >= MAX_ROUTINES_PER_AGENT) {
+      throw new ServiceError(`Cada agente puede tener hasta ${MAX_ROUTINES_PER_AGENT} rutinas.`, 409);
+    }
+    if (this.#store.listRoutines().length >= MAX_ROUTINES) throw new ServiceError(`El equipo ya tiene ${MAX_ROUTINES} rutinas, el máximo.`, 409);
+    const routine = this.#store.insertRoutine({
+      agentId: agent.id,
+      name: args.name,
+      prompt: args.prompt,
+      schedule,
+      nextRunAt: nextRun(schedule, Date.now()),
+    });
+    const message = this.#store.insertMessage({
+      agentId: agent.id,
+      role: "activity",
+      text: `${createdBy === "agent" ? "Creó" : "Creaste"} la rutina «${routine.name}» · ${describeSchedule(schedule)}`,
+      status: "completed",
+      payload: { kind: "routine-created", routineId: routine.id },
+    });
+    this.#emit({ type: "message", agentId: agent.id, message });
+    this.#emitRoutines();
+    this.#armRoutines();
+    return this.#routineView(routine);
+  }
+
+  setRoutineEnabled(id: string, enabled: boolean): RoutineView {
+    const routine = this.#requireRoutine(id);
+    const updated = this.#store.updateRoutine(id, {
+      enabled,
+      nextRunAt: enabled ? nextRun(routine.schedule, Date.now()) : null,
+    }) as RoutineRecord;
+    this.#emitRoutines();
+    this.#armRoutines();
+    return this.#routineView(updated);
+  }
+
+  deleteRoutine(id: string): void {
+    this.#requireRoutine(id);
+    this.#store.deleteRoutine(id);
+    this.#emitRoutines();
+    this.#armRoutines();
+  }
+
+  /** Ejecuta una rutina ahora mismo, sin cambiar su horario. */
+  runRoutineNow(id: string): RoutineView {
+    const routine = this.#requireRoutine(id);
+    if (this.#routinePending(routine)) throw new ServiceError("Esa rutina ya está en curso.", 409);
+    this.#fireRoutine(routine, Date.now(), true);
+    this.#emitRoutines();
+    return this.#routineView(this.#requireRoutine(id));
+  }
+
+  /**
+   * Encola las rutinas que ya tocan. La llama un temporizador (como mínimo una vez por minuto) y las pruebas.
+   * Si una ejecución se atrasó más de ROUTINE_GRACE_MS (la app estaba cerrada), se salta y se avisa.
+   */
+  checkRoutines(now = Date.now()): void {
+    if (this.#stopping) return;
+    const due = this.#store.dueRoutines(now);
+    for (const routine of due) {
+      const scheduledAt = routine.nextRunAt ?? now;
+      const next = nextRun(routine.schedule, now);
+      this.#store.updateRoutine(routine.id, { nextRunAt: next });
+      if (!this.#store.getAgent(routine.agentId)) continue;
+      if (now - scheduledAt > ROUTINE_GRACE_MS) {
+        this.#notice(
+          routine.agentId,
+          `La rutina «${routine.name}» no corrió ${formatWhen(scheduledAt)} porque Cuadrilla estaba cerrada.${next ? ` La próxima será ${formatWhen(next)}.` : ""}`,
+        );
+        continue;
+      }
+      if (this.#routinePending(routine)) {
+        this.#log("info", `Rutina «${routine.name}» omitida: la ejecución anterior aún no termina.`);
+        continue;
+      }
+      this.#fireRoutine(routine, scheduledAt, false);
+    }
+    if (due.length) this.#emitRoutines();
+    this.#armRoutines();
+  }
+
+  // ---------- archivos adjuntos ----------
+
+  /** Guarda un archivo en la carpeta `adjuntos` del agente y devuelve dónde quedó. */
+  saveAttachment(agentId: string, rawName: string, data: Buffer): { name: string; path: string; relativePath: string; size: number } {
+    const agent = this.#requireAgent(agentId);
+    if (!data.length) throw new ServiceError("El archivo está vacío.");
+    if (data.length > MAX_UPLOAD_BYTES) throw new ServiceError("El archivo supera los 25 MB.", 413);
+    const dir = join(agent.workspace, "adjuntos");
+    mkdirSync(dir, { recursive: true });
+    const safe = safeFileName(rawName);
+    const dot = safe.lastIndexOf(".");
+    const stem = dot > 0 ? safe.slice(0, dot) : safe;
+    const ext = dot > 0 ? safe.slice(dot) : "";
+    for (let index = 1; index < 1_000; index += 1) {
+      const name = index === 1 ? safe : `${stem}-${index}${ext}`;
+      const path = join(dir, name);
+      try {
+        writeFileSync(path, data, { flag: "wx" });
+        return { name, path, relativePath: `adjuntos/${name}`, size: data.length };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+    }
+    throw new ServiceError("Ya hay demasiados archivos con ese nombre.", 409);
   }
 
   // ---------- mensajes y cola ----------
@@ -396,7 +664,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       runtimeWorkspaceRoots: [agent.workspace, this.#options.sharedDir],
       approvalPolicy: "never",
       sandbox: agent.access === "total" ? "danger-full-access" : "workspace-write",
-      developerInstructions: buildInstructions(agent, this.#options.sharedDir),
+      developerInstructions: buildInstructions(agent, this.#options.sharedDir, this.getSettings().userName),
     };
     if (agent.model) params.model = agent.model;
     if (agent.effort && agent.provider !== "codex") params.effort = agent.effort;
@@ -466,6 +734,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       sentTo: new Set(),
       assistantMessageIds: new Set(),
       lastAssistantText: "",
+      askedQuestion: null,
     };
     this.#active.set(agent.id, state);
     this.#store.updateDelivery(delivery.id, { status: "starting", startedAt: Date.now() });
@@ -532,11 +801,15 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       const message = this.#store.getMessage(messageId);
       if (message?.status === "streaming") this.#updateMessageStatus(agentId, messageId, terminal);
     }
-    if (terminal === "completed" && state.lastAssistantText.trim()) {
+    if (state.askedQuestion) {
+      // Lo pendiente es la pregunta: es lo que el usuario debe ver en la lista.
+      this.#store.updateAgent(agentId, { preview: `Pregunta: ${state.askedQuestion}`.slice(0, 240) });
+    } else if (terminal === "completed" && state.lastAssistantText.trim()) {
       this.#store.updateAgent(agentId, { preview: state.lastAssistantText.trim().slice(0, 240) });
     }
     this.#emitQueue(agentId);
     this.#emitAgents();
+    if (delivery && this.#store.listRoutines(agentId).some((routine) => routine.lastDeliveryId === delivery.id)) this.#emitRoutines();
 
     if (
       terminal === "completed" &&
@@ -749,7 +1022,37 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         estado: agent.state === "working" ? "trabajando" : agent.state === "queued" ? "con cola" : agent.state === "paused" ? "en pausa" : "libre",
         eresTu: agent.id === senderId,
       }));
-      return { success: true, contentItems: [{ type: "inputText", text: JSON.stringify({ agentes: agents }) }] };
+      return toolResult({ agentes: agents });
+    }
+    if (params.tool === TOOL_ASK_USER) return this.#askUser(senderId, parseAskUserArgs(params.arguments), params.turnId);
+    if (params.tool === TOOL_CREATE_ROUTINE) {
+      const routine = this.createRoutine(senderId, isRecord(params.arguments) ? params.arguments : {}, "agent");
+      return toolResult({
+        creada: true,
+        id: routine.id,
+        nombre: routine.name,
+        horario: routine.description,
+        proxima: routine.nextRunAt ? formatWhen(routine.nextRunAt) : null,
+      });
+    }
+    if (params.tool === TOOL_LIST_ROUTINES) {
+      return toolResult({
+        rutinas: this.listRoutines(senderId).map((routine) => ({
+          id: routine.id,
+          nombre: routine.name,
+          horario: routine.description,
+          activa: routine.enabled,
+          proxima: routine.enabled && routine.nextRunAt ? formatWhen(routine.nextRunAt) : null,
+          tarea: routine.prompt,
+        })),
+      });
+    }
+    if (params.tool === TOOL_DELETE_ROUTINE) {
+      const { id } = parseRoutineIdArgs(params.arguments);
+      const routine = this.#store.getRoutine(id);
+      if (!routine || routine.agentId !== senderId) throw new Error("No tienes una rutina con ese id; míralas con list_routines.");
+      this.deleteRoutine(id);
+      return toolResult({ eliminada: true, nombre: routine.name });
     }
     if (params.tool !== TOOL_SEND_MESSAGE) throw new Error(`Herramienta desconocida: ${params.tool}`);
     const args = parseSendMessageArgs(params.arguments);
@@ -763,7 +1066,101 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       idempotencyKey: `${params.threadId}:${params.turnId}:${params.callId}`,
     });
     for (const recipient of receipt.recipients) state?.sentTo.add(recipient.id);
-    return { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(receipt) }] };
+    return toolResult(receipt);
+  }
+
+  #askUser(agentId: string, args: AskUserArgs, turnId: string | null): DynamicToolResult {
+    const message = this.#store.insertMessage({
+      agentId,
+      role: "decision",
+      text: args.question,
+      status: "completed",
+      turnId,
+      payload: { options: args.options, recommended: args.recommended, answer: null, answeredAt: null },
+    });
+    const state = this.#active.get(agentId);
+    if (state) state.askedQuestion = args.question;
+    else this.#store.updateAgent(agentId, { preview: `Pregunta: ${args.question}`.slice(0, 240) });
+    this.#emit({ type: "message", agentId, message });
+    this.#emitAgents();
+    return toolResult({
+      preguntado: true,
+      messageId: message.id,
+      nota: "La tarjeta ya está en la conversación. Termina tu turno ahora: la respuesta del usuario te llegará como un mensaje nuevo.",
+    });
+  }
+
+  #fireRoutine(routine: RoutineRecord, scheduledAt: number, manual: boolean): void {
+    const key = manual ? null : `routine:${routine.id}:${scheduledAt}`;
+    const result = this.#store.transaction(() => {
+      if (key && this.#store.findDeliveryByIdempotencyKey(key)) return null;
+      const message = this.#store.insertMessage({
+        agentId: routine.agentId,
+        role: "routine",
+        text: routine.name,
+        status: "queued",
+        payload: { routineId: routine.id, scheduledAt, schedule: describeSchedule(routine.schedule), manual },
+      });
+      const { delivery } = this.#store.enqueueDelivery({
+        agentId: routine.agentId,
+        messageId: message.id,
+        senderKind: "user",
+        text: composeRoutineInput(routine, scheduledAt, manual),
+        idempotencyKey: key,
+      });
+      this.#store.updateRoutine(routine.id, { lastRunAt: Date.now(), lastDeliveryId: delivery.id });
+      return this.#store.updateMessage(message.id, { deliveryId: delivery.id }) as MessageRecord;
+    });
+    if (!result) return;
+    this.#emit({ type: "message", agentId: routine.agentId, message: result });
+    this.#emitQueue(routine.agentId);
+    this.#emitAgents();
+    this.#scheduleDrain(routine.agentId);
+  }
+
+  #routinePending(routine: RoutineRecord): boolean {
+    if (!routine.lastDeliveryId) return false;
+    const status = this.#store.getDelivery(routine.lastDeliveryId)?.status;
+    return status === "queued" || status === "starting" || status === "running";
+  }
+
+  #armRoutines(): void {
+    if (this.#routineTimer) clearTimeout(this.#routineTimer);
+    this.#routineTimer = null;
+    if (this.#stopping) return;
+    const next = this.#store.nextRoutineAt();
+    if (next === null) return;
+    // Como mínimo una revisión por minuto: así un cambio de hora o una suspensión no la dejan dormida.
+    const delay = Math.max(0, Math.min(next - Date.now(), ROUTINE_CHECK_MS));
+    this.#routineTimer = setTimeout(() => {
+      this.#routineTimer = null;
+      try {
+        this.checkRoutines();
+      } catch (error) {
+        this.#log("error", `Fallo al revisar las rutinas: ${errorText(error)}`);
+        this.#armRoutines();
+      }
+    }, delay);
+    this.#routineTimer.unref();
+  }
+
+  #requireRoutine(id: string): RoutineRecord {
+    const routine = this.#store.getRoutine(id);
+    if (!routine) throw new ServiceError("Rutina no encontrada.", 404);
+    return routine;
+  }
+
+  #routineView(routine: RoutineRecord): RoutineView {
+    return {
+      ...routine,
+      description: describeSchedule(routine.schedule),
+      agentName: this.#store.getAgent(routine.agentId)?.name ?? "",
+      running: this.#routinePending(routine),
+    };
+  }
+
+  #emitRoutines(): void {
+    this.#emit({ type: "routines", routines: this.listRoutines() });
   }
 
   #sendTeammateMessage(input: {
@@ -857,7 +1254,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   #view(agent: AgentRecord): AgentView {
     const queued = this.#store.countQueued(agent.id);
     const state: AgentState = this.#active.has(agent.id) ? "working" : agent.paused ? "paused" : queued > 0 ? "queued" : "idle";
-    return { ...agent, state, queued };
+    return { ...agent, state, queued, unread: agent.lastAt > agent.readAt };
   }
 
   #uniqueWorkspace(name: string): string {
@@ -919,6 +1316,74 @@ function cleanText(value: unknown, max: number): string {
   return text;
 }
 
+function cleanProject(value: unknown): string {
+  const project = typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+  if (project.length > 60) throw new ServiceError("El nombre del proyecto admite hasta 60 caracteres.");
+  if (/[\u0000-\u001f]/.test(project)) throw new ServiceError("El proyecto tiene caracteres no válidos.");
+  return project;
+}
+
+function cleanSettingName(value: unknown): string {
+  if (typeof value !== "string") throw new ServiceError("El nombre debe ser texto.");
+  const name = value.trim().replace(/\s+/g, " ");
+  if (name.length > 40) throw new ServiceError("El nombre admite hasta 40 caracteres.");
+  if (/[\u0000-\u001f]/.test(name)) throw new ServiceError("El nombre tiene caracteres no válidos.");
+  return name;
+}
+
+function asServiceError<T>(fn: () => T): T {
+  try {
+    return fn();
+  } catch (error) {
+    throw error instanceof ServiceError ? error : new ServiceError(errorText(error));
+  }
+}
+
+function readOptions(payload: Record<string, unknown>): QuestionOption[] {
+  return (Array.isArray(payload.options) ? payload.options : []).filter(isRecord).map((option) => ({
+    label: typeof option.label === "string" ? option.label : "",
+    detail: typeof option.detail === "string" ? option.detail : "",
+  }));
+}
+
+function toolResult(value: unknown): DynamicToolResult {
+  return { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(value) }] };
+}
+
+/** Fecha y hora local corta, p. ej. «lun 3 nov, 09:00». */
+export function formatWhen(time: number): string {
+  return new Date(time).toLocaleString("es-CL", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+/** Texto que recibe el agente cuando corre una de sus rutinas. */
+function composeRoutineInput(routine: RoutineRecord, scheduledAt: number, manual: boolean): string {
+  return [
+    `Rutina programada «${routine.name}» (${describeSchedule(routine.schedule)}), ${manual ? "ejecutada a mano por el usuario" : formatWhen(scheduledAt)}.`,
+    "Hazla ahora y deja el resultado en tu respuesta. Si algo necesita una decisión del usuario, pregúntale con ask_user.",
+    "--- tarea ---",
+    routine.prompt,
+  ].join("\n");
+}
+
+/** Nombre de archivo seguro dentro de una carpeta, en Windows y en Linux. */
+export function safeFileName(raw: string): string {
+  const base = raw.split(/[\\/]/).pop() ?? "";
+  let name = base
+    .normalize("NFC")
+    .replace(/[\u0000-\u001f\u007f<>:"|?*]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[.\s]+|[.\s]+$/g, "");
+  if (!name) name = "archivo";
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(name)) name = `_${name}`;
+  if (name.length > 120) {
+    const dot = name.lastIndexOf(".");
+    const ext = dot > 0 && name.length - dot <= 12 ? name.slice(dot) : "";
+    name = name.slice(0, 120 - ext.length) + ext;
+  }
+  return name;
+}
+
 function cleanOptional(value: unknown, max: number): string | null {
   const text = typeof value === "string" ? value.trim() : "";
   if (!text) return null;
@@ -957,9 +1422,12 @@ export function summarizeActivity(item: Record<string, unknown>): string | null 
       return changes.length ? `Modificó: ${clip(changes.join(", "))}` : null;
     }
     case "mcpToolCall":
+      if (getString(item, "server") === TEAM_NAMESPACE) return null;
       return `Usó ${getString(item, "server") ?? "MCP"}.${getString(item, "tool") ?? "herramienta"}`;
     case "dynamicToolCall":
-      return `Usó ${getString(item, "namespace") ?? TEAM_NAMESPACE}.${getString(item, "tool") ?? "herramienta"}`;
+      // Las herramientas de Cuadrilla ya dejan su propia marca (mensaje enviado, pregunta, rutina).
+      if ((getString(item, "namespace") ?? TEAM_NAMESPACE) === TEAM_NAMESPACE) return null;
+      return `Usó ${getString(item, "namespace")}.${getString(item, "tool") ?? "herramienta"}`;
     case "webSearch":
       return `Buscó en la web: ${clip(getString(item, "query") ?? "")}`;
     case "imageGeneration":
@@ -970,8 +1438,8 @@ export function summarizeActivity(item: Record<string, unknown>): string | null 
       const detail = ["command", "file_path", "path", "pattern", "url", "query", "description"]
         .map((key) => getString(input, key))
         .find((value) => value);
-      const label = tool.startsWith(`mcp__${TEAM_NAMESPACE}__`) ? tool.replace(`mcp__${TEAM_NAMESPACE}__`, "cuadrilla.") : tool;
-      return detail ? `${label}: ${clip(detail)}` : `Usó ${label}`;
+      if (tool.startsWith(`mcp__${TEAM_NAMESPACE}__`)) return null;
+      return detail ? `${tool}: ${clip(detail)}` : `Usó ${tool}`;
     }
     default:
       return null;

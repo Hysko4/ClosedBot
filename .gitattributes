@@ -1,0 +1,4 @@
+# Los .cmd de Windows necesitan fin de línea CRLF.
+*.cmd text eol=crlf
+*.ico binary
+*.png binary

@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { type AddressInfo, connect } from "node:net";
+import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createApp } from "../src/app.js";
+import { type AppOptions, createApp } from "../src/app.js";
 import { Auth, hashPassword, PASSWORD_META } from "../src/auth.js";
 import { createHarness, waitFor } from "./helpers.js";
 
 const publicDir = fileURLToPath(new URL("../../public", import.meta.url));
 const PASSWORD = "contraseña-de-prueba";
 
-async function startServer() {
+async function startServer(extra: Partial<AppOptions> = {}) {
   const h = await createHarness();
   h.store.setMeta(PASSWORD_META, await hashPassword(PASSWORD));
   const auth = new Auth({ store: h.store, sessionDays: 1 });
@@ -21,6 +23,7 @@ async function startServer() {
     workspacesDir: "/srv/agentes",
     maxHops: 6,
     secureCookies: "auto",
+    ...extra,
   });
   await new Promise<void>((resolve) => app.server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
@@ -48,6 +51,9 @@ async function startServer() {
     base,
     call,
     login,
+    useCookie(value: string) {
+      cookie = value;
+    },
     get cookie() {
       return cookie;
     },
@@ -262,6 +268,121 @@ test("HTTP: crear agente, conversar y recibir eventos en vivo", async () => {
 
     controller.abort();
     await pump;
+  } finally {
+    await s.close();
+  }
+});
+
+const CONTROL_TOKEN = "token-de-control-de-prueba-con-32-caracteres-o-mas";
+
+test("HTTP: sin token de control no existen las rutas del lanzador", async () => {
+  const s = await startServer();
+  try {
+    assert.equal((await s.call("/api/control/login-link", { method: "POST" })).status, 404);
+    assert.equal((await s.call("/api/control/shutdown", { method: "POST" })).status, 404);
+  } finally {
+    await s.close();
+  }
+});
+
+test("HTTP: el lanzador abre sesión con un código de un solo uso y apaga la app", async () => {
+  let shutdowns = 0;
+  const s = await startServer({ controlToken: CONTROL_TOKEN, onShutdown: () => (shutdowns += 1) });
+  try {
+    const control = { "x-cuadrilla-control": CONTROL_TOKEN };
+    assert.equal((await s.call("/api/control/login-link", { method: "POST" })).status, 403, "sin token");
+    assert.equal((await s.call("/api/control/login-link", { method: "POST", headers: { "x-cuadrilla-control": "otro" } })).status, 403);
+    const proxied = await s.call("/api/control/login-link", { method: "POST", headers: { ...control, "x-forwarded-for": "100.64.0.9" } });
+    assert.equal(proxied.status, 403, "no a través de tailscale serve");
+    const link = await s.call("/api/control/login-link", { method: "POST", headers: control });
+    assert.equal(link.status, 200);
+    const path = String(link.json?.path);
+    assert.match(path, /^\/\?acceso=[\w-]{40,}$/);
+    const code = new URL(path, s.base).searchParams.get("acceso");
+
+    assert.equal((await s.call("/api/login/code", { method: "POST", body: { code: "inventado" } })).status, 401);
+    const redeemed = await s.call("/api/login/code", { method: "POST", body: { code } });
+    assert.equal(redeemed.status, 200);
+    s.useCookie((redeemed.response.headers.get("set-cookie") ?? "").split(";")[0] ?? "");
+    assert.equal((await s.call("/api/state")).status, 200, "con la cookie del código");
+    assert.equal((await s.call("/api/login/code", { method: "POST", body: { code } })).status, 401, "un solo uso");
+
+    assert.equal(shutdowns, 0);
+    const off = await s.call("/api/control/shutdown", { method: "POST", headers: control });
+    assert.equal(off.status, 200);
+    await waitFor(() => shutdowns === 1, 2_000, "orden de cierre");
+  } finally {
+    await s.close();
+  }
+});
+
+test("HTTP: preguntas, rutinas, ajustes, adjuntos y leídos", async () => {
+  const s = await startServer();
+  try {
+    await s.login();
+    const index = await fetch(`${s.base}/`);
+    assert.match(index.headers.get("permissions-policy") ?? "", /microphone=\(self\)/);
+    const created = await s.call("/api/agents", { method: "POST", body: { name: "Ana", provider: "demo", project: "Juegos" } });
+    const agent = created.json?.agent as { id: string; workspace: string; project: string };
+    assert.equal(agent.project, "Juegos");
+
+    // Pregunta con opciones.
+    await s.call(`/api/agents/${agent.id}/messages`, { method: "POST", body: { text: "/pregunta" } });
+    const decision = await waitFor(
+      () => s.h.service.listMessages(agent.id).find((message) => message.role === "decision"),
+      5_000,
+      "tarjeta",
+    );
+    const answered = await s.call(`/api/agents/${agent.id}/decisions/${decision.id}`, { method: "POST", body: { choice: 0 } });
+    assert.equal(answered.status, 200);
+    assert.equal(answered.json?.message.text, "A. Seguir probando");
+    assert.equal((await s.call(`/api/agents/${agent.id}/decisions/${decision.id}`, { method: "POST", body: { choice: 1 } })).status, 409);
+    assert.equal((await s.call(`/api/agents/${agent.id}/decisions/${decision.id}`, { method: "POST", body: {} })).status, 409);
+    await waitFor(() => s.h.service.getAgent(agent.id).state === "idle" && s.h.service.getAgent(agent.id).unread, 5_000, "respuesta sin leer");
+    const read = await s.call(`/api/agents/${agent.id}/read`, { method: "POST" });
+    assert.equal(read.json?.agent.unread, false);
+
+    // Rutinas.
+    const bad = await s.call("/api/routines", { method: "POST", body: { agentId: agent.id, name: "X", prompt: "Y", times: ["7"] } });
+    assert.equal(bad.status, 400);
+    const routine = await s.call("/api/routines", {
+      method: "POST",
+      body: { agentId: agent.id, name: "Correo", prompt: "Revisa el correo", times: ["07:30"], days: [1, 2, 3, 4, 5] },
+    });
+    assert.equal(routine.status, 201);
+    const routineId = routine.json?.routine.id as string;
+    assert.equal(routine.json?.routine.description, "de lunes a viernes a las 07:30");
+    assert.equal((await s.call("/api/routines")).json?.routines.length, 1);
+    const state = await s.call("/api/state");
+    assert.equal(state.json?.routines.length, 1);
+    assert.deepEqual(state.json?.settings, { botName: "Cuadrilla", userName: "" });
+    const paused = await s.call(`/api/routines/${routineId}`, { method: "PATCH", body: { enabled: false } });
+    assert.equal(paused.json?.routine.enabled, false);
+    const ran = await s.call(`/api/routines/${routineId}/run`, { method: "POST" });
+    assert.equal(ran.status, 200);
+    assert.equal((await s.call(`/api/routines/${routineId}`, { method: "DELETE" })).status, 204);
+    assert.equal((await s.call(`/api/routines/${routineId}`, { method: "DELETE" })).status, 404);
+
+    // Ajustes.
+    const settings = await s.call("/api/settings", { method: "PATCH", body: { userName: "Jonathan" } });
+    assert.deepEqual(settings.json?.settings, { botName: "Cuadrilla", userName: "Jonathan" });
+    assert.equal((await s.call("/api/settings", { method: "PATCH", body: { botName: 5 } })).status, 400);
+
+    // Adjuntos.
+    const upload = await s.call(`/api/agents/${agent.id}/files?name=${encodeURIComponent("../../notas.txt")}`, {
+      method: "POST",
+      body: "hola adjunto",
+      headers: { "content-type": "application/octet-stream" },
+    });
+    assert.equal(upload.status, 201);
+    assert.equal(upload.json?.file.name, "notas.txt");
+    assert.equal(readFileSync(join(agent.workspace, "adjuntos", "notas.txt"), "utf8"), "hola adjunto");
+    const missing = await s.call("/api/agents/no-existe/files?name=x.txt", {
+      method: "POST",
+      body: "x",
+      headers: { "content-type": "application/octet-stream" },
+    });
+    assert.equal(missing.status, 404);
   } finally {
     await s.close();
   }

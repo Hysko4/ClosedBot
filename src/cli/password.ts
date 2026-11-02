@@ -1,4 +1,5 @@
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { generatePassword, hashPassword, PASSWORD_META, validateNewPassword } from "../auth.js";
 import { loadConfig } from "../config.js";
@@ -9,19 +10,44 @@ import { Store } from "../db.js";
  *   npm run password                 → la pide dos veces (sin mostrarla)
  *   npm run password -- --generate   → genera una segura y la muestra una sola vez
  *   CUADRILLA_NEW_PASSWORD=… npm run password → sin preguntas (para scripts)
+ *
+ * Para el instalador de escritorio:
+ *   --if-missing      no hace nada si ya hay una contraseña
+ *   --save <archivo>  con --generate, la guarda en ese archivo en vez de mostrarla
  */
 async function main(): Promise<void> {
-  const args = new Set(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const args = new Set(argv);
   if (args.has("--help") || args.has("-h")) {
-    console.log("Uso: npm run password [-- --generate]");
+    console.log("Uso: npm run password [-- --generate [--save archivo]] [--if-missing]");
     return;
   }
+  const saveIndex = argv.indexOf("--save");
+  const saveTo = saveIndex >= 0 ? argv[saveIndex + 1] : undefined;
+  if (saveIndex >= 0 && (!saveTo || saveTo.startsWith("--"))) throw new Error("Falta el archivo después de --save.");
+  if (saveTo && !args.has("--generate")) throw new Error("--save solo se usa junto con --generate.");
   const config = loadConfig();
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   try {
     chmodSync(config.dataDir, 0o700);
   } catch {
     // Carpeta de otro usuario: se deja como está.
+  }
+
+  if (args.has("--if-missing")) {
+    if (process.env.CUADRILLA_PASSWORD) {
+      console.log("Cuadrilla usa la contraseña de CUADRILLA_PASSWORD; no cambio nada.");
+      return;
+    }
+    const existing = new Store(config.dbPath);
+    try {
+      if (existing.getMeta(PASSWORD_META)) {
+        console.log("Cuadrilla ya tiene contraseña; no la cambio.");
+        return;
+      }
+    } finally {
+      existing.close();
+    }
   }
 
   let password: string;
@@ -49,7 +75,17 @@ async function main(): Promise<void> {
   } finally {
     store.close();
   }
-  if (show) console.log(`\nTu contraseña de Cuadrilla es:\n\n    ${password}\n\nGuárdala en tu gestor de contraseñas: no se volverá a mostrar.`);
+  if (show && saveTo) {
+    const file = resolve(saveTo);
+    writeFileSync(
+      file,
+      `Contraseña de Cuadrilla: ${password}\r\n\r\nLa necesitas para entrar desde otro dispositivo (por ejemplo, el teléfono).\r\nEn este equipo, el acceso directo de Cuadrilla entra solo.\r\n`,
+      { mode: 0o600 },
+    );
+    console.log(`Creé una contraseña nueva y la guardé en ${file}.`);
+  } else if (show) {
+    console.log(`\nTu contraseña de Cuadrilla es:\n\n    ${password}\n\nGuárdala en tu gestor de contraseñas: no se volverá a mostrar.`);
+  }
   console.log(`Contraseña guardada en ${config.dbPath}. Se cerraron las sesiones abiertas.`);
 }
 

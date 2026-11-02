@@ -93,19 +93,20 @@ function fakeQueryFactory(recorder: Recorder): QueryFactory {
   };
 }
 
-async function claudeHarness() {
+async function claudeHarness(platform?: NodeJS.Platform) {
   const recorder: Recorder = { options: [], prompts: [], interrupts: 0 };
   const h = await createHarness({
     createClient: (provider) =>
       provider === "claude"
-        ? new ClaudeAgentClient({ createQuery: fakeQueryFactory(recorder), idleMs: 0 })
+        ? new ClaudeAgentClient({ createQuery: fakeQueryFactory(recorder), idleMs: 0, platform })
         : new DemoAgentClient({ wordDelayMs: 0 }),
   });
   return { h, recorder };
 }
 
 test("Claude: transmite el texto, registra herramientas y configura el modo «carpeta»", async () => {
-  const { h, recorder } = await claudeHarness();
+  // El modo «carpeta» con sandbox es el de Linux y macOS; el de Windows tiene su propia prueba.
+  const { h, recorder } = await claudeHarness("linux");
   try {
     const clara = h.service.createAgent({ name: "Clara", provider: "claude", model: "claude-sonnet-5-5" });
     const { message } = h.service.sendUserMessage(clara.id, "hola");

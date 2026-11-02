@@ -5,12 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>Cuadrilla</title>
     <meta name="description" content="Tu equipo personal de agentes de IA." />
-    <meta name="theme-color" content="#f5f3ef" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#171717" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Cuadrilla" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
@@ -24,10 +24,8 @@
 
     <section id="login" class="login" hidden>
       <form id="login-form" class="login-card" autocomplete="on">
-        <div class="brand brand-large">
-          <img src="/icons/icon.svg" alt="" width="44" height="44" />
-          <span>Cuadrilla</span>
-        </div>
+        <div class="login-mascot" id="login-mascot" aria-hidden="true"></div>
+        <h1 class="login-title">Cuadrilla</h1>
         <p class="muted">Tu equipo personal de agentes de IA.</p>
         <label class="field">
           <span>Contraseña</span>
@@ -40,79 +38,113 @@
 
     <div id="app" class="layout" hidden>
       <aside class="sidebar" aria-label="Agentes">
-        <header class="sidebar-header">
-          <div class="brand">
-            <img src="/icons/icon.svg" alt="" width="28" height="28" />
-            <span>Cuadrilla</span>
-          </div>
-          <button type="button" class="icon-button" id="new-agent" title="Nuevo agente" aria-label="Nuevo agente">
+        <div class="sidebar-tools">
+          <button type="button" class="round-button" id="open-routines" title="Rutinas" aria-label="Rutinas">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="7.5" /><path d="M12 9.5V13l2.5 1.6M9.5 3h5" /></svg>
+          </button>
+          <button type="button" class="round-button" id="search-toggle" title="Buscar agente" aria-label="Buscar agente" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="M16 16l4.5 4.5" /></svg>
+          </button>
+          <button type="button" class="round-button" id="new-agent" title="Nuevo agente" aria-label="Nuevo agente">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
           </button>
-        </header>
-        <ul class="agent-list" id="agent-list"></ul>
+        </div>
+
+        <div class="bot-card">
+          <div class="bot-avatar" id="bot-avatar" aria-hidden="true">
+            <span class="bot-badge" id="connection" data-state="connecting" title="Conectando…"></span>
+          </div>
+          <div class="bot-name" id="bot-name">Cuadrilla</div>
+        </div>
+
+        <div class="search-box" id="search-box" hidden>
+          <input id="search-input" type="search" placeholder="Buscar agente…" aria-label="Buscar agente" autocomplete="off" />
+        </div>
+
+        <nav class="agent-groups" id="agent-groups" aria-label="Conversaciones"></nav>
         <div class="sidebar-empty" id="sidebar-empty" hidden>
           <p>Todavía no tienes agentes.</p>
           <button type="button" class="button primary" id="first-agent">Crear el primero</button>
         </div>
+
         <footer class="sidebar-footer">
-          <button type="button" class="link-button" id="open-settings">Ajustes y proveedores</button>
-          <span class="connection" id="connection" data-state="connecting">Conectando…</span>
+          <button type="button" class="user-chip" id="open-profile" title="Tu nombre y ajustes">
+            <span class="user-avatar" id="user-avatar" aria-hidden="true">T</span>
+            <span class="user-name" id="user-name">Tú</span>
+          </button>
+          <button type="button" class="square-button" id="open-settings" title="Ajustes" aria-label="Ajustes">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></svg>
+          </button>
         </footer>
       </aside>
 
       <main class="chat" id="chat">
         <div class="chat-empty" id="chat-empty">
-          <img src="/icons/icon.svg" alt="" width="72" height="72" />
-          <h2>Elige un agente</h2>
+          <div class="empty-mascot" id="empty-mascot" aria-hidden="true"></div>
+          <h2>Elige una conversación</h2>
           <p class="muted">
-            Cada agente trabaja en su propia carpeta y puede pedir ayuda a sus compañeros. Los mensajes que le envíes mientras
-            trabaja quedan en cola y los atiende en orden.
+            Cada agente trabaja en su propia carpeta y puede pedir ayuda a sus compañeros. Si le escribes mientras trabaja, tu mensaje queda en
+            cola y lo atiende en orden.
           </p>
         </div>
 
         <section class="conversation" id="conversation" hidden>
           <header class="chat-header">
-            <button type="button" class="icon-button mobile-only" id="back" aria-label="Volver a la lista">
+            <button type="button" class="round-button mobile-only" id="back" aria-label="Volver a la lista">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
             </button>
-            <div class="avatar" id="chat-avatar" aria-hidden="true"></div>
-            <div class="chat-title">
-              <h1 id="chat-name"></h1>
-              <p id="chat-meta" class="muted"></p>
-            </div>
-            <div class="chat-actions">
-              <button type="button" class="button danger-soft" id="stop" hidden>Detener</button>
-              <button type="button" class="icon-button" id="agent-menu-button" aria-haspopup="menu" aria-expanded="false" aria-label="Opciones del agente">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" /></svg>
+            <div class="header-center">
+              <button type="button" class="title-pill" id="agent-menu-button" aria-haspopup="menu" aria-expanded="false" title="Opciones del agente">
+                <span class="pill-avatar" id="chat-avatar" aria-hidden="true"></span>
+                <span class="pill-name" id="chat-name"></span>
+                <span class="pill-state" id="chat-state" hidden></span>
               </button>
               <div class="menu" id="agent-menu" role="menu" hidden>
+                <p class="menu-meta" id="chat-meta"></p>
                 <button type="button" role="menuitem" data-action="edit">Editar agente</button>
+                <button type="button" role="menuitem" data-action="routines">Rutinas de este agente</button>
                 <button type="button" role="menuitem" data-action="pause">Pausar la cola</button>
                 <button type="button" role="menuitem" data-action="reset">Empezar de cero</button>
                 <button type="button" role="menuitem" data-action="delete" class="danger">Eliminar agente</button>
               </div>
             </div>
+            <span class="header-spacer mobile-only" aria-hidden="true"></span>
           </header>
 
-          <div class="queue-bar" id="queue-bar" hidden>
-            <button type="button" class="queue-toggle" id="queue-toggle" aria-expanded="false">
-              <span id="queue-summary"></span>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
-            </button>
-            <ol class="queue-list" id="queue-list" hidden></ol>
-          </div>
-
           <div class="messages" id="messages" role="log" aria-live="polite" aria-relevant="additions">
-            <button type="button" class="button ghost load-more" id="load-more" hidden>Cargar mensajes anteriores</button>
-            <div id="message-list"></div>
+            <div class="thread">
+              <button type="button" class="button ghost load-more" id="load-more" hidden>Cargar mensajes anteriores</button>
+              <div id="message-list"></div>
+            </div>
           </div>
 
-          <form class="composer" id="composer">
-            <textarea id="composer-input" rows="1" placeholder="Escribe un mensaje…" aria-label="Mensaje" maxlength="100000"></textarea>
-            <button type="submit" class="send-button" id="send" aria-label="Enviar">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6" /></svg>
-            </button>
-          </form>
+          <div class="composer-area">
+            <div class="queue-bar" id="queue-bar" hidden>
+              <button type="button" class="queue-toggle" id="queue-toggle" aria-expanded="false">
+                <span id="queue-summary"></span>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6" /></svg>
+              </button>
+              <ol class="queue-list" id="queue-list" hidden></ol>
+            </div>
+            <form class="composer" id="composer">
+              <div class="attachments" id="attachments" hidden></div>
+              <div class="composer-row">
+                <button type="button" class="composer-icon" id="attach" title="Adjuntar archivos" aria-label="Adjuntar archivos">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+                </button>
+                <input type="file" id="file-input" multiple hidden />
+                <textarea id="composer-input" rows="1" placeholder="Escribe un mensaje…" aria-label="Mensaje" maxlength="100000"></textarea>
+                <button type="button" class="composer-icon" id="dictate" title="Dictar" aria-label="Dictar por voz" aria-pressed="false" hidden>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" /></svg>
+                </button>
+                <button type="submit" class="action-button" id="send" data-mode="send" aria-label="Enviar">
+                  <svg class="icon-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6M6 11.5L12 5.5l6 6" /></svg>
+                  <svg class="icon-voice" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10v4M9 7v10M13 4.5v15M17 8v8M21 10.5v3" /></svg>
+                  <svg class="icon-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2" /></svg>
+                </button>
+              </div>
+            </form>
+          </div>
         </section>
       </main>
     </div>
@@ -123,10 +155,17 @@
           <h2 id="agent-dialog-title">Nuevo agente</h2>
         </header>
         <div class="dialog-body">
-          <label class="field">
-            <span>Nombre</span>
-            <input name="name" maxlength="60" required placeholder="Ej.: Ana" />
-          </label>
+          <div class="field-row">
+            <label class="field">
+              <span>Nombre</span>
+              <input name="name" maxlength="60" required placeholder="Ej.: Director de Programación" />
+            </label>
+            <label class="field">
+              <span>Proyecto</span>
+              <input name="project" maxlength="60" list="project-options" placeholder="Ej.: Creación de Juegos" autocomplete="off" />
+            </label>
+          </div>
+          <datalist id="project-options"></datalist>
           <label class="field">
             <span>Rol</span>
             <input name="role" maxlength="200" placeholder="Ej.: Investigadora, Programador, Revisora" />
@@ -158,14 +197,14 @@
             </label>
             <label class="choice">
               <input type="radio" name="access" value="total" />
-              <span><strong>Acceso total</strong>: comandos y archivos de todo el servidor, sin pedir permiso.</span>
+              <span><strong>Acceso total</strong>: comandos y archivos de todo el equipo, sin pedir permiso.</span>
             </label>
             <p class="hint" id="access-hint" hidden>
               En este equipo (Windows), los agentes de Claude en «Solo su carpeta» no tienen terminal: trabajan con archivos de su carpeta,
               la web y sus compañeros.
             </p>
             <p class="warning" id="access-warning" hidden>
-              Con acceso total el agente puede borrar, instalar o leer cualquier cosa del servidor, incluidas credenciales. Úsalo solo en una
+              Con acceso total el agente puede borrar, instalar o leer cualquier cosa del equipo, incluidas credenciales. Úsalo solo en una
               máquina dedicada a Cuadrilla.
             </p>
           </fieldset>
@@ -178,18 +217,97 @@
       </form>
     </dialog>
 
+    <dialog class="dialog dialog-wide" id="routines-dialog" aria-labelledby="routines-title">
+      <div>
+        <header class="dialog-header">
+          <h2 id="routines-title">Rutinas</h2>
+          <p class="muted small">Tareas que un agente repite solo a ciertas horas. Corren mientras Cuadrilla esté abierta.</p>
+        </header>
+        <div class="dialog-body">
+          <ul class="routine-list" id="routine-list"></ul>
+          <p class="muted small" id="routines-empty" hidden>Todavía no hay rutinas. Créalas aquí o pídeselas a un agente («cada mañana a las 9, revisa…»).</p>
+          <form class="routine-form" id="routine-form" novalidate>
+            <h3 class="section-title">Nueva rutina</h3>
+            <div class="field-row">
+              <label class="field">
+                <span>Agente</span>
+                <select name="agentId" required></select>
+              </label>
+              <label class="field">
+                <span>Nombre</span>
+                <input name="name" maxlength="80" required placeholder="Ej.: Resumen de la mañana" />
+              </label>
+            </div>
+            <label class="field">
+              <span>Qué debe hacer cada vez</span>
+              <textarea name="prompt" rows="3" maxlength="4000" required placeholder="Ej.: Revisa mis correos nuevos y dime cuáles necesitan respuesta."></textarea>
+            </label>
+            <div class="segmented" role="radiogroup" aria-label="Tipo de horario">
+              <label><input type="radio" name="kind" value="times" checked /><span>A ciertas horas</span></label>
+              <label><input type="radio" name="kind" value="interval" /><span>Cada cierto tiempo</span></label>
+            </div>
+            <div class="routine-times" id="routine-times">
+              <label class="field">
+                <span>Horas (separadas por coma)</span>
+                <input name="times" placeholder="09:00, 18:00" inputmode="numeric" autocomplete="off" />
+              </label>
+              <fieldset class="field days">
+                <legend>Días</legend>
+                <div class="day-picker" id="day-picker"></div>
+              </fieldset>
+            </div>
+            <label class="field" id="routine-interval" hidden>
+              <span>Frecuencia</span>
+              <select name="everyMinutes">
+                <option value="15">Cada 15 minutos</option>
+                <option value="30">Cada 30 minutos</option>
+                <option value="60" selected>Cada hora</option>
+                <option value="120">Cada 2 horas</option>
+                <option value="240">Cada 4 horas</option>
+                <option value="720">Cada 12 horas</option>
+                <option value="1440">Cada día</option>
+                <option value="10080">Cada semana</option>
+              </select>
+            </label>
+            <p class="form-error" id="routine-error" role="alert"></p>
+            <div class="form-actions">
+              <button type="submit" class="button primary" id="routine-save">Crear rutina</button>
+            </div>
+          </form>
+        </div>
+        <footer class="dialog-footer">
+          <button type="button" class="button primary" id="routines-close">Listo</button>
+        </footer>
+      </div>
+    </dialog>
+
     <dialog class="dialog" id="settings-dialog" aria-labelledby="settings-title">
       <div>
         <header class="dialog-header">
           <h2 id="settings-title">Ajustes</h2>
         </header>
         <div class="dialog-body">
+          <form id="names-form" class="names-form" novalidate>
+            <div class="field-row">
+              <label class="field">
+                <span>Tu nombre</span>
+                <input name="userName" maxlength="40" placeholder="Ej.: Jonathan" autocomplete="given-name" />
+              </label>
+              <label class="field">
+                <span>Nombre del asistente</span>
+                <input name="botName" maxlength="40" placeholder="Cuadrilla" autocomplete="off" />
+              </label>
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="button ghost" id="names-save">Guardar nombres</button>
+            </div>
+          </form>
           <h3 class="section-title">Proveedores</h3>
           <ul class="provider-list" id="provider-list"></ul>
           <button type="button" class="button ghost" id="refresh-providers">Volver a comprobar</button>
-          <h3 class="section-title">Carpetas en el servidor</h3>
+          <h3 class="section-title">Carpetas</h3>
           <dl class="paths" id="paths"></dl>
-          <h3 class="section-title">Instalar en el teléfono</h3>
+          <h3 class="section-title">En el teléfono</h3>
           <p class="muted small">
             Android (Chrome): menú ⋮ → «Instalar app». iPhone (Safari): botón Compartir → «Añadir a pantalla de inicio».
           </p>

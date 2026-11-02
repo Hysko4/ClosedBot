@@ -28,6 +28,13 @@ async function main(): Promise<void> {
   const envPassword = process.env.CUADRILLA_PASSWORD ?? null;
   delete process.env.CUADRILLA_PASSWORD;
   delete process.env.CUADRILLA_NEW_PASSWORD;
+  // Tampoco el token del lanzador de escritorio (con él se abre sesión y se apaga la app).
+  let controlToken = process.env.CUADRILLA_CONTROL_TOKEN?.trim() || null;
+  delete process.env.CUADRILLA_CONTROL_TOKEN;
+  if (controlToken && controlToken.length < 32) {
+    log("warn", "CUADRILLA_CONTROL_TOKEN es demasiado corto (mínimo 32 caracteres); se ignora.");
+    controlToken = null;
+  }
   const store = new Store(config.dbPath);
   const auth = new Auth({ store, sessionDays: config.sessionDays, envPassword });
   if (!(await auth.isConfigured())) {
@@ -74,6 +81,8 @@ async function main(): Promise<void> {
     workspacesDir: config.workspacesDir,
     maxHops: config.maxHops,
     secureCookies: config.secureCookies,
+    controlToken,
+    onShutdown: () => void shutdown("la orden de cierre del lanzador"),
     log,
   });
 
@@ -101,6 +110,9 @@ async function main(): Promise<void> {
     await service.stop();
     store.close();
     clearTimeout(force);
+    log("info", "Cuadrilla se cerró.");
+    // Si algo quedara colgado (un proceso de un proveedor), no impide salir.
+    setTimeout(() => process.exit(0), 2_000).unref();
   };
   process.once("SIGINT", () => void shutdown("SIGINT"));
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
