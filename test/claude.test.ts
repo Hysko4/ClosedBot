@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import type { UUID } from "node:crypto";
+import { resolve } from "node:path";
 import { test } from "node:test";
 import type { McpSdkServerConfigWithInstance, Options, Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -222,5 +223,18 @@ test("Claude: buildOptions en acceso total", () => {
   assert.equal(options.permissionMode, "bypassPermissions");
   assert.equal(options.allowDangerouslySkipPermissions, true);
   assert.equal(options.sandbox, undefined);
-  assert.deepEqual(options.additionalDirectories, ["/srv/c"]);
+  assert.deepEqual(options.additionalDirectories, [resolve("/srv/c")]);
+});
+
+test("Claude: en Windows el modo «carpeta» quita la terminal en vez de fallar", () => {
+  const client = new ClaudeAgentClient({ platform: "win32", createQuery: fakeQueryFactory({ options: [], prompts: [], interrupts: 0 }) });
+  const config = { cwd: "C:\\cuadrilla\\agentes\\ana", developerInstructions: "x", additionalDirectories: [], access: "carpeta" as const };
+  const options = client.buildOptions("00000000-0000-4000-8000-000000000001" as UUID, config, false);
+  assert.equal(options.sandbox, undefined);
+  assert.deepEqual(options.disallowedTools, ["Bash", "PowerShell", "Monitor"]);
+  assert.equal(options.permissionMode, "acceptEdits");
+  assert.deepEqual(options.settingSources, []);
+  assert.match((options.systemPrompt as { append: string }).append, /no puedes ejecutar comandos/);
+  const total = client.buildOptions("00000000-0000-4000-8000-000000000002" as UUID, { ...config, access: "total" }, false);
+  assert.equal(total.disallowedTools, undefined, "con acceso total conserva la terminal");
 });

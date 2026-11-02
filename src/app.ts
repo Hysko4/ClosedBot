@@ -43,6 +43,8 @@ interface Context {
 type Handler = (ctx: Context) => Promise<unknown> | unknown;
 
 const JSON_LIMIT = 2 * 1024 * 1024;
+/** De un cuerpo demasiado grande se lee y descarta hasta esta cantidad antes de responder 413; más allá se corta. */
+const DISCARD_LIMIT = 16 * 1024 * 1024;
 const SSE_BUFFER_LIMIT = 4 * 1024 * 1024;
 const NO_CONTENT = Symbol("no-content");
 
@@ -131,6 +133,7 @@ export function createApp(options: AppOptions): App {
     providers: service.providers(),
     paths: { shared: options.sharedDir, workspaces: options.workspacesDir },
     maxHops: options.maxHops,
+    platform: process.platform,
   }));
 
   route("POST", "/api/providers/refresh", async () => ({ providers: await service.refreshProviders() }));
@@ -329,7 +332,7 @@ export function createApp(options: AppOptions): App {
         return;
       }
       const message = error instanceof HttpError || error instanceof ServiceError ? error.message : "Error interno del servidor.";
-      if (status === 413) res.setHeader("connection", "close");
+      if (status === 413 && !req.complete) res.setHeader("connection", "close");
       sendJson(res, status, { error: message });
     });
   });
@@ -369,25 +372,49 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
   const type = header(req, "content-type") ?? "";
   if (!/^application\/json\b/i.test(type)) throw new HttpError(415, "Envía el cuerpo como JSON.");
-  const declared = Number(header(req, "content-length") ?? "0");
-  if (declared > JSON_LIMIT) throw new HttpError(413, "La solicitud es demasiado grande.");
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    const buffer = chunk as Buffer;
-    size += buffer.length;
-    if (size > JSON_LIMIT) throw new HttpError(413, "La solicitud es demasiado grande.");
-    chunks.push(buffer);
-  }
-  if (!size) return {};
+  const body = await readBody(req, JSON_LIMIT);
+  if (!body.length) return {};
   let value: unknown;
   try {
-    value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    value = JSON.parse(body.toString("utf8"));
   } catch {
     throw new HttpError(400, "JSON inválido.");
   }
   if (!isRecord(value)) throw new HttpError(400, "Se esperaba un objeto JSON.");
   return value;
+}
+
+/**
+ * Lee el cuerpo entero. Si pasa de `limit`, sigue leyendo y descartando el resto, y solo al final rechaza con 413:
+ * si el servidor respondiera y cerrara con datos sin leer, el sistema cortaría con un RST y el cliente (sobre todo en
+ * Windows) perdería la respuesta. Lo que pase de DISCARD_LIMIT ya no se lee y la conexión se cierra.
+ */
+function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
+  const tooLarge = () => new HttpError(413, "La solicitud es demasiado grande.");
+  if (Number(header(req, "content-length") ?? "0") > DISCARD_LIMIT) return Promise.reject(tooLarge());
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const finish = (error: HttpError | null) => {
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onInterrupted);
+      req.off("close", onInterrupted);
+      if (error) reject(error);
+      else resolve(Buffer.concat(chunks));
+    };
+    const onData = (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > DISCARD_LIMIT) finish(tooLarge());
+      else if (size <= limit) chunks.push(chunk);
+    };
+    const onEnd = () => finish(size > limit ? tooLarge() : null);
+    const onInterrupted = () => finish(new HttpError(400, "La solicitud se interrumpió."));
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onInterrupted);
+    req.on("close", onInterrupted);
+  });
 }
 
 function agentInput(body: Record<string, unknown>, creating: boolean): Partial<AgentInput> {

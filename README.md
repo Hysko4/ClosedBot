@@ -89,6 +89,26 @@ En el teléfono, instala la app de Tailscale y entra con la misma cuenta. Luego 
 - **Android (Chrome)**: menú ⋮ → «Instalar app».
 - **iPhone (Safari)**: botón Compartir → «Añadir a pantalla de inicio».
 
+## Windows (en tu PC, para uso personal)
+
+También funciona en Windows 10 u 11, sin servidor aparte:
+
+```powershell
+winget install OpenJS.NodeJS.LTS      # Node.js 22 o superior; luego abre otra ventana de PowerShell
+cd C:\ruta\donde\descomprimiste\cuadrilla
+npm ci
+npm run build
+npm run password -- --generate        # guarda la contraseña que muestra
+npm start                             # abre http://127.0.0.1:8787
+```
+
+Diferencias en Windows:
+
+- **Claude en «Solo su carpeta» no tiene terminal.** Claude Code no puede encerrar los comandos en una carpeta en Windows. Por eso, en ese modo, el agente lee y escribe archivos solo en sus carpetas, busca en la web y habla con sus compañeros, pero no ejecuta comandos.
+- **«Acceso total» le da la terminal sobre todo tu PC**, con tus archivos y tus sesiones abiertas, y también permisos de administrador si Windows no te pide confirmarlos (UAC). En tu equipo personal, evítalo.
+- **Codex** tiene su propio aislamiento en Windows. Compruébalo antes de darle tareas delicadas.
+- **Para el teléfono**, instala Tailscale para Windows y ejecuta `tailscale serve --bg 8787` en una ventana de PowerShell como administrador.
+
 ## Uso
 
 - **Crear un agente**: botón **+**. Elige el proveedor, el modelo (o «Predeterminado»), el esfuerzo y el acceso.

@@ -19,7 +19,7 @@ import {
 } from "./providers/protocol.js";
 import { parseSendMessageArgs, TEAM_DYNAMIC_TOOLS, TEAM_NAMESPACE, TOOL_LIST_AGENTS, TOOL_SEND_MESSAGE } from "./team.js";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.1.1";
 export const PROVIDERS: ProviderId[] = ["claude", "codex", "demo"];
 
 export interface ProviderStatus {

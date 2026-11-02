@@ -1,6 +1,6 @@
 {
   "name": "cuadrilla",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Equipo personal de agentes de IA (Claude y Codex) con interfaz web instalable en el teléfono.",
   "license": "UNLICENSED",

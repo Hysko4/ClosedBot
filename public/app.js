@@ -8,6 +8,7 @@ const state = {
   paths: null,
   version: "",
   maxHops: 0,
+  platform: "",
   currentId: null,
   messages: new Map(), // agentId -> array de mensajes en orden
   hasMore: new Map(),
@@ -117,6 +118,7 @@ async function enterApp() {
   state.paths = data.paths;
   state.version = data.version;
   state.maxHops = data.maxHops;
+  state.platform = data.platform ?? "";
   $("#login").hidden = true;
   $("#app").hidden = false;
   renderSidebar();
@@ -1009,7 +1011,9 @@ function refreshEffortOptions(effort = "") {
 }
 
 function updateAccessWarning() {
-  $("#access-warning").hidden = $("#agent-form").elements.access.value !== "total";
+  const form = $("#agent-form");
+  $("#access-warning").hidden = form.elements.access.value !== "total";
+  $("#access-hint").hidden = !(state.platform === "win32" && form.elements.provider.value === "claude" && form.elements.access.value === "carpeta");
 }
 
 async function saveAgent(event) {
@@ -1203,6 +1207,7 @@ function bindUi() {
   $("#agent-cancel").addEventListener("click", () => closeDialog($("#agent-dialog")));
   form.elements.provider.addEventListener("change", () => {
     updateProviderHint();
+    updateAccessWarning();
     void refreshModelOptions();
   });
   form.elements.model.addEventListener("change", () => refreshEffortOptions());

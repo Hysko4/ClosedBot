@@ -4,3 +4,6 @@ dist/
 .env
 data/
 .cuadrilla/
+
+# Contraseña guardada junto a la app en una instalación local
+CONTRASENA-CUADRILLA.txt

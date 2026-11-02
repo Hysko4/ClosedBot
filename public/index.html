@@ -160,6 +160,10 @@
               <input type="radio" name="access" value="total" />
               <span><strong>Acceso total</strong>: comandos y archivos de todo el servidor, sin pedir permiso.</span>
             </label>
+            <p class="hint" id="access-hint" hidden>
+              En este equipo (Windows), los agentes de Claude en «Solo su carpeta» no tienen terminal: trabajan con archivos de su carpeta,
+              la web y sus compañeros.
+            </p>
             <p class="warning" id="access-warning" hidden>
               Con acceso total el agente puede borrar, instalar o leer cualquier cosa del servidor, incluidas credenciales. Úsalo solo en una
               máquina dedicada a Cuadrilla.
