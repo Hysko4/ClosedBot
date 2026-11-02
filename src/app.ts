@@ -131,6 +131,7 @@ export function createApp(options: AppOptions): App {
     providers: service.providers(),
     paths: { shared: options.sharedDir, workspaces: options.workspacesDir },
     maxHops: options.maxHops,
+    platform: process.platform,
   }));
 
   route("POST", "/api/providers/refresh", async () => ({ providers: await service.refreshProviders() }));

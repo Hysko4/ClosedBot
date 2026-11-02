@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -21,10 +21,16 @@ async function codexHarness() {
   chmodSync(fixture, 0o755);
   const temp = tempDir("cuadrilla-codex-");
   const log = join(temp.path, "requests.jsonl");
+  // En Windows un script .mjs no se ejecuta solo: se envuelve en un .cmd que llama a node.
+  let executable = fixture;
+  if (process.platform === "win32") {
+    executable = join(temp.path, "fake-codex.cmd");
+    writeFileSync(executable, `@"${process.execPath}" "${fixture}" %*\r\n`);
+  }
   const h = await createHarness({
     createClient: (provider) =>
       provider === "codex"
-        ? new CodexAppServerClient({ executable: fixture, env: { ...process.env, FAKE_LOG: log } })
+        ? new CodexAppServerClient({ executable, env: { ...process.env, FAKE_LOG: log } })
         : new DemoAgentClient({ wordDelayMs: 0 }),
   });
   return {

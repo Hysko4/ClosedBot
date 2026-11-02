@@ -91,8 +91,16 @@ export interface ClaudeClientOptions {
   idleMs?: number;
   /** Variables de entorno para Claude Code (por defecto, las del proceso). */
   env?: NodeJS.ProcessEnv;
+  /** Sistema operativo (por defecto, el actual); se puede cambiar en las pruebas. */
+  platform?: NodeJS.Platform;
   createQuery?: QueryFactory;
 }
+
+/** Herramientas que ejecutan comandos; en Windows no hay sandbox que las encierre en la carpeta. */
+const SHELL_TOOLS = ["Bash", "PowerShell", "Monitor"];
+
+const NO_SHELL_NOTE =
+  "En este equipo (Windows) el modo «solo su carpeta» no tiene terminal: no puedes ejecutar comandos. Trabaja leyendo y escribiendo archivos en tus carpetas, con búsquedas web y con tus compañeros. Si una tarea exige comandos, explícale al usuario por qué.";
 
 const NO_USER_MESSAGE =
   "No hay una persona disponible para responder preguntas en este momento. Decide con tu mejor criterio y explica tus supuestos en la respuesta.";
@@ -222,7 +230,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
     const allowedDirs = [...new Set([config.cwd, ...config.additionalDirectories].map((dir) => resolve(dir)))];
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(this.#options.env ?? process.env)) if (typeof value === "string") env[key] = value;
-    env.CLAUDE_AGENT_SDK_CLIENT_APP = "cuadrilla/0.1.0";
+    env.CLAUDE_AGENT_SDK_CLIENT_APP = "cuadrilla/0.1.1";
 
     const mcpServers: NonNullable<Options["mcpServers"]> = { [TEAM_NAMESPACE]: this.#createTeamServer(threadId) };
     if (this.#options.playwright) {
@@ -239,7 +247,11 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
       ...(config.model ? { model: normalizeClaudeModel(config.model) } : {}),
       ...(config.effort ? { effort: normalizeClaudeEffort(config.effort) } : {}),
       ...(resume ? { resume: threadId } : { sessionId: threadId }),
-      systemPrompt: { type: "preset", preset: "claude_code", append: config.developerInstructions },
+      systemPrompt: {
+        type: "preset",
+        preset: "claude_code",
+        append: this.#withoutShell(config) ? `${config.developerInstructions}\n${NO_SHELL_NOTE}` : config.developerInstructions,
+      },
       includePartialMessages: true,
       additionalDirectories: allowedDirs.filter((dir) => dir !== resolve(config.cwd)),
       canUseTool: createPermissionPolicy(config.access, allowedDirs),
@@ -255,6 +267,11 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
         settingSources: ["user", "project", "local"],
       };
     }
+    if (this.#withoutShell(config)) {
+      // Windows: Claude Code no puede encerrar los comandos en una carpeta, así que en este
+      // modo el agente no tiene terminal; los archivos los sigue limitando canUseTool.
+      return { ...options, permissionMode: "acceptEdits", settingSources: [], disallowedTools: SHELL_TOOLS };
+    }
     return {
       ...options,
       permissionMode: "acceptEdits",
@@ -269,6 +286,10 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
         filesystem: { allowWrite: allowedDirs },
       },
     };
+  }
+
+  #withoutShell(config: ThreadConfig): boolean {
+    return config.access === "carpeta" && (this.#options.platform ?? process.platform) === "win32";
   }
 
   #startThread(threadId: string, config: ThreadConfig, resume: boolean): ThreadRuntime {
@@ -569,16 +590,18 @@ function toolPath(input: Record<string, unknown>): string | null {
 }
 
 export function isInside(target: string, dirs: string[]): boolean {
-  const absolute = resolve(target);
+  // En Windows las rutas no distinguen mayúsculas (C:\ y c:\ son la misma unidad).
+  const normalize = (value: string) => (process.platform === "win32" ? resolve(value).toLowerCase() : resolve(value));
+  const absolute = normalize(target);
   return dirs.some((dir) => {
-    const base = resolve(dir);
+    const base = normalize(dir);
     return absolute === base || absolute.startsWith(base.endsWith(sep) ? base : base + sep);
   });
 }
 
 function explainClaudeError(error: string): string {
   if (/sandbox|bubblewrap|bwrap|socat/i.test(error)) {
-    return `${error}\nEl modo «solo su carpeta» necesita el sandbox de Claude Code. En Linux: sudo apt install bubblewrap socat. Otra opción es dar acceso total a este agente.`;
+    return `${error}\nEl modo «solo su carpeta» necesita el sandbox de Claude Code. En Linux: sudo apt install bubblewrap socat. Otra opción es dar acceso total a este agente, solo en una máquina dedicada.`;
   }
   return error;
 }
