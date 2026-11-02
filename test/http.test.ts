@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import type { AddressInfo } from "node:net";
+import { type AddressInfo, connect } from "node:net";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createApp } from "../src/app.js";
@@ -113,6 +113,69 @@ test("HTTP: login, CSRF y sesión", async () => {
     const logout = await s.call("/api/logout", { method: "POST" });
     assert.equal(logout.status, 200);
     assert.equal((await s.call("/api/state")).status, 401);
+  } finally {
+    await s.close();
+  }
+});
+
+/**
+ * Envía `size` bytes por un socket TCP, de a trozos, y anota si el servidor cerró la conexión antes de que el
+ * cliente terminara de enviar. Ese cierre deja datos sin leer y el sistema lo convierte en un RST: en Windows el
+ * cliente pierde entonces la respuesta 413.
+ */
+function rawPost(base: string, cookie: string, size: number, declareLength: boolean) {
+  const { hostname, port } = new URL(base);
+  return new Promise<{ response: string; cutEarly: boolean }>((resolve) => {
+    const socket = connect(Number(port), hostname);
+    let response = "";
+    let sending = true;
+    let cutEarly = false;
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => (response += chunk));
+    socket.on("end", () => {
+      if (sending) cutEarly = true;
+    });
+    socket.on("error", () => {
+      if (sending) cutEarly = true;
+    });
+    socket.on("close", () => resolve({ response, cutEarly }));
+    const head = [
+      "POST /api/agents HTTP/1.1",
+      `Host: ${hostname}:${port}`,
+      "Content-Type: application/json",
+      "X-Cuadrilla: 1",
+      `Cookie: ${cookie}`,
+      "Connection: close",
+      declareLength ? `Content-Length: ${size}` : "Transfer-Encoding: chunked",
+      "",
+      "",
+    ].join("\r\n");
+    const write = (data: string | Buffer) => new Promise<void>((done) => socket.write(data, () => done()));
+    void (async () => {
+      await write(head);
+      const piece = Buffer.alloc(64 * 1024, "x");
+      for (let sent = 0; sent < size && !socket.destroyed; sent += piece.length) {
+        await write(declareLength ? piece : Buffer.concat([Buffer.from(`${piece.length.toString(16)}\r\n`), piece, Buffer.from("\r\n")]));
+        await new Promise((next) => setImmediate(next));
+      }
+      if (!declareLength && !socket.destroyed) await write("0\r\n\r\n");
+      sending = false;
+    })();
+  });
+}
+
+test("HTTP: un cuerpo demasiado grande recibe 413 sin cortar la conexión", async () => {
+  const s = await startServer();
+  try {
+    await s.login();
+    for (const declareLength of [true, false]) {
+      const label = declareLength ? "con content-length" : "por partes (chunked)";
+      const result = await rawPost(s.base, s.cookie, 3 * 1024 * 1024, declareLength);
+      assert.equal(result.cutEarly, false, `${label}: el servidor lee el resto del cuerpo antes de cerrar`);
+      assert.match(result.response, /^HTTP\/1\.1 413 /, label);
+      assert.match(result.response, /demasiado grande/, label);
+    }
+    assert.equal((await s.call("/api/state")).status, 200, "el servidor sigue atendiendo");
   } finally {
     await s.close();
   }

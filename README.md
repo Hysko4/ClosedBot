@@ -105,7 +105,7 @@ npm start                             # abre http://127.0.0.1:8787
 Diferencias en Windows:
 
 - **Claude en «Solo su carpeta» no tiene terminal.** Claude Code no puede encerrar los comandos en una carpeta en Windows. Por eso, en ese modo, el agente lee y escribe archivos solo en sus carpetas, busca en la web y habla con sus compañeros, pero no ejecuta comandos.
-- **«Acceso total» le da la terminal sobre todo tu PC**, con tus archivos y tus sesiones abiertas. En tu equipo personal, evítalo.
+- **«Acceso total» le da la terminal sobre todo tu PC**, con tus archivos y tus sesiones abiertas, y también permisos de administrador si Windows no te pide confirmarlos (UAC). En tu equipo personal, evítalo.
 - **Codex** tiene su propio aislamiento en Windows. Compruébalo antes de darle tareas delicadas.
 - **Para el teléfono**, instala Tailscale para Windows y ejecuta `tailscale serve --bg 8787` en una ventana de PowerShell como administrador.
 
