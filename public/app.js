@@ -10,7 +10,7 @@ const state = {
   agents: [],
   providers: [],
   routines: [],
-  settings: { botName: "ClosedBot", userName: "" },
+  settings: { botName: "ClosedBot", userName: "", fullAccess: false },
   paths: null,
   version: "",
   maxHops: 0,
@@ -257,6 +257,7 @@ function handleEvent(event) {
       if (event.routines) state.routines = event.routines;
       if (event.settings) state.settings = event.settings;
       renderIdentity();
+      renderPermissions();
       renderSidebar();
       renderProviders();
       renderRoutinesIfOpen();
@@ -283,6 +284,8 @@ function handleEvent(event) {
     case "settings":
       state.settings = event.settings;
       renderIdentity();
+      renderPermissions();
+      renderHeader();
       break;
     case "queue":
       state.queues.set(event.agentId, event.queue);
@@ -639,7 +642,7 @@ function renderHeader() {
   stateNode.hidden = !label;
   const parts = [agent.role || "Asistente general", providerLabel(agent.provider)];
   if (agent.model) parts.push(agent.model);
-  if (agent.access === "total") parts.push("acceso total");
+  if (agent.access === "total" || state.settings.fullAccess) parts.push("acceso total");
   if (agent.project) parts.push(agent.project);
   $("#chat-meta").textContent = parts.filter(Boolean).join(" · ");
   const pause = document.querySelector('#agent-menu [data-action="pause"]');
@@ -1623,8 +1626,13 @@ function refreshEffortOptions(effort = "") {
 
 function updateAccessWarning() {
   const form = $("#agent-form");
-  $("#access-warning").hidden = form.elements.access.value !== "total";
-  $("#access-hint").hidden = !(state.platform === "win32" && form.elements.provider.value === "claude" && form.elements.access.value === "carpeta");
+  // Con «Acceso total para todos» en Ajustes, el nivel de cada agente no se usa: se muestra sin poder cambiarlo.
+  const forced = Boolean(state.settings.fullAccess);
+  for (const radio of form.querySelectorAll('input[name="access"]')) radio.disabled = forced;
+  $("#access-forced").hidden = !forced;
+  $("#access-warning").hidden = forced || form.elements.access.value !== "total";
+  $("#access-hint").hidden =
+    forced || !(state.platform === "win32" && form.elements.provider.value === "claude" && form.elements.access.value === "carpeta");
 }
 
 async function saveAgent(event) {
@@ -1874,8 +1882,43 @@ function openSettings({ focusName = false } = {}) {
     paths.append(dt, dd);
   }
   $("#version").textContent = `ClosedBot ${state.version} · límite de ${state.maxHops} reenvíos seguidos entre agentes.`;
+  renderPermissions();
   openDialog($("#settings-dialog"));
   if (focusName) names.elements.userName.focus();
+}
+
+function renderPermissions() {
+  const enabled = Boolean(state.settings.fullAccess);
+  $("#full-access").checked = enabled;
+  $("#full-access-warning").hidden = !enabled;
+}
+
+async function toggleFullAccess() {
+  const box = $("#full-access");
+  const enable = box.checked;
+  if (enable) {
+    const ok = await confirmAction(
+      "¿Dar acceso total a todos los agentes?",
+      "Podrán ejecutar comandos, instalar programas y borrar o leer cualquier archivo del equipo sin preguntarte. En este PC eso incluye permisos de administrador. Los conectores de tu cuenta de Claude siguen fuera de su alcance.",
+      "Dar acceso total",
+    );
+    if (!ok) {
+      renderPermissions();
+      return;
+    }
+  }
+  box.disabled = true;
+  try {
+    const result = await api("/api/settings", { method: "PATCH", body: { fullAccess: enable } });
+    state.settings = result.settings;
+    showToast(enable ? "Listo: todos los agentes tienen acceso total." : "Cada agente vuelve a su propio nivel de acceso.");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    box.disabled = false;
+    renderPermissions();
+    renderHeader();
+  }
 }
 
 async function saveNames(event) {
@@ -2181,6 +2224,7 @@ function bindUi() {
   $("#settings-close").addEventListener("click", () => closeDialog($("#settings-dialog")));
   $("#names-form").addEventListener("submit", saveNames);
   $("#refresh-providers").addEventListener("click", refreshProviders);
+  $("#full-access").addEventListener("change", () => void toggleFullAccess());
   $("#connect-claude").addEventListener("click", () => void connectClaude());
   $("#logout").addEventListener("click", logout);
   $("#back").addEventListener("click", goBack);

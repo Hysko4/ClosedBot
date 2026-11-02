@@ -19,6 +19,8 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
 - **Dos niveles de acceso**:
   - *Solo su carpeta* (por defecto): el agente escribe en su carpeta y en la carpeta compartida, y sus comandos corren dentro de un sandbox.
   - *Acceso total*: comandos y archivos de toda la máquina, sin pedir permiso. Úsalo solo en una máquina dedicada.
+  - En Ajustes, **«Acceso total para todos»** se lo da a todos los agentes a la vez, incluidos los nuevos. Al apagarlo, cada agente vuelve a su propio nivel. Desde la consola: `npm run access -- total` o `npm run access -- carpeta`.
+- **Los conectores de tu cuenta de Claude quedan fuera.** Los agentes entran con tu cuenta, pero no cargan los conectores que tengas en claude.ai (servidores, bancos, brókeres), ni siquiera con acceso total. ClosedBot se los apaga con `ENABLE_CLAUDEAI_MCP_SERVERS=false` y `disableClaudeAiConnectors`.
 
 ## Antes de instalar: seguridad
 
@@ -123,6 +125,7 @@ Diferencias en Windows:
 
 - **Claude en «Solo su carpeta» no tiene terminal.** Claude Code no puede encerrar los comandos en una carpeta en Windows. Por eso, en ese modo, el agente lee y escribe archivos solo en sus carpetas, busca en la web y habla con sus compañeros, pero no ejecuta comandos.
 - **«Acceso total» le da la terminal sobre todo tu PC**, con tus archivos y tus sesiones abiertas, y también permisos de administrador si Windows no te pide confirmarlos (UAC). En tu equipo personal, evítalo.
+- **Instalar con acceso total para todos**: `Instalar-escritorio.cmd acceso-total` (o `set "OPCIONES=acceso-total"` en `Instalar-ClosedBot.cmd`). Lo activa con la app cerrada, salvo que ya lo hayas elegido en Ajustes: si lo apagaste ahí, el instalador no lo vuelve a encender.
 - **Codex** tiene su propio aislamiento en Windows. Compruébalo antes de darle tareas delicadas.
 - **Para el teléfono**, instala Tailscale para Windows y ejecuta `tailscale serve --bg 8787` en una ventana de PowerShell como administrador.
 
@@ -222,6 +225,7 @@ src/
   version.ts           versión de la app
   providers/           Claude (Agent SDK), Codex (app-server), Demo, detección
   cli/password.ts      npm run password
+  cli/access.ts        npm run access (acceso total para todos, sin abrir la app)
 public/                interfaz web (sin dependencias ni compilación)
 scripts/windows/       ClosedBot.exe: ventana propia e icono en la bandeja (C#)
 deploy/                servicio de systemd y plantilla de entorno
@@ -230,7 +234,7 @@ test/                  pruebas (node:test)
 
 ## Estado y límites conocidos
 
-- Versión 0.3.0. Se probó con el proveedor Demo y con simulaciones de Claude y Codex. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
+- Versión 0.3.1. Se probó con el proveedor Demo y con simulaciones de Claude y Codex. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
 - Un solo usuario y sin notificaciones push por ahora.
 - Las preguntas con opciones terminan el turno del agente: tu respuesta le llega como un mensaje nuevo.
 - Las rutinas solo corren con ClosedBot abierta (en Windows, basta con el icono de la bandeja).

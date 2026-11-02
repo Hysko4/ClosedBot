@@ -243,6 +243,9 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(this.#options.env ?? process.env)) if (typeof value === "string") env[key] = value;
     env.CLAUDE_AGENT_SDK_CLIENT_APP = `closedbot/${VERSION}`;
+    // Los agentes entran con la cuenta de claude.ai de la persona. Sin esto, Claude Code cargaría los
+    // conectores de esa cuenta (servidores, bancos, brókeres…) y en acceso total podría usarlos sin preguntar.
+    env.ENABLE_CLAUDEAI_MCP_SERVERS = "false";
 
     const mcpServers: NonNullable<Options["mcpServers"]> = { [TEAM_NAMESPACE]: this.#createTeamServer(threadId) };
     if (this.#options.playwright) {
@@ -268,6 +271,8 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
       additionalDirectories: allowedDirs.filter((dir) => dir !== resolve(config.cwd)),
       canUseTool: createPermissionPolicy(config.access, allowedDirs),
       mcpServers,
+      // Segunda barrera para lo mismo: ninguna fuente de ajustes puede volver a activar los conectores.
+      settings: { disableClaudeAiConnectors: true },
       env,
     };
 

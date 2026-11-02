@@ -195,6 +195,9 @@
           </div>
           <fieldset class="field access">
             <legend>Acceso</legend>
+            <p class="hint" id="access-forced" hidden>
+              Ahora todos los agentes tienen acceso total: lo cambias en Ajustes → Permisos de los agentes.
+            </p>
             <label class="choice">
               <input type="radio" name="access" value="carpeta" checked />
               <span><strong>Solo su carpeta</strong> (recomendado): escribe en su carpeta y en la compartida, con sandbox.</span>
@@ -309,6 +312,15 @@
           <h3 class="section-title">Proveedores</h3>
           <ul class="provider-list" id="provider-list"></ul>
           <button type="button" class="button ghost" id="refresh-providers">Volver a comprobar</button>
+          <h3 class="section-title">Permisos de los agentes</h3>
+          <label class="choice">
+            <input type="checkbox" id="full-access" />
+            <span><strong>Acceso total para todos</strong>: ejecutan comandos y usan todo el equipo sin pedir permiso.</span>
+          </label>
+          <p class="warning" id="full-access-warning" hidden>
+            Activado: cualquier agente puede instalar, borrar o leer lo que sea en este equipo, sin preguntarte. Los conectores de tu cuenta
+            de Claude (servidores, bancos, brókeres) siguen fuera de su alcance.
+          </p>
           <h3 class="section-title">Carpetas</h3>
           <dl class="paths" id="paths"></dl>
           <h3 class="section-title">En el teléfono</h3>

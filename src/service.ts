@@ -48,7 +48,7 @@ export const ROUTINE_GRACE_MS = 2 * 60 * 60_000;
 const ROUTINE_CHECK_MS = 60_000;
 /** Tamaño máximo de un archivo adjunto. */
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
-const SETTINGS_META = "settings";
+export const SETTINGS_META = "settings";
 export const DEFAULT_BOT_NAME = "ClosedBot";
 const OPTION_LETTERS = "ABCD";
 
@@ -94,6 +94,8 @@ export interface RoutineView extends RoutineRecord {
 export interface Settings {
   botName: string;
   userName: string;
+  /** Todos los agentes trabajan con acceso total (comandos sin pedir permiso), sea cual sea el nivel de cada uno. */
+  fullAccess: boolean;
 }
 
 export type ServiceEvent =
@@ -481,18 +483,34 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       // «Cuadrilla» era el nombre por defecto antes de que la app se llamara ClosedBot.
       botName: typeof stored.botName === "string" && stored.botName && stored.botName !== "Cuadrilla" ? stored.botName : DEFAULT_BOT_NAME,
       userName: typeof stored.userName === "string" ? stored.userName : "",
+      fullAccess: stored.fullAccess === true,
     };
   }
 
-  updateSettings(patch: { botName?: unknown; userName?: unknown }): Settings {
+  updateSettings(patch: { botName?: unknown; userName?: unknown; fullAccess?: unknown }): Settings {
+    if (patch.fullAccess !== undefined && typeof patch.fullAccess !== "boolean") {
+      throw new ServiceError("El acceso total para todos debe ser true o false.", 400);
+    }
     const current = this.getSettings();
     const next: Settings = {
       botName: patch.botName === undefined ? current.botName : cleanSettingName(patch.botName) || DEFAULT_BOT_NAME,
       userName: patch.userName === undefined ? current.userName : cleanSettingName(patch.userName),
+      fullAccess: patch.fullAccess === undefined ? current.fullAccess : patch.fullAccess,
     };
     this.#store.setMeta(SETTINGS_META, JSON.stringify(next));
+    if (next.fullAccess !== current.fullAccess) {
+      // Cada agente vuelve a enviar su configuración en el próximo turno, y el proveedor
+      // reinicia su proceso con el acceso nuevo. Un turno en curso termina con el de antes.
+      this.#loadedThreads.clear();
+      this.#log("warn", next.fullAccess ? "Acceso total activado para todos los agentes." : "Acceso total para todos desactivado: cada agente vuelve a su nivel.");
+    }
     this.#emit({ type: "settings", settings: next });
     return next;
+  }
+
+  /** Nivel de acceso con el que trabaja un agente: el suyo, salvo que en Ajustes esté el acceso total para todos. */
+  #access(agent: AgentRecord): AccessLevel {
+    return this.getSettings().fullAccess ? "total" : agent.access;
   }
 
   // ---------- preguntas al usuario ----------
@@ -785,8 +803,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       cwd: agent.workspace,
       runtimeWorkspaceRoots: [agent.workspace, this.#options.sharedDir],
       approvalPolicy: "never",
-      sandbox: agent.access === "total" ? "danger-full-access" : "workspace-write",
-      developerInstructions: buildInstructions(agent, this.#options.sharedDir, this.getSettings().userName),
+      sandbox: this.#access(agent) === "total" ? "danger-full-access" : "workspace-write",
+      developerInstructions: buildInstructions({ ...agent, access: this.#access(agent) }, this.#options.sharedDir, this.getSettings().userName),
     };
     if (agent.model) params.model = agent.model;
     if (agent.effort && agent.provider !== "codex") params.effort = agent.effort;
@@ -880,7 +898,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
           cwd: fresh.workspace,
           approvalPolicy: "never",
           sandboxPolicy:
-            fresh.access === "total"
+            this.#access(fresh) === "total"
               ? { type: "dangerFullAccess" }
               : {
                   type: "workspaceWrite",
@@ -1071,7 +1089,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const threadId = getString(request.params, "threadId");
     const agentId = threadId ? this.#threadToAgent.get(threadId) : undefined;
     const agent = agentId ? this.#store.getAgent(agentId) : null;
-    const total = agent?.access === "total";
+    const total = agent ? this.#access(agent) === "total" : false;
     try {
       switch (request.method) {
         case "item/tool/call": {

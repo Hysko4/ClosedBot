@@ -1,6 +1,6 @@
 {
   "name": "closedbot",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Equipo personal de agentes de IA (Claude y Codex) con interfaz web instalable en el teléfono.",
   "license": "UNLICENSED",
@@ -12,6 +12,7 @@
     "build": "tsc -p .",
     "start": "node --disable-warning=ExperimentalWarning dist/src/server.js",
     "password": "node --disable-warning=ExperimentalWarning dist/src/cli/password.js",
+    "access": "node --disable-warning=ExperimentalWarning dist/src/cli/access.js",
     "test": "tsc -p . && node --disable-warning=ExperimentalWarning --test --test-concurrency=1 dist/test/*.test.js",
     "check": "tsc -p . --noEmit"
   },

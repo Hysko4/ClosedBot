@@ -197,7 +197,7 @@ export function createApp(options: AppOptions): App {
 
   route("PATCH", "/api/settings", async (ctx) => {
     const body = await readJson(ctx.req);
-    return { settings: service.updateSettings({ botName: body.botName, userName: body.userName }) };
+    return { settings: service.updateSettings({ botName: body.botName, userName: body.userName, fullAccess: body.fullAccess }) };
   });
 
   route("POST", "/api/providers/refresh", async () => ({ providers: await service.refreshProviders() }));

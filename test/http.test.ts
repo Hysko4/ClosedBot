@@ -355,7 +355,7 @@ test("HTTP: preguntas, rutinas, ajustes, adjuntos y leídos", async () => {
     assert.equal((await s.call("/api/routines")).json?.routines.length, 1);
     const state = await s.call("/api/state");
     assert.equal(state.json?.routines.length, 1);
-    assert.deepEqual(state.json?.settings, { botName: "ClosedBot", userName: "" });
+    assert.deepEqual(state.json?.settings, { botName: "ClosedBot", userName: "", fullAccess: false });
     const paused = await s.call(`/api/routines/${routineId}`, { method: "PATCH", body: { enabled: false } });
     assert.equal(paused.json?.routine.enabled, false);
     const ran = await s.call(`/api/routines/${routineId}/run`, { method: "POST" });
@@ -365,8 +365,13 @@ test("HTTP: preguntas, rutinas, ajustes, adjuntos y leídos", async () => {
 
     // Ajustes.
     const settings = await s.call("/api/settings", { method: "PATCH", body: { userName: "Jonathan" } });
-    assert.deepEqual(settings.json?.settings, { botName: "ClosedBot", userName: "Jonathan" });
+    assert.deepEqual(settings.json?.settings, { botName: "ClosedBot", userName: "Jonathan", fullAccess: false });
     assert.equal((await s.call("/api/settings", { method: "PATCH", body: { botName: 5 } })).status, 400);
+    const full = await s.call("/api/settings", { method: "PATCH", body: { fullAccess: true } });
+    assert.deepEqual(full.json?.settings, { botName: "ClosedBot", userName: "Jonathan", fullAccess: true });
+    assert.equal((await s.call("/api/settings", { method: "PATCH", body: { fullAccess: "sí" } })).status, 400);
+    const names = await s.call("/api/settings", { method: "PATCH", body: { userName: "Jona" } });
+    assert.equal(names.json?.settings.fullAccess, true, "guardar los nombres no apaga el acceso total");
 
     // Adjuntos.
     const upload = await s.call(`/api/agents/${agent.id}/files?name=${encodeURIComponent("../../notas.txt")}`, {

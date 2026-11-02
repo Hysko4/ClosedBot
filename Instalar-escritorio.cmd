@@ -58,6 +58,11 @@ if exist "Cuadrilla.exe" del /q "Cuadrilla.exe"
 if exist "CONTRASENA-CUADRILLA.txt" if not exist "CONTRASENA-CLOSEDBOT.txt" ren "CONTRASENA-CUADRILLA.txt" "CONTRASENA-CLOSEDBOT.txt"
 node --disable-warning=ExperimentalWarning dist\src\cli\password.js --generate --if-missing --save CONTRASENA-CLOSEDBOT.txt
 if errorlevel 1 goto fallo
+rem "acceso-total": todos los agentes ejecutan comandos sin pedir permiso, si aun no se eligio en Ajustes.
+if /i "%~1"=="acceso-total" (
+  node --disable-warning=ExperimentalWarning dist\src\cli\access.js total --if-unset
+  if errorlevel 1 goto fallo
+)
 start "" /wait "ClosedBot.exe" /instalar
 if errorlevel 1 goto fallo
 

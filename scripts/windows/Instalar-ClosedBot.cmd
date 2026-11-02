@@ -4,6 +4,9 @@ title Instalar ClosedBot
 rem Descarga ClosedBot en tu carpeta de usuario, copia tu contrasena y abre su instalador.
 rem Si ClosedBot queda funcionando, envia a la papelera la version anterior, la carpeta cuadrilla.
 rem Tus agentes y conversaciones no se borran: el instalador los pasa a la carpeta .closedbot.
+rem Opciones para el instalador: "acceso-total" da acceso total a todos los agentes, salvo que
+rem ya lo hayas elegido en Ajustes. Se pueden escribir aqui abajo o pasar a este archivo.
+set "OPCIONES=%*"
 
 set "DEST=%USERPROFILE%\ClosedBot"
 set "VIEJA=%USERPROFILE%\cuadrilla"
@@ -53,16 +56,17 @@ icacls "%DEST%\CONTRASENA-CLOSEDBOT.txt" /inheritance:r /grant:r "%USERNAME%:F" 
 :instalar
 echo.
 echo   [3/3] Abriendo el instalador de ClosedBot...
-call "%DEST%\Instalar-escritorio.cmd"
+call "%DEST%\Instalar-escritorio.cmd" %OPCIONES%
 rem Si el instalador falla, ya mostro el motivo y espero una tecla.
 if errorlevel 1 exit /b 1
 
 echo.
-echo   Comprobando que ClosedBot 0.3.0 responde...
+echo   Comprobando que ClosedBot responde...
 set /a INTENTOS=0
 :esperar
 set /a INTENTOS+=1
-curl.exe -s -m 3 http://127.0.0.1:8787/api/health 2>nul | findstr /c:"0.3.0" >nul
+rem El instalador ya cerro la version anterior antes de instalar: si alguien responde, es la nueva.
+curl.exe -s -m 3 http://127.0.0.1:8787/api/health 2>nul | findstr /l /c:"true" >nul
 if not errorlevel 1 goto funciona
 if %INTENTOS% geq 20 goto sin_respuesta
 timeout /t 3 /nobreak >nul

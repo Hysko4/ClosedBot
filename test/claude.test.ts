@@ -131,6 +131,35 @@ test("Claude: transmite el texto, registra herramientas y configura el modo «ca
   }
 });
 
+test("Claude: «Acceso total para todos» en Ajustes cambia el acceso de los agentes desde su próximo turno", async () => {
+  const { h, recorder } = await claudeHarness("win32");
+  try {
+    const clara = h.service.createAgent({ name: "Clara", provider: "claude" });
+    const turn = async (text: string) => {
+      const { message } = h.service.sendUserMessage(clara.id, text);
+      await waitFor(() => h.store.getMessage(message.id)?.status === "completed", 5_000, `turno «${text}»`);
+      return recorder.options.at(-1) as Options;
+    };
+    const before = await turn("hola");
+    assert.equal(before.permissionMode, "acceptEdits");
+    assert.deepEqual(before.disallowedTools, ["Bash", "PowerShell", "Monitor"]);
+
+    h.service.updateSettings({ fullAccess: true });
+    const total = await turn("ahora con todo");
+    assert.equal(total.permissionMode, "bypassPermissions");
+    assert.equal(total.disallowedTools, undefined, "con acceso total tiene terminal");
+    assert.match((total.systemPrompt as { append: string }).append, /acceso completo al equipo/);
+    assert.equal(h.service.getAgent(clara.id).access, "carpeta", "el nivel propio del agente se conserva");
+
+    h.service.updateSettings({ fullAccess: false });
+    const back = await turn("otra vez solo su carpeta");
+    assert.equal(back.permissionMode, "acceptEdits");
+    assert.deepEqual(back.disallowedTools, ["Bash", "PowerShell", "Monitor"]);
+  } finally {
+    await h.close();
+  }
+});
+
 test("Claude: la herramienta send_message llega al compañero", async () => {
   const { h } = await claudeHarness();
   try {
@@ -225,6 +254,24 @@ test("Claude: buildOptions en acceso total", () => {
   assert.equal(options.allowDangerouslySkipPermissions, true);
   assert.equal(options.sandbox, undefined);
   assert.deepEqual(options.additionalDirectories, [resolve("/srv/c")]);
+});
+
+test("Claude: los agentes no cargan los conectores de claude.ai de la cuenta, en ningún modo", () => {
+  // Aunque el entorno del servidor los pida, los agentes no deben heredar los conectores de la cuenta.
+  const client = new ClaudeAgentClient({
+    env: { PATH: "/usr/bin", ENABLE_CLAUDEAI_MCP_SERVERS: "true" },
+    createQuery: fakeQueryFactory({ options: [], prompts: [], interrupts: 0 }),
+  });
+  for (const access of ["total", "carpeta"] as const) {
+    const options = client.buildOptions(
+      "00000000-0000-4000-8000-000000000003" as UUID,
+      { cwd: "/srv/a", developerInstructions: "x", additionalDirectories: [], access },
+      false,
+    );
+    assert.equal(options.env?.ENABLE_CLAUDEAI_MCP_SERVERS, "false", access);
+    assert.deepEqual(options.settings, { disableClaudeAiConnectors: true }, access);
+    assert.deepEqual(Object.keys(options.mcpServers ?? {}), ["closedbot"], access);
+  }
 });
 
 test("Claude: en Windows el modo «carpeta» quita la terminal en vez de fallar", () => {

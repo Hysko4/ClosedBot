@@ -166,9 +166,9 @@ test("rutinas: validan el horario, tienen tope y se borran con su agente", async
 test("ajustes: nombres del asistente y del usuario", async () => {
   const h = await createHarness();
   try {
-    assert.deepEqual(h.service.getSettings(), { botName: "ClosedBot", userName: "" });
-    assert.deepEqual(h.service.updateSettings({ userName: "  Jonathan  " }), { botName: "ClosedBot", userName: "Jonathan" });
-    assert.deepEqual(h.service.updateSettings({ botName: "Mi Bot" }), { botName: "Mi Bot", userName: "Jonathan" });
+    assert.deepEqual(h.service.getSettings(), { botName: "ClosedBot", userName: "", fullAccess: false });
+    assert.deepEqual(h.service.updateSettings({ userName: "  Jonathan  " }), { botName: "ClosedBot", userName: "Jonathan", fullAccess: false });
+    assert.deepEqual(h.service.updateSettings({ botName: "Mi Bot" }), { botName: "Mi Bot", userName: "Jonathan", fullAccess: false });
     assert.equal(h.service.updateSettings({ botName: "" }).botName, "ClosedBot");
     assert.throws(() => h.service.updateSettings({ userName: "x".repeat(41) }), /40 caracteres/);
     assert.ok(h.events.some((event) => event.type === "settings"));

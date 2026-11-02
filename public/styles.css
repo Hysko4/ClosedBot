@@ -325,6 +325,17 @@ svg {
   accent-color: var(--accent);
 }
 
+/* Opciones que no se aplican ahora (por ejemplo, con «Acceso total para todos»): atenuadas y sin resaltar. */
+.choice:has(input:disabled) {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.choice:has(input:disabled:checked) {
+  border-color: #2a2a2a;
+  background: none;
+}
+
 .choice strong {
   color: var(--text);
 }
