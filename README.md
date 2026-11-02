@@ -114,6 +114,7 @@ Cómo se usa:
 - El registro está en `%LOCALAPPDATA%\ClosedBot\closedbot.log`. Si el servidor se cae, el programa lo vuelve a arrancar (hasta 3 veces en 15 minutos) y te avisa si no puede.
 - **Actualizar**: reemplaza el código por la versión nueva (tus datos están en `C:\Users\<tú>\.closedbot` y no se tocan) y vuelve a abrir `Instalar-escritorio.cmd`.
 - **Desde la versión llamada Cuadrilla**: el instalador cierra `Cuadrilla.exe`, cambia sus accesos directos por los de ClosedBot (respeta si habías apagado el inicio con Windows) y borra `%LOCALAPPDATA%\Cuadrilla`. Al arrancar, la app mueve tus datos de `.cuadrilla` a `.closedbot`. El archivo `CONTRASENA-CUADRILLA.txt` pasa a llamarse `CONTRASENA-CLOSEDBOT.txt`.
+- **Instalar o actualizar en un clic**: `scripts\windows\Instalar-ClosedBot.cmd` descarga o actualiza el código en `%USERPROFILE%\ClosedBot`, copia la contraseña de la carpeta `cuadrilla`, abre el instalador y, cuando ClosedBot responde, manda esa carpeta vieja a la papelera. Se puede copiar al Escritorio y abrir con doble clic.
 - **Quitar los accesos directos**: `ClosedBot.exe /desinstalar`.
 
 Si prefieres la consola: `npm ci`, `npm run build`, `npm run password -- --generate` y `npm start`, y abre <http://127.0.0.1:8787>.
