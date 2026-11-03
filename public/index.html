@@ -59,7 +59,7 @@
         </button>
 
         <div class="search-box" id="search-box" hidden>
-          <input id="search-input" type="search" placeholder="Buscar agente…" aria-label="Buscar agente" autocomplete="off" />
+          <input id="search-input" type="search" placeholder="Buscar agente o canal…" aria-label="Buscar agente o canal" autocomplete="off" />
         </div>
 
         <nav class="agent-groups" id="agent-groups" aria-label="Conversaciones"></nav>
@@ -134,6 +134,12 @@
                 </p>
                 <div class="intro-ideas" id="intro-ideas" aria-label="Ideas para empezar"></div>
               </div>
+              <div class="channel-intro" id="channel-intro" hidden>
+                <span class="channel-glyph intro-glyph" aria-hidden="true">#</span>
+                <h2 id="channel-intro-title"></h2>
+                <p class="channel-intro-topic" id="channel-intro-topic" hidden></p>
+                <p class="muted" id="channel-intro-text"></p>
+              </div>
               <div id="message-list"></div>
             </div>
           </div>
@@ -152,6 +158,7 @@
               <progress id="dictation-progress" max="1" value="0" hidden></progress>
             </div>
             <form class="composer" id="composer">
+              <div class="mention-menu" id="mention-menu" role="listbox" aria-label="Nombrar a un agente del canal" hidden></div>
               <div class="attachments" id="attachments" hidden></div>
               <div class="composer-row">
                 <button type="button" class="composer-icon" id="attach" title="Adjuntar archivos" aria-label="Adjuntar archivos">
@@ -349,6 +356,59 @@
         <footer class="dialog-footer">
           <button type="button" class="button danger-soft" id="logout">Cerrar sesión</button>
           <button type="button" class="button primary" id="settings-close">Listo</button>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog class="dialog" id="channel-dialog" aria-labelledby="channel-dialog-title">
+      <form id="channel-form" method="dialog" novalidate>
+        <header class="dialog-header">
+          <h2 id="channel-dialog-title">Nuevo canal</h2>
+          <p class="muted small">Un chat con varios agentes: el encargado responde y reparte el trabajo.</p>
+        </header>
+        <div class="dialog-body">
+          <label class="field">
+            <span>Nombre</span>
+            <input name="name" maxlength="60" required placeholder="Ej.: Lanzamiento del juego" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Para qué es (opcional)</span>
+            <textarea name="topic" rows="2" maxlength="300" placeholder="Ej.: coordinar el lanzamiento: tienda, tráiler y prensa"></textarea>
+          </label>
+          <fieldset class="field members-field">
+            <legend>Agentes del canal <span class="member-count" id="channel-count"></span></legend>
+            <div class="member-list" id="channel-members"></div>
+          </fieldset>
+          <label class="field">
+            <span>Encargado</span>
+            <select name="lead" id="channel-lead"></select>
+          </label>
+          <p class="hint">
+            El encargado responde lo que no nombra a nadie y reparte el trabajo entre los demás. Con @Nombre le hablas a uno solo; con @todos,
+            a todos.
+          </p>
+          <p class="form-error" id="channel-error" role="alert"></p>
+        </div>
+        <footer class="dialog-footer">
+          <button type="button" class="button danger-soft footer-start" id="channel-delete" hidden>Eliminar</button>
+          <button type="button" class="button ghost" id="channel-cancel">Cancelar</button>
+          <button type="submit" class="button primary" id="channel-save">Crear canal</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog class="dialog" id="deleted-channels-dialog" aria-labelledby="deleted-channels-title">
+      <div>
+        <header class="dialog-header">
+          <h2 id="deleted-channels-title">Canales eliminados</h2>
+          <p class="muted small">Restaura un canal con sus mensajes o bórralo para siempre.</p>
+        </header>
+        <div class="dialog-body">
+          <ul class="deleted-list" id="deleted-channels-list"></ul>
+          <p class="muted small" id="deleted-channels-empty" hidden>No hay canales eliminados.</p>
+        </div>
+        <footer class="dialog-footer">
+          <button type="button" class="button primary" id="deleted-channels-close">Listo</button>
         </footer>
       </div>
     </dialog>

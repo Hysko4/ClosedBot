@@ -66,6 +66,8 @@ export type MessageStatus =
 export interface MessageRecord {
   id: string;
   agentId: string;
+  /** Canal donde se ve el mensaje; null = la conversación privada con el agente. */
+  channelId: string | null;
   role: MessageRole;
   fromAgentId: string | null;
   toAgentIds: string[];
@@ -99,6 +101,8 @@ export type DeliveryStatus = "queued" | "starting" | "running" | "completed" | "
 export interface DeliveryRecord {
   id: string;
   agentId: string;
+  /** Canal del que viene el encargo: lo que responda el agente se ve en ese canal. */
+  channelId: string | null;
   messageId: string;
   senderKind: "user" | "agent";
   senderAgentId: string | null;
@@ -112,6 +116,24 @@ export interface DeliveryRecord {
   createdAt: number;
   startedAt: number | null;
   finishedAt: number | null;
+}
+
+/** Canal: una conversación con varios agentes. El encargado responde salvo que se nombre a otro con @. */
+export interface ChannelRecord {
+  id: string;
+  name: string;
+  /** Para qué es el canal (opcional); los agentes lo ven. */
+  topic: string;
+  leadId: string | null;
+  memberIds: string[];
+  preview: string;
+  readAt: number;
+  /** Último mensaje de un agente en el canal (para el aviso de no leído). */
+  lastAt: number;
+  /** Fecha en que se movió a «Canales eliminados»; null si está activo. */
+  deletedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
 }
 
 type Row = Record<string, SQLInputValue>;
@@ -157,6 +179,7 @@ CREATE TABLE IF NOT EXISTS messages (
   turn_id TEXT,
   delivery_id TEXT,
   payload TEXT,
+  channel_id TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -175,6 +198,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
   turn_id TEXT,
   error TEXT,
   idempotency_key TEXT UNIQUE,
+  channel_id TEXT,
   created_at INTEGER NOT NULL,
   started_at INTEGER,
   finished_at INTEGER
@@ -195,6 +219,19 @@ CREATE TABLE IF NOT EXISTS routines (
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS routines_due ON routines(enabled, next_run_at);
+CREATE TABLE IF NOT EXISTS channels (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  topic TEXT NOT NULL DEFAULT '',
+  lead_agent_id TEXT,
+  member_ids TEXT NOT NULL DEFAULT '[]',
+  preview TEXT NOT NULL DEFAULT '',
+  read_at INTEGER NOT NULL DEFAULT 0,
+  deleted_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS channels_active_name ON channels(name COLLATE NOCASE) WHERE deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL,
@@ -220,12 +257,19 @@ const ADDED_COLUMNS: Array<{ table: string; column: string; ddl: string; backfil
   { table: "agents", column: "pinned", ddl: "ALTER TABLE agents ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0" },
   { table: "agents", column: "hidden", ddl: "ALTER TABLE agents ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0" },
   { table: "agents", column: "voice", ddl: "ALTER TABLE agents ADD COLUMN voice TEXT" },
+  { table: "messages", column: "channel_id", ddl: "ALTER TABLE messages ADD COLUMN channel_id TEXT" },
+  { table: "deliveries", column: "channel_id", ddl: "ALTER TABLE deliveries ADD COLUMN channel_id TEXT" },
 ];
 
-const SCHEMA_VERSION = "3";
+/** Índices sobre columnas añadidas: se crean después de añadirlas. */
+const ADDED_INDEXES = ["CREATE INDEX IF NOT EXISTS messages_channel ON messages(channel_id, seq)"];
+
+const SCHEMA_VERSION = "4";
 
 /** Roles cuyos mensajes cuentan como novedad para el aviso de no leído. */
 const UNREAD_ROLES = "('assistant', 'teammate', 'notice', 'decision', 'routine')";
+/** En un canal, los encargos entre agentes se ven una sola vez (como aviso), no como mensaje recibido. */
+const CHANNEL_UNREAD_ROLES = "('assistant', 'notice', 'decision')";
 
 /** Almacenamiento local en SQLite (módulo `node:sqlite`, sin dependencias nativas). */
 export class Store {
@@ -245,6 +289,7 @@ export class Store {
       this.#db.exec(ddl);
       if (backfill) this.#db.exec(backfill);
     }
+    for (const ddl of ADDED_INDEXES) this.#db.exec(ddl);
     if (this.getMeta("schema_version") !== SCHEMA_VERSION) this.setMeta("schema_version", SCHEMA_VERSION);
   }
 
@@ -399,13 +444,25 @@ export class Store {
 
   // ---------- mensajes ----------
 
+  /** La conversación privada con el agente (lo de los canales se ve en cada canal). */
   listMessages(agentId: string, limit = 200, beforeSeq?: number): Array<MessageRecord & { seq: number }> {
     const rows = (
       beforeSeq
         ? this.#db
-            .prepare("SELECT * FROM messages WHERE agent_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?")
+            .prepare("SELECT * FROM messages WHERE agent_id = ? AND channel_id IS NULL AND seq < ? ORDER BY seq DESC LIMIT ?")
             .all(agentId, beforeSeq, limit)
-        : this.#db.prepare("SELECT * FROM messages WHERE agent_id = ? ORDER BY seq DESC LIMIT ?").all(agentId, limit)
+        : this.#db.prepare("SELECT * FROM messages WHERE agent_id = ? AND channel_id IS NULL ORDER BY seq DESC LIMIT ?").all(agentId, limit)
+    ) as Row[];
+    return rows.reverse().map((row) => ({ ...toMessage(row), seq: Number(row.seq) }));
+  }
+
+  /** Lo que se ve en un canal: todo menos la copia que recibe cada agente de un encargo de otro. */
+  listChannelMessages(channelId: string, limit = 200, beforeSeq?: number): Array<MessageRecord & { seq: number }> {
+    const base = "SELECT * FROM messages WHERE channel_id = ? AND role <> 'teammate'";
+    const rows = (
+      beforeSeq
+        ? this.#db.prepare(`${base} AND seq < ? ORDER BY seq DESC LIMIT ?`).all(channelId, beforeSeq, limit)
+        : this.#db.prepare(`${base} ORDER BY seq DESC LIMIT ?`).all(channelId, limit)
     ) as Row[];
     return rows.reverse().map((row) => ({ ...toMessage(row), seq: Number(row.seq) }));
   }
@@ -427,17 +484,19 @@ export class Store {
     turnId?: string | null;
     deliveryId?: string | null;
     payload?: Record<string, unknown> | null;
+    channelId?: string | null;
   }): MessageRecord {
     const now = Date.now();
     const id = input.id ?? randomUUID();
     this.#db
       .prepare(
-        `INSERT INTO messages (id, agent_id, role, from_agent_id, to_agent_ids, reply_to, text, status, turn_id, delivery_id, payload, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (id, agent_id, channel_id, role, from_agent_id, to_agent_ids, reply_to, text, status, turn_id, delivery_id, payload, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
         input.agentId,
+        input.channelId ?? null,
         input.role,
         input.fromAgentId ?? null,
         JSON.stringify(input.toAgentIds ?? []),
@@ -491,8 +550,16 @@ export class Store {
     this.#db.prepare("UPDATE messages SET text = text || ?, updated_at = ? WHERE id = ?").run(delta, Date.now(), id);
   }
 
+  /** Borra la conversación privada con el agente; lo que dijo en los canales se queda. */
   deleteMessagesForAgent(agentId: string): void {
-    this.#db.prepare("DELETE FROM messages WHERE agent_id = ?").run(agentId);
+    this.#db.prepare("DELETE FROM messages WHERE agent_id = ? AND channel_id IS NULL").run(agentId);
+  }
+
+  /** Pasa a otro agente los mensajes del usuario en canales que guardaba uno que se va a eliminar. */
+  moveChannelUserMessages(fromAgentId: string, toAgentId: string): void {
+    this.#db
+      .prepare("UPDATE messages SET agent_id = ? WHERE agent_id = ? AND channel_id IS NOT NULL AND role = 'user'")
+      .run(toAgentId, fromAgentId);
   }
 
   // ---------- entregas (cola) ----------
@@ -506,6 +573,7 @@ export class Store {
     replyTo?: string | null;
     hops?: number;
     idempotencyKey?: string | null;
+    channelId?: string | null;
   }): { delivery: DeliveryRecord; created: boolean } {
     if (input.idempotencyKey) {
       const existing = this.#db.prepare("SELECT * FROM deliveries WHERE idempotency_key = ?").get(input.idempotencyKey) as Row | undefined;
@@ -514,8 +582,8 @@ export class Store {
     const id = randomUUID();
     this.#db
       .prepare(
-        `INSERT INTO deliveries (id, agent_id, message_id, sender_kind, sender_agent_id, text, reply_to, hops, status, idempotency_key, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+        `INSERT INTO deliveries (id, agent_id, message_id, sender_kind, sender_agent_id, text, reply_to, hops, status, idempotency_key, channel_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
       )
       .run(
         id,
@@ -527,6 +595,7 @@ export class Store {
         input.replyTo ?? null,
         input.hops ?? 0,
         input.idempotencyKey ?? null,
+        input.channelId ?? null,
         Date.now(),
       );
     return { delivery: this.getDelivery(id) as DeliveryRecord, created: true };
@@ -601,6 +670,18 @@ export class Store {
     return rows;
   }
 
+  /** Cancela lo que esperaba turno en un canal (al moverlo a «Canales eliminados»). */
+  cancelQueuedForChannel(channelId: string): DeliveryRecord[] {
+    const queued = (this.#db.prepare("SELECT * FROM deliveries WHERE channel_id = ? AND status = 'queued'").all(channelId) as Row[]).map(toDelivery);
+    for (const delivery of queued) {
+      this.updateDelivery(delivery.id, { status: "cancelled", finishedAt: Date.now() });
+      const message = this.getMessage(delivery.messageId);
+      // El mensaje del usuario se queda como estaba: lo pudieron recibir otros agentes del canal.
+      if (message && message.role !== "user") this.updateMessage(delivery.messageId, { status: "cancelled" });
+    }
+    return queued;
+  }
+
   cancelQueuedForAgent(agentId: string): number {
     const queued = (this.#db.prepare("SELECT * FROM deliveries WHERE agent_id = ? AND status = 'queued'").all(agentId) as Row[]).map(toDelivery);
     for (const delivery of queued) {
@@ -608,6 +689,76 @@ export class Store {
       this.updateMessage(delivery.messageId, { status: "cancelled" });
     }
     return queued.length;
+  }
+
+  // ---------- canales ----------
+
+  listChannels(options: { deleted?: boolean } = {}): ChannelRecord[] {
+    const where = options.deleted ? "c.deleted_at IS NOT NULL ORDER BY c.deleted_at DESC" : "c.deleted_at IS NULL ORDER BY c.created_at, c.rowid";
+    return (this.#db.prepare(`${CHANNEL_SELECT} WHERE ${where}`).all() as Row[]).map(toChannel);
+  }
+
+  getChannel(id: string): ChannelRecord | null {
+    const row = this.#db.prepare(`${CHANNEL_SELECT} WHERE c.id = ?`).get(id) as Row | undefined;
+    return row ? toChannel(row) : null;
+  }
+
+  /** Canal activo con ese nombre (sin distinguir mayúsculas). */
+  findChannelByName(name: string): ChannelRecord | null {
+    const row = this.#db.prepare(`${CHANNEL_SELECT} WHERE c.name = ? COLLATE NOCASE AND c.deleted_at IS NULL`).get(name) as Row | undefined;
+    return row ? toChannel(row) : null;
+  }
+
+  createChannel(input: { name: string; topic: string; leadId: string | null; memberIds: string[] }): ChannelRecord {
+    const now = Date.now();
+    const id = randomUUID();
+    this.#db
+      .prepare(
+        `INSERT INTO channels (id, name, topic, lead_agent_id, member_ids, read_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, input.name, input.topic, input.leadId, JSON.stringify(input.memberIds), now, now, now);
+    return this.getChannel(id) as ChannelRecord;
+  }
+
+  updateChannel(
+    id: string,
+    patch: Partial<Pick<ChannelRecord, "name" | "topic" | "leadId" | "memberIds" | "preview" | "readAt" | "deletedAt">>,
+  ): ChannelRecord {
+    const columns: Record<string, string> = {
+      name: "name",
+      topic: "topic",
+      leadId: "lead_agent_id",
+      memberIds: "member_ids",
+      preview: "preview",
+      readAt: "read_at",
+      deletedAt: "deleted_at",
+    };
+    const sets: string[] = [];
+    const values: SQLInputValue[] = [];
+    for (const [key, value] of Object.entries(patch)) {
+      const column = columns[key];
+      if (!column || value === undefined) continue;
+      sets.push(`${column} = ?`);
+      values.push(key === "memberIds" ? JSON.stringify(value) : (value as SQLInputValue));
+    }
+    if (sets.length) {
+      sets.push("updated_at = ?");
+      values.push(Date.now(), id);
+      this.#db.prepare(`UPDATE channels SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    }
+    const channel = this.getChannel(id);
+    if (!channel) throw new Error("Canal no encontrado.");
+    return channel;
+  }
+
+  /** Borra el canal para siempre, con sus mensajes. */
+  deleteChannel(id: string): void {
+    this.transaction(() => {
+      this.#db.prepare("DELETE FROM messages WHERE channel_id = ?").run(id);
+      this.#db.prepare("DELETE FROM deliveries WHERE channel_id = ? AND status NOT IN ('queued', 'starting', 'running')").run(id);
+      this.#db.prepare("DELETE FROM channels WHERE id = ?").run(id);
+    });
   }
 
   // ---------- rutinas ----------
@@ -712,8 +863,37 @@ function str(value: SQLInputValue | undefined): string | null {
 }
 
 const AGENT_SELECT = `SELECT a.*, (
-  SELECT MAX(m.updated_at) FROM messages m WHERE m.agent_id = a.id AND m.role IN ${UNREAD_ROLES}
+  SELECT MAX(m.updated_at) FROM messages m WHERE m.agent_id = a.id AND m.channel_id IS NULL AND m.role IN ${UNREAD_ROLES}
 ) AS last_at FROM agents a`;
+
+const CHANNEL_SELECT = `SELECT c.*, (
+  SELECT MAX(m.updated_at) FROM messages m WHERE m.channel_id = c.id AND m.role IN ${CHANNEL_UNREAD_ROLES}
+) AS last_at FROM channels c`;
+
+function parseIds(value: SQLInputValue | undefined): string[] {
+  try {
+    const parsed: unknown = JSON.parse(String(value ?? "[]"));
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function toChannel(row: Row): ChannelRecord {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    topic: String(row.topic ?? ""),
+    leadId: str(row.lead_agent_id),
+    memberIds: parseIds(row.member_ids),
+    preview: String(row.preview ?? ""),
+    readAt: Number(row.read_at ?? 0),
+    lastAt: row.last_at === null || row.last_at === undefined ? 0 : Number(row.last_at),
+    deletedAt: row.deleted_at === null || row.deleted_at === undefined ? null : Number(row.deleted_at),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
 
 function parseJsonRecord(value: SQLInputValue | undefined): Record<string, unknown> | null {
   if (value === null || value === undefined) return null;
@@ -791,6 +971,7 @@ function toMessage(row: Row): MessageRecord {
   return {
     id: String(row.id),
     agentId: String(row.agent_id),
+    channelId: str(row.channel_id),
     role: String(row.role) as MessageRole,
     fromAgentId: str(row.from_agent_id),
     toAgentIds,
@@ -809,6 +990,7 @@ function toDelivery(row: Row): DeliveryRecord {
   return {
     id: String(row.id),
     agentId: String(row.agent_id),
+    channelId: str(row.channel_id),
     messageId: String(row.message_id),
     senderKind: String(row.sender_kind) === "agent" ? "agent" : "user",
     senderAgentId: str(row.sender_agent_id),

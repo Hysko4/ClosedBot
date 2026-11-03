@@ -28,6 +28,7 @@ const Synth = "speechSynthesis" in window && typeof window.SpeechSynthesisUttera
 const AVATAR_CUSTOM_BASE = 10_000;
 const LONG_PRESS_MS = 500;
 const COLLAPSED_KEY = "closedbot:secciones-plegadas";
+const MAX_CHANNEL_MEMBERS = 12;
 
 const state = {
   agents: [],
@@ -53,6 +54,9 @@ const state = {
   showHidden: false,
   keepUnread: new Set(), // «Marcar como no leído» en la conversación abierta: sigue así hasta que vuelvas a entrar
   collapsed: loadCollapsed(),
+  channels: [], // canales activos
+  deletedChannels: [], // «Canales eliminados»
+  currentChannelId: null, // canal abierto (entonces currentId es null)
 };
 
 const elements = new Map(); // id de mensaje -> elemento del DOM (solo el agente abierto)
@@ -217,6 +221,8 @@ async function enterApp() {
   state.platform = data.platform ?? "";
   state.sections = data.sections ?? [];
   state.usage = data.usage ?? [];
+  state.channels = data.channels ?? [];
+  state.deletedChannels = data.deletedChannels ?? [];
   $("#login").hidden = true;
   $("#app").hidden = false;
   renderIdentity();
@@ -290,6 +296,8 @@ function handleEvent(event) {
       if (event.settings) state.settings = event.settings;
       if (event.sections) state.sections = event.sections;
       if (event.usage) state.usage = event.usage;
+      if (event.channels) state.channels = event.channels;
+      if (event.deletedChannels) state.deletedChannels = event.deletedChannels;
       applySpeechStatus(event.speech ?? null);
       renderIdentity();
       renderPermissions();
@@ -298,8 +306,10 @@ function handleEvent(event) {
       renderRoutinesIfOpen();
       renderUsage();
       renderDetailsIfOpen();
+      renderDeletedChannelsIfOpen();
       // Tras reconectar pudimos perder eventos: recargamos la conversación abierta.
-      if (state.currentId) void loadConversation(state.currentId, { keepScroll: true });
+      if (state.currentChannelId && !findChannel(state.currentChannelId)) void navigate(null);
+      else if (convKey()) void loadConversation(convKey(), { keepScroll: true });
       break;
     case "agents":
       state.agents = event.agents;
@@ -315,6 +325,25 @@ function handleEvent(event) {
     case "sections":
       state.sections = event.sections;
       renderSidebar();
+      break;
+    case "channels":
+      state.channels = event.channels;
+      if (event.deleted) state.deletedChannels = event.deleted;
+      renderSidebar();
+      renderDeletedChannelsIfOpen();
+      if ($("#channel-dialog").open && editingChannelId && !findChannel(editingChannelId)) closeDialog($("#channel-dialog"));
+      if (state.currentChannelId) {
+        // Lo eliminaron (desde otro dispositivo o desde el menú): se vuelve a la lista.
+        if (!findChannel(state.currentChannelId)) {
+          void navigate(null);
+          break;
+        }
+        renderHeader();
+        renderChannelIntro();
+        updateWorkingIndicator();
+        updateActionButton();
+        if (findChannel(state.currentChannelId)?.unread) scheduleMarkRead(convKey());
+      }
       break;
     case "usage":
       state.usage = event.usage;
@@ -349,10 +378,12 @@ function handleEvent(event) {
       if (event.agentId === state.currentId) renderQueue();
       break;
     case "message":
-      upsertMessage(event.agentId, event.message);
+      // La copia que recibe cada agente de un encargo en un canal no se muestra: ahí se ve «Ana → Beto».
+      if (event.message.channelId && event.message.role === "teammate") break;
+      upsertMessage(messageKey(event.agentId, event.message), event.message);
       break;
     case "delta":
-      applyDelta(event.agentId, event.messageId, event.delta);
+      applyDelta(event.channelId ? `c:${event.channelId}` : event.agentId, event.messageId, event.delta);
       break;
     case "notice":
       if (!event.agentId || event.agentId !== state.currentId) showToast(event.message, event.level === "error" ? "error" : "info");
@@ -364,9 +395,13 @@ function handleEvent(event) {
 
 // ---------- navegación ----------
 
-function currentRouteId() {
-  const match = location.hash.match(/^#\/a\/([^/?#]+)/);
-  return match ? decodeURIComponent(match[1]) : null;
+/** Qué está abierto según la dirección: #/a/<agente> o #/c/<canal>. */
+function currentRoute() {
+  const agent = location.hash.match(/^#\/a\/([^/?#]+)/);
+  if (agent) return { kind: "agent", id: decodeURIComponent(agent[1]) };
+  const channel = location.hash.match(/^#\/c\/([^/?#]+)/);
+  if (channel) return { kind: "channel", id: decodeURIComponent(channel[1]) };
+  return null;
 }
 
 async function navigate(agentId) {
@@ -376,17 +411,28 @@ async function navigate(agentId) {
   location.hash = target;
 }
 
+async function navigateChannel(channelId) {
+  const target = `#/c/${encodeURIComponent(channelId)}`;
+  if (location.hash === target) return route();
+  state.navigatedInApp = true;
+  location.hash = target;
+}
+
 async function route() {
-  const id = currentRouteId();
-  const agent = id ? findAgent(id) : null;
+  const target = currentRoute();
+  const agent = target?.kind === "agent" ? findAgent(target.id) : null;
+  const channel = target?.kind === "channel" ? findChannel(target.id) : null;
   closeContextMenu();
-  if (!agent) {
-    if (state.currentId) {
+  hideMentionMenu();
+  if (!agent && !channel) {
+    if (convKey()) {
       stopDictation({ cancel: true });
       stopSpeaking();
     }
     closeDialog($("#details-dialog"));
     state.currentId = null;
+    state.currentChannelId = null;
+    document.body.classList.remove("in-channel");
     elements.clear();
     document.body.classList.remove("show-chat");
     $("#conversation").hidden = true;
@@ -394,16 +440,21 @@ async function route() {
     renderSidebar();
     return;
   }
-  const changed = state.currentId !== agent.id;
+  const key = agent ? agent.id : `c:${channel.id}`;
+  const changed = convKey() !== key;
   if (changed) {
     stopDictation({ cancel: true });
     stopSpeaking();
     closeDialog($("#details-dialog"));
     // Volver a entrar a una conversación marcada como no leída la marca como leída.
-    state.keepUnread.delete(agent.id);
+    state.keepUnread.delete(key);
   }
-  state.currentId = agent.id;
+  state.currentId = agent ? agent.id : null;
+  state.currentChannelId = channel ? channel.id : null;
   document.body.classList.add("show-chat");
+  document.body.classList.toggle("in-channel", Boolean(channel));
+  // En un canal no se adjuntan archivos ni hay cola propia: cada agente tiene la suya.
+  $("#attach").hidden = Boolean(channel);
   $("#chat-empty").hidden = true;
   $("#conversation").hidden = false;
   renderSidebar();
@@ -411,10 +462,11 @@ async function route() {
   if (changed) {
     restoreDraft();
     renderAttachments();
-    await loadConversation(agent.id);
+    renderQueue();
+    await loadConversation(key);
     if (!coarsePointer) $("#composer-input").focus();
   }
-  scheduleMarkRead(agent.id, 0);
+  scheduleMarkRead(key, 0);
 }
 
 function goBack() {
@@ -422,13 +474,19 @@ function goBack() {
   else location.replace("#/");
 }
 
-/** Avisa al servidor de que el usuario ya vio la conversación abierta. */
-function scheduleMarkRead(agentId, delay = 700) {
+/** Avisa al servidor de que el usuario ya vio la conversación (o el canal) abierta. */
+function scheduleMarkRead(key = convKey(), delay = 700) {
   clearTimeout(readTimer);
   readTimer = setTimeout(() => {
-    const agent = findAgent(agentId);
-    if (!agent?.unread || agentId !== state.currentId || document.hidden || state.keepUnread.has(agentId)) return;
-    api(`/api/agents/${encodeURIComponent(agentId)}/read`, { method: "POST" }).catch(() => undefined);
+    if (!key || key !== convKey() || document.hidden || state.keepUnread.has(key)) return;
+    const channelId = channelIdOf(key);
+    if (channelId) {
+      if (!findChannel(channelId)?.unread) return;
+      api(`/api/channels/${encodeURIComponent(channelId)}/read`, { method: "POST" }).catch(() => undefined);
+      return;
+    }
+    if (!findAgent(key)?.unread) return;
+    api(`/api/agents/${encodeURIComponent(key)}/read`, { method: "POST" }).catch(() => undefined);
   }, delay);
 }
 
@@ -639,6 +697,8 @@ const ICONS = {
   external: ["M14 4.5h5.5V10", "M19.5 4.5L11 13", "M18 14v4.5a1 1 0 0 1-1 1H5.5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1H10"],
   more: ["M6 12h.01M12 12h.01M18 12h.01"],
   details: ["M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16", "M12 11v5", "M12 8h.01"],
+  hash: ["M10 4.5L8 19.5", "M16 4.5l-2 15", "M5 9h14.5", "M4.5 15H19"],
+  restore: ["M5 12a7 7 0 1 0 2.1-5", "M5 4.5V9h4.5"],
 };
 
 function icon(name, className = "") {
@@ -768,8 +828,10 @@ function renderSidebar() {
   if (query) {
     // Buscando: todos los que coinciden, también los ocultos.
     const found = team.filter((agent) => fold(`${agent.name} ${agent.role} ${agent.project}`).includes(query));
-    if (found.length) container.append(sidebarGroup({ title: "Resultados", agents: found }));
-    else container.append(sidebarNote("Ningún agente coincide con la búsqueda."));
+    const channels = sortedChannels().filter((channel) => fold(`${channel.name} ${channel.topic}`).includes(query));
+    if (channels.length) container.append(sidebarGroup({ title: "Canales", agents: [], rows: channels.map(channelRow) }));
+    if (found.length) container.append(sidebarGroup({ title: channels.length ? "Agentes" : "Resultados", agents: found }));
+    if (!found.length && !channels.length) container.append(sidebarNote("Ningún agente ni canal coincide con la búsqueda."));
     updateTitle();
     return;
   }
@@ -780,6 +842,7 @@ function renderSidebar() {
   const explicit = new Set(state.sections.map((name) => name.toLowerCase()));
   const sections = allSections();
   if (pinned.length) container.append(sidebarGroup({ key: "\0pinned", title: "Fijados", agents: pinned }));
+  container.append(channelsGroup());
   for (const name of sections) {
     const lower = name.toLowerCase();
     const agents = rest.filter((agent) => agent.project.toLowerCase() === lower);
@@ -810,8 +873,8 @@ function toggleGroup(key) {
   renderSidebar();
 }
 
-/** Un grupo de la barra lateral (Fijados, una sección, Sin asignar, Ocultos). Con `key` se puede plegar. */
-function sidebarGroup({ key = null, title, agents, section = null, empty = "" }) {
+/** Un grupo de la barra lateral (Fijados, Canales, una sección, Sin asignar, Ocultos). Con `key` se puede plegar. */
+function sidebarGroup({ key = null, title, agents, section = null, empty = "", rows = null, channels = false }) {
   const group = document.createElement("section");
   group.className = "group";
   const heading = document.createElement("h2");
@@ -823,6 +886,7 @@ function sidebarGroup({ key = null, title, agents, section = null, empty = "" })
     head.className = "group-head";
     head.setAttribute("aria-expanded", String(!collapsed));
     if (section) head.dataset.section = section;
+    if (channels) head.dataset.channels = "true";
     const label = document.createElement("span");
     label.className = "group-label";
     label.textContent = title;
@@ -834,15 +898,31 @@ function sidebarGroup({ key = null, title, agents, section = null, empty = "" })
   }
   group.append(heading);
   if (collapsed) return group;
-  if (agents.length) {
+  const items = rows ?? agents.map(agentRow);
+  if (items.length) {
     const list = document.createElement("ul");
     list.className = "agent-list";
-    for (const agent of agents) list.append(agentRow(agent));
+    for (const item of items) list.append(item);
     group.append(list);
   } else if (empty) {
-    group.append(sidebarNote(empty, "group-empty"));
+    group.append(typeof empty === "string" ? sidebarNote(empty, "group-empty") : empty);
   }
   return group;
+}
+
+/** «Canales»: conversaciones con varios agentes. Sin canales, una invitación a crear el primero. */
+function channelsGroup() {
+  const channels = sortedChannels();
+  let empty = "";
+  if (!channels.length) {
+    empty = document.createElement("button");
+    empty.type = "button";
+    empty.className = "group-empty group-action";
+    empty.append(icon("plus"), "Nuevo canal");
+    empty.title = "Un chat con varios agentes: el encargado responde y reparte el trabajo";
+    empty.addEventListener("click", () => openChannelDialog());
+  }
+  return sidebarGroup({ key: "\0channels", title: "Canales", agents: [], rows: channels.map(channelRow), channels: true, empty });
 }
 
 function sidebarNote(text, className = "sidebar-note") {
@@ -914,7 +994,7 @@ function agentRow(agent) {
 }
 
 function updateTitle() {
-  const count = state.agents.filter(isUnread).length;
+  const count = state.agents.filter(isUnread).length + state.channels.filter(isChannelUnread).length;
   document.title = count ? `(${count}) ClosedBot` : "ClosedBot";
 }
 
@@ -943,6 +1023,11 @@ function toggleSearch(force) {
 // ---------- conversación ----------
 
 function renderHeader() {
+  const channel = currentChannel();
+  if (channel) {
+    renderChannelHeader(channel);
+    return;
+  }
   const agent = findAgent(state.currentId);
   if (!agent) return;
   const avatar = $("#chat-avatar");
@@ -957,7 +1042,32 @@ function renderHeader() {
   const stateNode = $("#chat-state");
   stateNode.textContent = label;
   stateNode.hidden = !label;
+  stateNode.dataset.tone = "";
   $("#details-button").title = `Ficha de ${agent.name}: rutinas, voz, archivos y carpeta`;
+  $("#details-button").setAttribute("aria-controls", "details-dialog");
+  updatePlaceholder();
+}
+
+function renderChannelHeader(channel) {
+  const avatar = $("#chat-avatar");
+  if (avatar.dataset.key !== "channel") {
+    avatar.replaceChildren(channelGlyph());
+    avatar.dataset.key = "channel";
+  }
+  $("#chat-name").textContent = channel.name;
+  const working = channel.working.map(agentName);
+  const members = channelMembers(channel);
+  const label = working.length
+    ? working.length === 1
+      ? `${working[0]} trabajando…`
+      : `${working.length} trabajando…`
+    : `${members.length} ${members.length === 1 ? "agente" : "agentes"}`;
+  const stateNode = $("#chat-state");
+  stateNode.textContent = label;
+  stateNode.hidden = false;
+  stateNode.dataset.tone = working.length ? "" : "muted";
+  $("#details-button").title = `Canal ${channel.name}: ${members.map((agent) => agent.name).join(", ") || "sin agentes"}. Toca para editarlo.`;
+  $("#details-button").setAttribute("aria-controls", "channel-dialog");
   updatePlaceholder();
 }
 
@@ -966,6 +1076,15 @@ function hasPendingDecision(agentId) {
 }
 
 function updatePlaceholder() {
+  const channel = currentChannel();
+  if (channel) {
+    const lead = findAgent(channel.leadId);
+    // En pantallas angostas, corto: la presentación del canal ya explica el @.
+    const narrow = coarsePointer || window.innerWidth < 700;
+    $("#composer-input").placeholder =
+      lead && !narrow ? `Escribe en ${channel.name} (responde ${lead.name}; @ para elegir)` : `Escribe en ${channel.name}…`;
+    return;
+  }
   const agent = findAgent(state.currentId);
   if (!agent) return;
   $("#composer-input").placeholder = hasPendingDecision(agent.id)
@@ -1010,18 +1129,20 @@ function renderMainIntro() {
   }
 }
 
-async function loadConversation(agentId, { keepScroll = false } = {}) {
+/** Carga la conversación con un agente o, si la clave es «c:<id>», la de un canal. */
+async function loadConversation(key, { keepScroll = false } = {}) {
+  const channelId = channelIdOf(key);
   try {
     const [messages, queue] = await Promise.all([
-      api(`/api/agents/${encodeURIComponent(agentId)}/messages?limit=100`),
-      api(`/api/agents/${encodeURIComponent(agentId)}/queue`),
+      api(channelId ? `/api/channels/${encodeURIComponent(channelId)}/messages?limit=100` : `/api/agents/${encodeURIComponent(key)}/messages?limit=100`),
+      channelId ? Promise.resolve(null) : api(`/api/agents/${encodeURIComponent(key)}/queue`),
     ]);
-    if (state.currentId !== agentId) return;
+    if (convKey() !== key) return;
     const scroller = $("#messages");
     const atBottom = isNearBottom(scroller);
-    state.messages.set(agentId, messages.messages);
-    state.hasMore.set(agentId, messages.hasMore);
-    state.queues.set(agentId, queue.queue);
+    state.messages.set(key, messages.messages);
+    state.hasMore.set(key, messages.hasMore);
+    if (queue) state.queues.set(key, queue.queue);
     renderAllMessages();
     renderQueue();
     updatePlaceholder();
@@ -1032,20 +1153,23 @@ async function loadConversation(agentId, { keepScroll = false } = {}) {
 }
 
 async function loadOlder() {
-  const agentId = state.currentId;
-  const list = state.messages.get(agentId) ?? [];
+  const key = convKey();
+  if (!key) return;
+  const channelId = channelIdOf(key);
+  const list = state.messages.get(key) ?? [];
   const oldest = list.find((message) => typeof message.seq === "number");
   if (!oldest) return;
   const button = $("#load-more");
   button.disabled = true;
   try {
-    const data = await api(`/api/agents/${encodeURIComponent(agentId)}/messages?limit=100&before=${oldest.seq}`);
-    if (state.currentId !== agentId) return;
+    const base = channelId ? `/api/channels/${encodeURIComponent(channelId)}` : `/api/agents/${encodeURIComponent(key)}`;
+    const data = await api(`${base}/messages?limit=100&before=${oldest.seq}`);
+    if (convKey() !== key) return;
     const scroller = $("#messages");
     const previousHeight = scroller.scrollHeight;
     const known = new Set(list.map((message) => message.id));
-    state.messages.set(agentId, [...data.messages.filter((message) => !known.has(message.id)), ...list]);
-    state.hasMore.set(agentId, data.hasMore);
+    state.messages.set(key, [...data.messages.filter((message) => !known.has(message.id)), ...list]);
+    state.hasMore.set(key, data.hasMore);
     renderAllMessages();
     scroller.scrollTop = scroller.scrollHeight - previousHeight;
   } catch (error) {
@@ -1060,17 +1184,20 @@ function renderAllMessages() {
   container.replaceChildren();
   elements.clear();
   dirty.clear();
-  for (const message of state.messages.get(state.currentId) ?? []) {
+  for (const message of state.messages.get(convKey()) ?? []) {
     const node = buildMessage(message);
     elements.set(message.id, node);
     container.append(node);
   }
-  $("#load-more").hidden = !state.hasMore.get(state.currentId);
+  $("#load-more").hidden = !state.hasMore.get(convKey());
   renderMainIntro();
+  renderChannelIntro();
   updateWorkingIndicator();
 }
 
-function upsertMessage(agentId, message) {
+function upsertMessage(target, message) {
+  // Lo de un canal va al canal aunque se avise con el id del agente (por ejemplo, al contestar una pregunta).
+  const agentId = message?.channelId ? `c:${message.channelId}` : target;
   const list = state.messages.get(agentId);
   let finished = false;
   if (list) {
@@ -1080,7 +1207,7 @@ function upsertMessage(agentId, message) {
     else list.push(message);
     finished = message.role === "assistant" && message.status === "completed" && before !== "completed";
   }
-  if (agentId !== state.currentId || !list) return;
+  if (agentId !== convKey() || !list) return;
   if (finished) maybeAutoRead(agentId, list.find((item) => item.id === message.id) ?? message);
   const scroller = $("#messages");
   const atBottom = isNearBottom(scroller);
@@ -1091,6 +1218,7 @@ function upsertMessage(agentId, message) {
   else $("#message-list").append(node);
   elements.set(message.id, node);
   if (!$("#main-intro").hidden) renderMainIntro();
+  if (!$("#channel-intro").hidden) renderChannelIntro();
   updateWorkingIndicator();
   if (message.role === "decision") {
     updatePlaceholder();
@@ -1100,7 +1228,7 @@ function upsertMessage(agentId, message) {
 }
 
 function refreshMessage(agentId, messageId) {
-  if (agentId !== state.currentId) return;
+  if (agentId !== convKey()) return;
   const message = (state.messages.get(agentId) ?? []).find((item) => item.id === messageId);
   const existing = elements.get(messageId);
   if (!message || !existing) return;
@@ -1114,7 +1242,7 @@ function applyDelta(agentId, messageId, delta) {
   const message = list?.find((item) => item.id === messageId);
   if (!message) return;
   message.text += delta;
-  if (agentId !== state.currentId) return;
+  if (agentId !== convKey()) return;
   dirty.add(messageId);
   if (!renderScheduled) {
     renderScheduled = true;
@@ -1126,7 +1254,7 @@ function flushDirty() {
   renderScheduled = false;
   const scroller = $("#messages");
   const atBottom = isNearBottom(scroller);
-  const list = state.messages.get(state.currentId) ?? [];
+  const list = state.messages.get(convKey()) ?? [];
   for (const id of dirty) {
     const message = list.find((item) => item.id === id);
     const existing = elements.get(id);
@@ -1171,6 +1299,7 @@ function buildMessage(message) {
       const detail = created ? message.payload.project : (message.payload.changes ?? []).join(", ");
       node.append(icon(created ? "team" : "pencil"), created ? "Creó a" : "Ajustó a", link);
       if (detail) node.append(`· ${detail}`);
+      if (message.channelId) node.prepend(whoLabel(message.agentId));
       return node;
     }
     const created = message.text.match(/^(Creó|Creaste) la rutina «(.+)» · (.+)$/s);
@@ -1185,6 +1314,7 @@ function buildMessage(message) {
       text.textContent = message.text;
       node.append(icon(kind), text);
     }
+    if (message.channelId) node.prepend(whoLabel(message.agentId));
     return node;
   }
 
@@ -1207,7 +1337,9 @@ function buildMessage(message) {
 
   if (message.role === "notice" && !(message.toAgentIds ?? []).length) {
     node.className = "msg msg-notice";
-    node.textContent = message.text;
+    // En un canal se dice de quién es el aviso, salvo que ya lo nombre.
+    const who = message.channelId ? agentName(message.agentId) : "";
+    node.textContent = who && !message.text.includes(who) ? `${who}: ${message.text}` : message.text;
     return node;
   }
 
@@ -1221,14 +1353,21 @@ function buildMessage(message) {
     case "user":
       node.className = "msg msg-user";
       bubble.textContent = message.text;
-      meta.textContent = userStatus(message.status);
+      if (message.channelId) {
+        // En un canal: a quién le llegó (el encargado o los que nombraste con @).
+        const to = Array.isArray(message.payload?.to) ? message.payload.to.map(agentName) : [];
+        meta.textContent = to.length ? `${message.payload?.decisionId ? "Respuesta para" : "Para"} ${to.join(", ")}` : "";
+      } else {
+        meta.textContent = userStatus(message.status);
+      }
       break;
     case "assistant":
-      node.className = "msg msg-assistant";
+      node.className = message.channelId ? "msg msg-assistant msg-member" : "msg msg-assistant";
       if (!message.text && message.status === "streaming") bubble.append(thinkingDots());
       else renderMarkdown(message.text, bubble);
       if (message.status === "streaming" && message.text) bubble.classList.add("typing");
       meta.textContent = assistantStatus(message.status);
+      if (message.channelId) label = agentName(message.agentId);
       break;
     case "teammate":
       node.className = "msg msg-teammate";
@@ -1237,8 +1376,14 @@ function buildMessage(message) {
       meta.textContent = teammateStatus(message.status);
       break;
     case "notice":
-      node.className = "msg msg-outgoing";
-      label = `${message.replyTo ? "Respuesta para" : "Enviado a"} ${message.toAgentIds.map(agentName).join(", ")}`;
+      if (message.channelId) {
+        // Un encargo entre agentes del canal: «Ana → Beto».
+        node.className = "msg msg-handoff";
+        label = `${agentName(message.agentId)} → ${message.toAgentIds.map(agentName).join(", ")}`;
+      } else {
+        node.className = "msg msg-outgoing";
+        label = `${message.replyTo ? "Respuesta para" : "Enviado a"} ${message.toAgentIds.map(agentName).join(", ")}`;
+      }
       renderMarkdown(message.text, bubble);
       break;
     default:
@@ -1254,9 +1399,25 @@ function buildMessage(message) {
     bubble.prepend(labelNode);
   }
   if (message.role !== "user") bubble.classList.add("md");
+  if (node.classList.contains("msg-member")) {
+    const avatar = document.createElement("span");
+    avatar.className = "msg-avatar";
+    avatar.setAttribute("aria-hidden", "true");
+    const author = findAgent(message.agentId);
+    if (author) avatar.append(blobAvatar(author));
+    node.append(avatar);
+  }
   node.append(bubble, meta);
   if (message.role === "assistant" && message.status === "completed" && Synth && message.text.trim()) node.append(messageTools(message));
   return node;
+}
+
+/** «Ana» al principio de una línea de actividad de un canal. */
+function whoLabel(agentId) {
+  const who = document.createElement("span");
+  who.className = "who";
+  who.textContent = agentName(agentId);
+  return who;
 }
 
 /** Botones bajo una respuesta terminada: por ahora, leerla en voz alta. */
@@ -1268,7 +1429,7 @@ function messageTools(message) {
   button.className = "speak-button";
   button.dataset.id = message.id;
   setSpeakButton(button, speech.current?.messageId === message.id);
-  button.addEventListener("click", () => toggleSpeakMessage(message.agentId, message.id));
+  button.addEventListener("click", () => toggleSpeakMessage(messageKey(message.agentId, message), message.id));
   tools.append(button);
   return tools;
 }
@@ -1294,6 +1455,12 @@ function buildDecision(message) {
   const question = document.createElement("p");
   question.className = "decision-question";
   question.textContent = message.text;
+  if (message.channelId) {
+    const from = document.createElement("p");
+    from.className = "decision-from";
+    from.textContent = `Pregunta de ${agentName(message.agentId)}`;
+    card.append(from);
+  }
   const list = document.createElement("ul");
   list.className = "decision-options";
   options.forEach((option, index) => {
@@ -1342,7 +1509,8 @@ function buildDecision(message) {
 async function answerDecision(message, index) {
   if (answering.has(message.id)) return;
   answering.add(message.id);
-  refreshMessage(message.agentId, message.id);
+  const key = messageKey(message.agentId, message);
+  refreshMessage(key, message.id);
   try {
     const result = await api(`/api/agents/${encodeURIComponent(message.agentId)}/decisions/${encodeURIComponent(message.id)}`, {
       method: "POST",
@@ -1355,7 +1523,7 @@ async function answerDecision(message, index) {
     showToast(error.message, "error");
   } finally {
     answering.delete(message.id);
-    refreshMessage(message.agentId, message.id);
+    refreshMessage(key, message.id);
     updatePlaceholder();
   }
 }
@@ -1372,10 +1540,13 @@ function thinkingDots() {
 function updateWorkingIndicator() {
   const container = $("#message-list");
   let indicator = $("#working-indicator");
-  const agent = findAgent(state.currentId);
-  const list = state.messages.get(state.currentId) ?? [];
-  const streaming = list.some((message) => message.role === "assistant" && message.status === "streaming");
-  const show = agent?.state === "working" && !streaming;
+  const list = state.messages.get(convKey()) ?? [];
+  const channel = currentChannel();
+  const streamingBy = (agentId) =>
+    list.some((message) => message.role === "assistant" && message.status === "streaming" && (!agentId || message.agentId === agentId));
+  // En un canal: los miembros que trabajan y todavía no escribieron nada.
+  const thinking = channel ? channel.working.filter((agentId) => !streamingBy(agentId)) : [];
+  const show = channel ? thinking.length > 0 : findAgent(state.currentId)?.state === "working" && !streamingBy(null);
   if (!show) {
     indicator?.remove();
     return;
@@ -1388,6 +1559,17 @@ function updateWorkingIndicator() {
     bubble.className = "bubble";
     bubble.append(thinkingDots());
     indicator.append(bubble);
+  }
+  let who = indicator.querySelector(".msg-label");
+  if (channel) {
+    if (!who) {
+      who = document.createElement("div");
+      who.className = "msg-label";
+      indicator.querySelector(".bubble").prepend(who);
+    }
+    who.textContent = thinking.map(agentName).join(", ");
+  } else {
+    who?.remove();
   }
   container.append(indicator);
 }
@@ -1558,7 +1740,7 @@ function link(href, label) {
 // ---------- cola ----------
 
 function renderQueue() {
-  const queue = state.queues.get(state.currentId) ?? [];
+  const queue = state.currentChannelId ? [] : (state.queues.get(state.currentId) ?? []);
   const waiting = queue.filter((delivery) => delivery.status === "queued");
   const bar = $("#queue-bar");
   bar.hidden = waiting.length === 0;
@@ -1612,11 +1794,12 @@ function draftKey(agentId) {
 }
 
 function saveDraft() {
-  if (!state.currentId) return;
+  const key = convKey();
+  if (!key) return;
   try {
     const value = $("#composer-input").value;
-    if (value) localStorage.setItem(draftKey(state.currentId), value);
-    else localStorage.removeItem(draftKey(state.currentId));
+    if (value) localStorage.setItem(draftKey(key), value);
+    else localStorage.removeItem(draftKey(key));
   } catch {
     // Sin almacenamiento local: no pasa nada.
   }
@@ -1625,7 +1808,7 @@ function saveDraft() {
 function restoreDraft() {
   let value = "";
   try {
-    value = localStorage.getItem(draftKey(state.currentId)) ?? "";
+    value = localStorage.getItem(draftKey(convKey())) ?? "";
   } catch {
     value = "";
   }
@@ -1646,13 +1829,16 @@ function autosize(textarea) {
 }
 
 function currentAttachments() {
+  if (state.currentChannelId) return [];
   return state.attachments.get(state.currentId) ?? [];
 }
 
 /** Modo del botón morado: enviar, hablar (dictado que se envía solo) o detener al agente. */
 function updateActionButton() {
   const button = $("#send");
-  const agent = findAgent(state.currentId);
+  const channel = currentChannel();
+  const agent = channel ? null : findAgent(state.currentId);
+  const working = channel ? channel.working.length > 0 : agent?.state === "working";
   const text = $("#composer-input").value.trim();
   const files = currentAttachments();
   const ready = files.some((file) => file.status === "ready");
@@ -1661,18 +1847,18 @@ function updateActionButton() {
   let mode = "send";
   if (voiceActive) mode = "voice";
   else if (text || ready || uploading) mode = "send";
-  else if (agent?.state === "working") mode = "stop";
+  else if (working) mode = "stop";
   else if (dictationAvailable()) mode = "voice";
   button.dataset.mode = mode;
   const label = {
     send: "Enviar",
     voice: voiceActive ? "Terminar y enviar" : "Hablar y enviar al terminar",
-    stop: `Detener a ${agent?.name ?? "el agente"}`,
+    stop: channel ? "Detener a los agentes del canal" : `Detener a ${agent?.name ?? "el agente"}`,
   }[mode];
   button.setAttribute("aria-label", label);
   button.title = label;
   button.setAttribute("aria-pressed", String(voiceActive));
-  button.disabled = !agent || (mode === "send" && (uploading || (!text && !ready))) || (voiceActive && dictation.finishing);
+  button.disabled = !(agent || channel) || (mode === "send" && (uploading || (!text && !ready))) || (voiceActive && dictation.finishing);
 }
 
 function onComposerSubmit(event) {
@@ -1693,6 +1879,11 @@ async function sendMessage() {
     }
   }
   const input = $("#composer-input");
+  const channel = currentChannel();
+  if (channel) {
+    await sendChannelMessage(channel, input);
+    return;
+  }
   const agentId = state.currentId;
   if (!agentId) return;
   const files = currentAttachments();
@@ -1737,6 +1928,35 @@ async function sendMessage() {
   }
 }
 
+/** Mensaje en un canal: lo atiende el encargado, o los que nombres con @. */
+async function sendChannelMessage(channel, input) {
+  const original = input.value;
+  const text = original.trim();
+  if (!text) return;
+  hideMentionMenu();
+  stopDictation({ cancel: true });
+  stopSpeaking();
+  const key = `c:${channel.id}`;
+  state.keepUnread.delete(key);
+  const button = $("#send");
+  button.disabled = true;
+  try {
+    const result = await api(`/api/channels/${encodeURIComponent(channel.id)}/messages`, { method: "POST", body: { text } });
+    if (convKey() === key && input.value === original) {
+      input.value = "";
+      autosize(input);
+      saveDraft();
+    }
+    upsertMessage(key, result.message);
+    scrollToBottom();
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    updateActionButton();
+    if (!coarsePointer) input.focus();
+  }
+}
+
 // ---------- archivos adjuntos ----------
 
 function renderAttachments() {
@@ -1771,6 +1991,10 @@ function renderAttachments() {
 }
 
 async function addFiles(fileList) {
+  if (state.currentChannelId) {
+    showToast("En un canal no se adjuntan archivos: envíaselos a un agente desde su conversación.");
+    return;
+  }
   const agentId = state.currentId;
   if (!agentId) return;
   for (const file of [...fileList]) {
@@ -1810,7 +2034,7 @@ function speechLanguage() {
 
 /** Idioma del dictado: el elegido en el chat de voz del agente o, en automático, el español del navegador. */
 function dictationLanguage() {
-  const lang = findAgent(state.currentId)?.voice?.lang;
+  const lang = findAgent(convKey())?.voice?.lang;
   return lang && lang !== "auto" ? lang : speechLanguage();
 }
 
@@ -1825,7 +2049,7 @@ function toggleDictation(mode) {
 
 /** mode «dictate» escribe en el cuadro; «voice» además envía el mensaje al terminar de hablar. */
 async function startDictation(mode) {
-  if (!state.currentId) return;
+  if (!convKey()) return;
   if (useLocalDictation()) await startLocalDictation(mode);
   else if (Recognition) startBrowserDictation(mode);
 }
@@ -1898,7 +2122,7 @@ function startBrowserDictation(mode) {
   rec.continuous = mode === "dictate";
   rec.maxAlternatives = 1;
   const base = input.value && !/\s$/.test(input.value) ? `${input.value} ` : input.value;
-  const session = { engine: "browser", mode, base, final: "", agentId: state.currentId, cancelled: false, failed: false };
+  const session = { engine: "browser", mode, base, final: "", agentId: convKey(), cancelled: false, failed: false };
   rec.onresult = (event) => {
     if (dictation !== session) return;
     let interim = "";
@@ -1907,7 +2131,7 @@ function startBrowserDictation(mode) {
       if (result.isFinal) session.final += result[0].transcript;
       else interim += result[0].transcript;
     }
-    if (state.currentId !== session.agentId) return;
+    if (convKey() !== session.agentId) return;
     input.value = session.base + session.final + interim;
     autosize(input);
     updateActionButton();
@@ -1935,12 +2159,12 @@ function startBrowserDictation(mode) {
     recognition = null;
     updateDictationUi();
     saveDraft();
-    if (session.failed && !session.cancelled && state.currentId === session.agentId) {
+    if (session.failed && !session.cancelled && convKey() === session.agentId) {
       showToast("El dictado del navegador no funciona aquí: uso el de este PC.");
       void startLocalDictation(session.mode);
       return;
     }
-    if (session.mode === "voice" && !session.cancelled && state.currentId === session.agentId && input.value.trim()) {
+    if (session.mode === "voice" && !session.cancelled && convKey() === session.agentId && input.value.trim()) {
       // Le hablaste: la respuesta se lee en voz alta aunque «Leer sus respuestas» esté apagado.
       voiceReply = { agentId: session.agentId, startedAt: Date.now(), sawWorking: false, until: null };
       void sendMessage();
@@ -1964,7 +2188,7 @@ function startBrowserDictation(mode) {
  * en este mismo equipo. El texto se va agregando al cuadro en orden.
  */
 async function startLocalDictation(mode) {
-  if (!state.speech || !state.currentId || dictation) return;
+  if (!state.speech || !convKey() || dictation) return;
   if (state.speech.state !== "ready") {
     await ensureLocalModel();
     return;
@@ -1974,7 +2198,7 @@ async function startLocalDictation(mode) {
   const session = {
     engine: "local",
     mode,
-    agentId: state.currentId,
+    agentId: convKey(),
     cancelled: false,
     opening: true,
     finishing: false,
@@ -2208,7 +2432,7 @@ function flushLocalSegment(session) {
 }
 
 function appendDictation(session, text) {
-  if (state.currentId !== session.agentId) return;
+  if (convKey() !== session.agentId) return;
   const input = $("#composer-input");
   const current = input.value;
   input.value = current && !/\s$/.test(current) ? `${current} ${text}` : current + text;
@@ -2245,7 +2469,7 @@ function finishLocalDictation(session, { send = session.mode === "voice" } = {})
     updateDictationUi();
     saveDraft();
     const input = $("#composer-input");
-    if (session.sendAfter && !session.cancelled && state.currentId === session.agentId && input.value.trim()) {
+    if (session.sendAfter && !session.cancelled && convKey() === session.agentId && input.value.trim()) {
       // Le hablaste: la respuesta se lee en voz alta aunque «Leer sus respuestas» esté apagado.
       voiceReply = { agentId: session.agentId, startedAt: Date.now(), sawWorking: false, until: null };
       void sendMessage();
@@ -2703,6 +2927,498 @@ async function deleteSection(name) {
   }
 }
 
+// ---------- canales ----------
+
+let editingChannelId = null;
+let mention = null; // lista de @ abierta: { start, end, options, index }
+
+/** Clave de lo abierto: el id del agente o «c:<id>» si es un canal. */
+function convKey() {
+  return state.currentChannelId ? `c:${state.currentChannelId}` : state.currentId;
+}
+
+/** Dónde va un mensaje: la conversación del agente o, si es de un canal, ese canal. */
+function messageKey(agentId, message) {
+  return message?.channelId ? `c:${message.channelId}` : agentId;
+}
+
+function channelIdOf(key) {
+  return typeof key === "string" && key.startsWith("c:") ? key.slice(2) : null;
+}
+
+function findChannel(id) {
+  return state.channels.find((channel) => channel.id === id) ?? null;
+}
+
+function currentChannel() {
+  return state.currentChannelId ? findChannel(state.currentChannelId) : null;
+}
+
+function channelMembers(channel) {
+  return channel.memberIds.map(findAgent).filter(Boolean);
+}
+
+function sortedChannels() {
+  return [...state.channels].sort((a, b) => a.name.localeCompare(b.name, "es", { sensitivity: "base" }));
+}
+
+/** El canal abierto en una ventana visible no cuenta como no leído, salvo que lo marcaras así. */
+function isChannelUnread(channel) {
+  if (!channel.unread) return false;
+  if (state.keepUnread.has(`c:${channel.id}`)) return true;
+  return !(channel.id === state.currentChannelId && !document.hidden);
+}
+
+function channelGlyph(className = "channel-glyph") {
+  const glyph = document.createElement("span");
+  glyph.className = className;
+  glyph.setAttribute("aria-hidden", "true");
+  glyph.textContent = "#";
+  return glyph;
+}
+
+function memberSummary(members) {
+  if (!members.length) return "Sin agentes";
+  const names = members.map((agent) => agent.name);
+  return names.length <= 3 ? names.join(", ") : `${names.slice(0, 2).join(", ")} y ${names.length - 2} más`;
+}
+
+function channelRow(channel) {
+  const item = document.createElement("li");
+  item.className = "agent-item channel-item";
+  item.dataset.channel = channel.id;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "agent-row";
+  button.setAttribute("aria-current", String(channel.id === state.currentChannelId));
+  button.addEventListener("click", () => navigateChannel(channel.id));
+
+  const members = channelMembers(channel);
+  const texts = document.createElement("span");
+  texts.className = "texts";
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = channel.name;
+  const preview = document.createElement("span");
+  preview.className = "preview";
+  const working = channel.working.map(agentName);
+  if (working.length) {
+    preview.textContent = working.length === 1 ? `${working[0]} está trabajando…` : `${working.length} agentes trabajando…`;
+    preview.dataset.tone = "working";
+  } else {
+    preview.textContent = channel.preview || channel.topic || memberSummary(members);
+  }
+  texts.append(name, preview);
+
+  const mark = document.createElement("span");
+  mark.className = "mark";
+  if (isChannelUnread(channel)) {
+    mark.dataset.kind = "unread";
+    mark.title = "Mensajes nuevos";
+    button.classList.add("unread");
+  } else if (working.length) {
+    mark.dataset.kind = "working";
+    mark.title = "Trabajando";
+  }
+  button.append(channelGlyph("channel-glyph row-glyph"), texts, mark);
+  button.title = [channel.name, memberSummary(members)].join(" · ");
+
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "row-more";
+  more.title = "Más opciones";
+  more.setAttribute("aria-label", `Opciones del canal ${channel.name}`);
+  more.setAttribute("aria-haspopup", "menu");
+  more.append(icon("more", "dots"));
+  more.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openContextMenu(channelMenuItems(channel.id), { anchor: more, source: more });
+  });
+  item.append(button, more);
+  return item;
+}
+
+/** Presentación del canal mientras no tiene mensajes: quién está y cómo se reparte. */
+function renderChannelIntro() {
+  const intro = $("#channel-intro");
+  const channel = currentChannel();
+  const key = convKey();
+  const show = Boolean(channel) && !(state.messages.get(key) ?? []).length && !state.hasMore.get(key);
+  intro.hidden = !show;
+  if (!show) return;
+  const lead = findAgent(channel.leadId);
+  $("#channel-intro-title").textContent = channel.name;
+  $("#channel-intro-topic").textContent = channel.topic;
+  $("#channel-intro-topic").hidden = !channel.topic;
+  $("#channel-intro-text").textContent = lead
+    ? `En el canal: ${memberSummary(channelMembers(channel))}. Lo que escribas lo responde ${lead.name}, el encargado, que reparte el trabajo. Con @Nombre le hablas a uno solo y con @todos, a todos.`
+    : "Este canal no tiene agentes: agrégalos tocando su nombre arriba.";
+}
+
+function replaceChannel(channel) {
+  if (!channel) return;
+  if (channel.deletedAt) {
+    state.channels = state.channels.filter((item) => item.id !== channel.id);
+    state.deletedChannels = [channel, ...state.deletedChannels.filter((item) => item.id !== channel.id)];
+  } else {
+    state.deletedChannels = state.deletedChannels.filter((item) => item.id !== channel.id);
+    const index = state.channels.findIndex((item) => item.id === channel.id);
+    if (index >= 0) state.channels[index] = channel;
+    else state.channels.push(channel);
+  }
+  renderSidebar();
+  if (channel.id === state.currentChannelId) {
+    renderHeader();
+    renderChannelIntro();
+  }
+}
+
+async function setChannelUnread(channelId, unread) {
+  const key = `c:${channelId}`;
+  // Antes de pedirlo: el aviso del servidor puede llegar antes que la respuesta.
+  if (unread) state.keepUnread.add(key);
+  else state.keepUnread.delete(key);
+  try {
+    const result = await api(`/api/channels/${encodeURIComponent(channelId)}/${unread ? "unread" : "read"}`, { method: "POST" });
+    replaceChannel(result.channel);
+  } catch (error) {
+    if (unread) state.keepUnread.delete(key);
+    showToast(error.message, "error");
+  }
+}
+
+async function deleteChannel(channelId) {
+  const channel = findChannel(channelId);
+  if (!channel) return;
+  const ok = await confirmAction(
+    "Eliminar canal",
+    `«${channel.name}» pasa a «Canales eliminados»: desde ahí lo restauras o lo borras para siempre. Lo que esperaba turno en el canal se cancela.`,
+    "Eliminar",
+  );
+  if (!ok) return;
+  try {
+    const result = await api(`/api/channels/${encodeURIComponent(channel.id)}`, { method: "DELETE" });
+    replaceChannel(result.channel);
+    if (state.currentChannelId === channel.id) void navigate(null);
+    showToast(`«${channel.name}» quedó en «Canales eliminados» (clic derecho en la barra lateral).`);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function openChannelDialog(channelId = null) {
+  const channel = channelId ? findChannel(channelId) : null;
+  editingChannelId = channel?.id ?? null;
+  const form = $("#channel-form");
+  form.reset();
+  $("#channel-dialog-title").textContent = channel ? "Editar canal" : "Nuevo canal";
+  $("#channel-save").textContent = channel ? "Guardar" : "Crear canal";
+  $("#channel-delete").hidden = !channel;
+  $("#channel-error").textContent = "";
+  form.elements.name.value = channel?.name ?? "";
+  form.elements.topic.value = channel?.topic ?? "";
+  renderChannelMembers(channel ? channel.memberIds : [], channel?.leadId ?? null);
+  openDialog($("#channel-dialog"));
+  if (!coarsePointer || !channel) form.elements.name.focus();
+}
+
+/** Agentes que se pueden sumar: Claude Bot primero y después el resto, con los ocultos al final. */
+function channelCandidates() {
+  const main = mainAgent();
+  const rest = state.agents
+    .filter((agent) => !agent.main)
+    .sort(
+      (a, b) =>
+        Number(a.hidden) - Number(b.hidden) ||
+        a.project.localeCompare(b.project, "es", { sensitivity: "base" }) ||
+        a.name.localeCompare(b.name, "es", { sensitivity: "base" }),
+    );
+  return main ? [main, ...rest] : rest;
+}
+
+function renderChannelMembers(selected, leadId) {
+  const box = $("#channel-members");
+  box.replaceChildren();
+  const chosen = new Set(selected);
+  const candidates = channelCandidates();
+  for (const agent of candidates) {
+    const label = document.createElement("label");
+    label.className = "member-option";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = "member";
+    input.value = agent.id;
+    input.checked = chosen.has(agent.id);
+    input.addEventListener("change", () => updateLeadOptions());
+    const texts = document.createElement("span");
+    texts.className = "member-texts";
+    const name = document.createElement("span");
+    name.className = "member-name";
+    name.textContent = agent.name;
+    const role = document.createElement("span");
+    role.className = "member-role";
+    role.textContent = agent.main ? "Bot principal" : agent.role || agent.project || providerLabel(agent.provider);
+    texts.append(name, role);
+    label.append(input, blobAvatar(agent), texts);
+    box.append(label);
+  }
+  if (!candidates.length) box.append(sidebarNote("Todavía no tienes agentes: crea uno con el botón +.", "muted small"));
+  updateLeadOptions(leadId);
+}
+
+function selectedMembers() {
+  return [...document.querySelectorAll('#channel-members input[name="member"]:checked')].map((input) => input.value);
+}
+
+function updateLeadOptions(preferred) {
+  const select = $("#channel-lead");
+  const wanted = preferred !== undefined ? preferred : select.value;
+  const members = selectedMembers();
+  select.replaceChildren();
+  for (const id of members) {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = agentName(id);
+    select.append(option);
+  }
+  if (!members.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "Primero elige los agentes";
+    select.append(option);
+  }
+  select.disabled = !members.length;
+  select.value = members.includes(wanted) ? wanted : (members[0] ?? "");
+  const count = $("#channel-count");
+  count.textContent = members.length ? `${members.length} de ${MAX_CHANNEL_MEMBERS}` : "";
+  count.dataset.tone = members.length > MAX_CHANNEL_MEMBERS ? "warn" : "";
+}
+
+async function saveChannel(event) {
+  event.preventDefault();
+  const form = $("#channel-form");
+  const error = $("#channel-error");
+  error.textContent = "";
+  const name = form.elements.name.value.trim();
+  const memberIds = selectedMembers();
+  if (!name) {
+    error.textContent = "Ponle un nombre al canal.";
+    form.elements.name.focus();
+    return;
+  }
+  if (!memberIds.length) {
+    error.textContent = "Elige al menos un agente.";
+    return;
+  }
+  if (memberIds.length > MAX_CHANNEL_MEMBERS) {
+    error.textContent = `Un canal admite hasta ${MAX_CHANNEL_MEMBERS} agentes.`;
+    return;
+  }
+  const body = { name, topic: form.elements.topic.value.trim(), memberIds, leadId: $("#channel-lead").value || null };
+  const editing = editingChannelId;
+  const button = $("#channel-save");
+  button.disabled = true;
+  try {
+    const result = editing
+      ? await api(`/api/channels/${encodeURIComponent(editing)}`, { method: "PATCH", body })
+      : await api("/api/channels", { method: "POST", body });
+    replaceChannel(result.channel);
+    closeDialog($("#channel-dialog"));
+    if (!editing) void navigateChannel(result.channel.id);
+  } catch (failure) {
+    error.textContent = failure.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function openDeletedChannels() {
+  renderDeletedChannels();
+  openDialog($("#deleted-channels-dialog"));
+}
+
+function renderDeletedChannelsIfOpen() {
+  if ($("#deleted-channels-dialog").open) renderDeletedChannels();
+}
+
+function renderDeletedChannels() {
+  const list = $("#deleted-channels-list");
+  list.replaceChildren();
+  const deleted = [...state.deletedChannels].sort((a, b) => (b.deletedAt ?? 0) - (a.deletedAt ?? 0));
+  $("#deleted-channels-empty").hidden = deleted.length > 0;
+  for (const channel of deleted) {
+    const item = document.createElement("li");
+    item.className = "deleted-item";
+    const texts = document.createElement("div");
+    texts.className = "deleted-texts";
+    const name = document.createElement("span");
+    name.className = "deleted-name";
+    name.textContent = channel.name;
+    const meta = document.createElement("span");
+    meta.className = "deleted-meta";
+    meta.textContent = `Eliminado ${formatWhen(channel.deletedAt)} · ${memberSummary(channelMembers(channel))}`;
+    texts.append(name, meta);
+    const actions = document.createElement("div");
+    actions.className = "deleted-actions";
+    const restore = smallButton("Restaurar", "ghost");
+    restore.addEventListener("click", () => void restoreChannel(channel.id, restore));
+    const purge = smallButton("Borrar para siempre", "danger-soft");
+    purge.addEventListener("click", () => void purgeChannel(channel.id, purge));
+    actions.append(restore, purge);
+    item.append(channelGlyph("channel-glyph row-glyph"), texts, actions);
+    list.append(item);
+  }
+}
+
+async function restoreChannel(channelId, button) {
+  button.disabled = true;
+  try {
+    const result = await api(`/api/channels/${encodeURIComponent(channelId)}/restore`, { method: "POST" });
+    replaceChannel(result.channel);
+    renderDeletedChannels();
+    showToast(`Restauraste «${result.channel.name}».`);
+  } catch (error) {
+    button.disabled = false;
+    showToast(error.message, "error");
+  }
+}
+
+async function purgeChannel(channelId, button) {
+  const channel = state.deletedChannels.find((item) => item.id === channelId);
+  if (!channel) return;
+  const ok = await confirmAction(
+    "Borrar para siempre",
+    `Se borra «${channel.name}» con todos sus mensajes. No se puede deshacer.`,
+    "Borrar para siempre",
+  );
+  if (!ok) return;
+  button.disabled = true;
+  try {
+    await api(`/api/channels/${encodeURIComponent(channelId)}/permanent`, { method: "DELETE" });
+    state.deletedChannels = state.deletedChannels.filter((item) => item.id !== channelId);
+    renderDeletedChannels();
+    showToast(`Borraste «${channel.name}» para siempre.`);
+  } catch (error) {
+    button.disabled = false;
+    showToast(error.message, "error");
+  }
+}
+
+// ---------- @ en los canales ----------
+
+/** Con «@» recién escrito en un canal, muestra a los miembros que coinciden. */
+function updateMentionMenu() {
+  const channel = currentChannel();
+  const input = $("#composer-input");
+  if (!channel || input.selectionStart !== input.selectionEnd) {
+    hideMentionMenu();
+    return;
+  }
+  const before = input.value.slice(0, input.selectionStart);
+  const match = /(^|[\s(¿¡"'])@([^\s@]{0,40})$/u.exec(before);
+  if (!match) {
+    hideMentionMenu();
+    return;
+  }
+  const query = fold(match[2]);
+  const options = [
+    ...channelMembers(channel).map((agent) => ({
+      insert: agent.name,
+      label: agent.name,
+      detail: agent.id === channel.leadId ? "Encargado" : agent.role,
+      agent,
+    })),
+    { insert: "todos", label: "todos", detail: "Todos los del canal", agent: null },
+  ].filter((option) => fold(option.label).startsWith(query) || (query.length > 1 && fold(option.label).includes(query)));
+  if (!options.length) {
+    hideMentionMenu();
+    return;
+  }
+  const start = before.length - match[2].length - 1;
+  const index = mention && mention.start === start ? Math.min(mention.index, options.length - 1) : 0;
+  mention = { start, end: input.selectionStart, options, index };
+  renderMentionMenu();
+}
+
+function renderMentionMenu() {
+  const menu = $("#mention-menu");
+  menu.replaceChildren();
+  mention.options.forEach((option, index) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "mention-option";
+    item.id = `mention-${index}`;
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(index === mention.index));
+    item.tabIndex = -1;
+    item.append(option.agent ? blobAvatar(option.agent) : channelGlyph("channel-glyph mention-glyph"));
+    const name = document.createElement("span");
+    name.className = "mention-name";
+    name.textContent = `@${option.label}`;
+    item.append(name);
+    if (option.detail) {
+      const detail = document.createElement("span");
+      detail.className = "mention-detail";
+      detail.textContent = option.detail;
+      item.append(detail);
+    }
+    // Que tocar la opción no le quite el foco al cuadro de texto.
+    item.addEventListener("pointerdown", (event) => event.preventDefault());
+    item.addEventListener("click", () => applyMention(index));
+    menu.append(item);
+  });
+  menu.hidden = false;
+  menu.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+}
+
+function hideMentionMenu() {
+  mention = null;
+  const menu = $("#mention-menu");
+  if (!menu || menu.hidden) return;
+  menu.hidden = true;
+  menu.replaceChildren();
+}
+
+function applyMention(index = mention?.index ?? 0) {
+  if (!mention) return;
+  const option = mention.options[index];
+  if (!option) return;
+  const input = $("#composer-input");
+  const after = input.value.slice(mention.end);
+  const insert = `@${option.insert}${/^\s/.test(after) ? "" : " "}`;
+  input.value = input.value.slice(0, mention.start) + insert + after;
+  const caret = mention.start + insert.length;
+  hideMentionMenu();
+  input.focus();
+  input.setSelectionRange(caret, caret);
+  autosize(input);
+  saveDraft();
+  updateActionButton();
+}
+
+/** Flechas, Enter, Tab y Escape mientras está abierta la lista de @. Devuelve true si la usó. */
+function onMentionKeydown(event) {
+  if (!mention || $("#mention-menu").hidden || event.isComposing) return false;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    mention.index = (mention.index + step + mention.options.length) % mention.options.length;
+    renderMentionMenu();
+    return true;
+  }
+  if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") {
+    event.preventDefault();
+    applyMention();
+    return true;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    hideMentionMenu();
+    return true;
+  }
+  return false;
+}
+
 // ---------- menús contextuales (clic derecho, «⋯» o mantener presionado) ----------
 
 let menuState = null; // { source, openedAt, submenuFor }
@@ -2751,9 +3467,41 @@ function moveMenuItems(agentId) {
 function sidebarMenuItems() {
   return [
     { label: "Nuevo agente", icon: "plus", run: () => openCreateDialog() },
+    { label: "Nuevo canal", icon: "hash", run: () => openChannelDialog() },
     { label: "Nueva sección", icon: "section", run: () => newSection() },
     "-",
-    { label: "Marcar todo como leído", icon: "allRead", disabled: !state.agents.some((agent) => agent.unread), run: () => markAllRead() },
+    { label: deletedChannelsLabel(), icon: "restore", run: () => openDeletedChannels() },
+    {
+      label: "Marcar todo como leído",
+      icon: "allRead",
+      disabled: !state.agents.some((agent) => agent.unread) && !state.channels.some((channel) => channel.unread),
+      run: () => markAllRead(),
+    },
+  ];
+}
+
+/** Menú del título «Canales». */
+function channelsMenuItems() {
+  return [
+    { label: "Nuevo canal", icon: "hash", run: () => openChannelDialog() },
+    { label: deletedChannelsLabel(), icon: "restore", run: () => openDeletedChannels() },
+  ];
+}
+
+function deletedChannelsLabel() {
+  return state.deletedChannels.length ? `Canales eliminados (${state.deletedChannels.length})` : "Canales eliminados";
+}
+
+function channelMenuItems(channelId) {
+  const channel = findChannel(channelId);
+  if (!channel) return [];
+  return [
+    { label: "Editar canal", icon: "pencil", run: () => openChannelDialog(channel.id) },
+    channel.unread
+      ? { label: "Marcar como leído", icon: "check", run: () => setChannelUnread(channel.id, false) }
+      : { label: "Marcar como no leído", icon: "unread", run: () => setChannelUnread(channel.id, true) },
+    "-",
+    { label: "Eliminar canal", icon: "trash", danger: true, run: () => deleteChannel(channel.id) },
   ];
 }
 
@@ -2770,6 +3518,11 @@ function sectionMenuItems(name) {
 function sidebarMenuFor(target) {
   if (!(target instanceof Element)) return null;
   if (target.closest("input, textarea, select, .sidebar-footer, .search-box, .sidebar-tools")) return null;
+  const channelItem = target.closest(".channel-item");
+  if (channelItem) {
+    const id = channelItem.dataset.channel;
+    return findChannel(id) ? { items: channelMenuItems(id), anchor: channelItem.querySelector(".row-more") ?? channelItem } : null;
+  }
   const row = target.closest(".agent-item");
   if (row) return findAgent(row.dataset.id) ? { items: agentMenuItems(row.dataset.id), anchor: row.querySelector(".row-more") ?? row } : null;
   if (target.closest("#bot-card")) {
@@ -2778,6 +3531,8 @@ function sidebarMenuFor(target) {
   }
   const head = target.closest(".group-head[data-section]");
   if (head) return { items: sectionMenuItems(head.dataset.section), anchor: head };
+  const channelsHead = target.closest(".group-head[data-channels], .group-action");
+  if (channelsHead) return { items: channelsMenuItems(), anchor: channelsHead };
   return { items: sidebarMenuItems(), anchor: null };
 }
 
@@ -3047,6 +3802,15 @@ function bindSidebarMenus() {
 }
 
 async function stopAgent() {
+  const channel = currentChannel();
+  if (channel) {
+    try {
+      await api(`/api/channels/${encodeURIComponent(channel.id)}/interrupt`, { method: "POST" });
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+    return;
+  }
   const agent = findAgent(state.currentId);
   if (!agent) return;
   try {
@@ -4580,14 +5344,15 @@ function updateSpeakButtons() {
   if (test) test.textContent = speech.current?.messageId === "voice-test" ? "Detener" : "Probar voz";
 }
 
-function toggleSpeakMessage(agentId, messageId) {
+function toggleSpeakMessage(key, messageId) {
   primeSpeech();
   if (speech.current?.messageId === messageId) {
     stopSpeaking();
     return;
   }
-  const message = (state.messages.get(agentId) ?? []).find((item) => item.id === messageId);
-  if (!message || !speak(message.text, findAgent(agentId), { messageId })) showToast("No hay nada que leer en ese mensaje.");
+  const message = (state.messages.get(key) ?? []).find((item) => item.id === messageId);
+  // En un canal, cada respuesta se lee con la voz de quien la escribió.
+  if (!message || !speak(message.text, findAgent(message.agentId), { messageId })) showToast("No hay nada que leer en ese mensaje.");
 }
 
 /** Lee sola una respuesta recién terminada si el agente lo tiene activado o si le hablaste con el botón de voz. */
@@ -4822,7 +5587,20 @@ function bindUi() {
   $("#connect-claude").addEventListener("click", () => void connectClaude());
   $("#logout").addEventListener("click", logout);
   $("#back").addEventListener("click", goBack);
-  $("#details-button").addEventListener("click", () => openDetails(state.currentId));
+  $("#details-button").addEventListener("click", () => {
+    if (state.currentChannelId) openChannelDialog(state.currentChannelId);
+    else openDetails(state.currentId);
+  });
+
+  // Canales: crear o editar, y «Canales eliminados».
+  $("#channel-form").addEventListener("submit", saveChannel);
+  $("#channel-cancel").addEventListener("click", () => closeDialog($("#channel-dialog")));
+  $("#channel-delete").addEventListener("click", () => {
+    const id = editingChannelId;
+    closeDialog($("#channel-dialog"));
+    if (id) void deleteChannel(id);
+  });
+  $("#deleted-channels-close").addEventListener("click", () => closeDialog($("#deleted-channels-dialog")));
 
   // Menús contextuales: se cierran al tocar fuera, al cambiar el tamaño o al desplazar la lista.
   bindSidebarMenus();
@@ -4938,8 +5716,18 @@ function bindUi() {
     autosize(input);
     saveDraft();
     updateActionButton();
+    updateMentionMenu();
   });
+  // En un canal, «@» muestra a los miembros para nombrar a uno.
+  input.addEventListener("click", updateMentionMenu);
+  input.addEventListener("keyup", (event) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "Home" || event.key === "End") updateMentionMenu();
+  });
+  input.addEventListener("blur", () => setTimeout(() => {
+    if (document.activeElement !== input) hideMentionMenu();
+  }, 120));
   input.addEventListener("keydown", (event) => {
+    if (onMentionKeydown(event)) return;
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !coarsePointer) {
       event.preventDefault();
       void sendMessage();
@@ -4992,7 +5780,7 @@ function bindUi() {
     if (document.hidden || $("#app").hidden) return;
     if (!events || events.readyState === EventSource.CLOSED) connectEvents();
     renderSidebar();
-    if (state.currentId) scheduleMarkRead(state.currentId, 0);
+    if (convKey()) scheduleMarkRead(convKey(), 0);
   });
 }
 

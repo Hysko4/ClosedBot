@@ -200,6 +200,49 @@ test("adjuntos: se guardan con un nombre seguro dentro de la carpeta del agente"
   }
 });
 
+test("Store: una base de la 0.5 recibe los canales sin perder la cola", () => {
+  const temp = tempDir();
+  try {
+    const path = join(temp.path, "closedbot.db");
+    const old = new DatabaseSync(path);
+    old.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '',
+        provider TEXT NOT NULL, model TEXT, effort TEXT, access TEXT NOT NULL DEFAULT 'carpeta', workspace TEXT NOT NULL, thread_id TEXT,
+        paused INTEGER NOT NULL DEFAULT 0, preview TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE TABLE messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        role TEXT NOT NULL, from_agent_id TEXT, to_agent_ids TEXT NOT NULL DEFAULT '[]', reply_to TEXT, text TEXT NOT NULL, status TEXT NOT NULL,
+        turn_id TEXT, delivery_id TEXT, payload TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE TABLE deliveries (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        message_id TEXT NOT NULL, sender_kind TEXT NOT NULL, sender_agent_id TEXT, text TEXT NOT NULL, reply_to TEXT, hops INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL, turn_id TEXT, error TEXT, idempotency_key TEXT UNIQUE, created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER);
+      INSERT INTO meta VALUES ('schema_version', '3');
+      INSERT INTO agents (id, name, provider, workspace, created_at, updated_at) VALUES ('a1', 'Ana', 'demo', '/tmp/ana', 1, 1);
+      INSERT INTO messages (id, agent_id, role, text, status, created_at, updated_at) VALUES ('m1', 'a1', 'user', 'pendiente', 'queued', 5, 5);
+      INSERT INTO deliveries (id, agent_id, message_id, sender_kind, text, status, created_at) VALUES ('d1', 'a1', 'm1', 'user', 'pendiente', 'queued', 5);
+    `);
+    old.close();
+    const store = new Store(path);
+    try {
+      assert.equal(store.getMeta("schema_version"), "4");
+      assert.equal(store.getDelivery("d1")?.channelId, null);
+      assert.equal(store.countQueued("a1"), 1, "la cola sigue igual");
+      assert.deepEqual(
+        store.listMessages("a1").map((message) => message.id),
+        ["m1"],
+      );
+      const channel = store.createChannel({ name: "Ventas", topic: "", leadId: "a1", memberIds: ["a1"] });
+      store.insertMessage({ agentId: "a1", role: "assistant", text: "hola canal", status: "completed", channelId: channel.id });
+      assert.equal(store.listChannelMessages(channel.id).length, 1);
+      assert.equal(store.listMessages("a1").length, 1, "lo del canal no entra en la conversación privada");
+    } finally {
+      store.close();
+    }
+  } finally {
+    temp.cleanup();
+  }
+});
+
 test("Store: una base de la versión 0.1 se actualiza sin perder datos", () => {
   const temp = tempDir();
   try {
@@ -244,7 +287,9 @@ test("Store: una base de la versión 0.1 se actualiza sin perder datos", () => {
       });
       assert.equal(carla.avatar, 2);
       assert.equal(store.getMessage("m1")?.payload, null);
-      assert.equal(store.getMeta("schema_version"), "3");
+      assert.equal(store.getMeta("schema_version"), "4");
+      assert.equal(store.getMessage("m1")?.channelId, null, "los mensajes viejos no son de ningún canal");
+      assert.deepEqual(store.listChannels(), []);
       assert.deepEqual(store.listRoutines(), []);
     } finally {
       store.close();

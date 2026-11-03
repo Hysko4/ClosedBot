@@ -36,7 +36,8 @@ export interface DemoClientOptions {
 /**
  * Proveedor de demostración sin IA: sirve para probar la app (cola, mensajes entre agentes,
  * transmisión en vivo, preguntas y rutinas) sin cuentas. Entiende estos comandos en el mensaje:
- *   - una línea `@Nombre: texto` envía `texto` al compañero Nombre;
+ *   - una línea `/encargar Nombre: texto` envía `texto` al compañero Nombre (fuera de los canales
+ *     también sirve `@Nombre: texto`; en un canal, la @ solo elige a quién le llega el mensaje);
  *   - `/equipo` lista a los compañeros; `/lento` transmite la respuesta despacio;
  *   - `/pregunta [¿Texto? | Opción A | Opción B]` hace una pregunta con opciones al usuario;
  *   - `/rutina HH:MM Nombre` o `/rutina cada N Nombre` crea una rutina; `/rutinas` las lista;
@@ -135,7 +136,8 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
   async #runTurn(threadId: string, state: { turnId: string; interrupted: boolean }, input: string): Promise<void> {
     const notes: string[] = [];
     try {
-      const body = extractBody(input);
+      const { channel, inner } = splitChannel(input);
+      const body = extractBody(inner);
       if (/(^|\s)\/equipo(\s|$)/.test(body)) {
         notes.push(`Compañeros: ${await this.#callTool(threadId, state.turnId, TOOL_LIST_AGENTS, {})}`);
       }
@@ -202,7 +204,11 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
       if (/(^|\s)\/rutinas(\s|$)/.test(body)) {
         notes.push(`Rutinas: ${await this.#callTool(threadId, state.turnId, TOOL_LIST_ROUTINES, {})}`);
       }
-      for (const match of body.matchAll(/^@([^:\n]+):\s*(.+)$/gm)) {
+      const handoffs = [
+        ...body.matchAll(/^\/encargar\s+([^:\n]+):\s*(.+)$/gm),
+        ...(channel === null ? body.matchAll(/^@([^:\n]+):\s*(.+)$/gm) : []),
+      ];
+      for (const match of handoffs) {
         const name = (match[1] ?? "").trim();
         const text = (match[2] ?? "").trim();
         try {
@@ -212,10 +218,13 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
           notes.push(`No pude escribirle a ${name}: ${errorMessage(error)}`);
         }
       }
-      const fromTeammate = input.startsWith("Mensaje de tu compañero") || input.startsWith("Respuesta de tu compañero");
+      const fromTeammate = inner.startsWith("Mensaje de tu compañero") || inner.startsWith("Respuesta de tu compañero");
       const summary = body.length > 160 ? `${body.slice(0, 160)}…` : body;
+      const where = channel === null ? "" : ` en «${channel}»`;
       const reply = input.startsWith(GREETING_MARKER) ? demoGreeting(input) : [
-        fromTeammate ? `Modo demo: recibí el mensaje de mi compañero («${summary}»).` : `Modo demo (sin IA): recibí «${summary}».`,
+        fromTeammate
+          ? `Modo demo${where}: recibí el mensaje de mi compañero («${summary}»).`
+          : `Modo demo (sin IA)${where}: recibí «${summary}».`,
         ...notes,
         fromTeammate ? "" : "Este modo no usa ningún modelo; sirve para probar la cola, la transmisión en vivo y los mensajes entre agentes.",
       ]
@@ -283,6 +292,17 @@ function demoGreeting(input: string): string {
       ? `Para empezar con buen pie: ¿para qué te gustaría usarme principalmente? Veo que ya tienes un equipo en «${team}», así que me sirve saber si quieres que me sume a ese trabajo o que me encargue de otra cosa, como tu correo, tus archivos o tareas del día a día.`
       : "Para empezar con buen pie: ¿para qué te gustaría usarme principalmente? Puedo encargarme de tu correo, tus archivos, investigar algo o ayudarte con tareas del día a día.",
   ].join("\n\n");
+}
+
+const CHANNEL_HEADER = /^\[Canal «([^»\n]+)» de ClosedBot\]\n/;
+const CHANNEL_MARKER = "\n--- mensaje ---\n";
+
+/** Separa el encabezado de un canal (miembros, lo último que se dijo) de lo que llegó. */
+function splitChannel(input: string): { channel: string | null; inner: string } {
+  const header = CHANNEL_HEADER.exec(input);
+  const index = header ? input.indexOf(CHANNEL_MARKER) : -1;
+  if (!header || index < 0) return { channel: null, inner: input };
+  return { channel: header[1] ?? "", inner: input.slice(index + CHANNEL_MARKER.length) };
 }
 
 /** Quita el encabezado que el orquestador añade a los mensajes de compañeros. */

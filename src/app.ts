@@ -215,6 +215,8 @@ export function createApp(options: AppOptions): App {
     routines: service.listRoutines(),
     settings: service.getSettings(),
     sections: service.listSections(),
+    channels: service.listChannels(),
+    deletedChannels: service.listDeletedChannels(),
     usage: service.usage(),
     paths: { shared: options.sharedDir, workspaces: options.workspacesDir },
     maxHops: options.maxHops,
@@ -375,6 +377,56 @@ export function createApp(options: AppOptions): App {
 
   // ---------- uso del plan ----------
 
+  // ---------- canales ----------
+
+  route("GET", "/api/channels", () => ({ channels: service.listChannels(), deleted: service.listDeletedChannels() }));
+
+  route("POST", "/api/channels", async (ctx) => {
+    const body = await readJson(ctx.req);
+    ctx.res.statusCode = 201;
+    return { channel: service.createChannel({ name: body.name, topic: body.topic, memberIds: body.memberIds, leadId: body.leadId }) };
+  });
+
+  route("GET", "/api/channels/:id", (ctx) => ({ channel: service.getChannel(param(ctx, 0)) }));
+
+  route("PATCH", "/api/channels/:id", async (ctx) => {
+    const body = await readJson(ctx.req);
+    const patch: Record<string, unknown> = {};
+    for (const key of ["name", "topic", "memberIds", "leadId"]) if (key in body) patch[key] = body[key];
+    return { channel: service.updateChannel(param(ctx, 0), patch) };
+  });
+
+  // Eliminar lo mueve a «Canales eliminados»; desde allí se restaura o se borra para siempre.
+  route("DELETE", "/api/channels/:id", (ctx) => ({ channel: service.deleteChannel(param(ctx, 0)) }));
+
+  route("POST", "/api/channels/:id/restore", (ctx) => ({ channel: service.restoreChannel(param(ctx, 0)) }));
+
+  route("DELETE", "/api/channels/:id/permanent", (ctx) => {
+    service.purgeChannel(param(ctx, 0));
+    return { ok: true };
+  });
+
+  route("GET", "/api/channels/:id/messages", (ctx) => {
+    const limit = clampInt(ctx.url.searchParams.get("limit"), 100, 1, 500);
+    const before = clampInt(ctx.url.searchParams.get("before"), 0, 0, Number.MAX_SAFE_INTEGER);
+    const messages = service.listChannelMessages(param(ctx, 0), limit + 1, before || undefined);
+    const hasMore = messages.length > limit;
+    return { messages: hasMore ? messages.slice(1) : messages, hasMore };
+  });
+
+  route("POST", "/api/channels/:id/messages", async (ctx) => {
+    const body = await readJson(ctx.req);
+    if (typeof body.text !== "string") throw new HttpError(400, "Falta el texto del mensaje.");
+    ctx.res.statusCode = 202;
+    return service.sendChannelMessage(param(ctx, 0), body.text);
+  });
+
+  route("POST", "/api/channels/:id/read", (ctx) => ({ channel: service.markChannelRead(param(ctx, 0)) }));
+
+  route("POST", "/api/channels/:id/unread", (ctx) => ({ channel: service.markChannelUnread(param(ctx, 0)) }));
+
+  route("POST", "/api/channels/:id/interrupt", async (ctx) => ({ interrupted: await service.interruptChannel(param(ctx, 0)) }));
+
   route("GET", "/api/usage", () => ({ usage: service.usage() }));
 
   route("POST", "/api/usage/refresh", async () => ({ usage: await service.refreshUsage(false) }));
@@ -497,6 +549,8 @@ export function createApp(options: AppOptions): App {
       routines: service.listRoutines(),
       settings: service.getSettings(),
       sections: service.listSections(),
+      channels: service.listChannels(),
+      deletedChannels: service.listDeletedChannels(),
       usage: service.usage(),
       speech: speech?.status() ?? null,
     });

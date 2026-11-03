@@ -1,9 +1,11 @@
 import { EventEmitter } from "node:events";
 import { mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
+import { composeChannelInput, findMentions, uniqueName } from "./channels.js";
 import {
   type AgentRecord,
   AVATAR_MAX,
+  type ChannelRecord,
   type DeliveryRecord,
   type MessageRecord,
   type RoutineRecord,
@@ -80,6 +82,11 @@ export const SECTIONS_META = "sections";
 export const MAX_SECTIONS = 50;
 /** Biblioteca: cuántos elementos muestra una carpeta como máximo. */
 export const MAX_LIBRARY_ENTRIES = 500;
+/** Canales activos como máximo, agentes por canal y mensajes anteriores que ve cada agente. */
+export const MAX_CHANNELS = 50;
+export const MAX_CHANNEL_MEMBERS = 12;
+const CHANNEL_HISTORY = 12;
+export const CHANNEL_LIMITS = { name: 60, topic: 300 } as const;
 /** Uso del plan: cada cuánto se vuelve a leer y cuánto esperar como mínimo entre lecturas. */
 const USAGE_INTERVAL_MS = 10 * 60_000;
 const USAGE_MIN_GAP_MS = 60_000;
@@ -173,10 +180,25 @@ export interface Settings {
   fullAccess: boolean;
 }
 
+/** Un canal tal como lo ve la interfaz. */
+export interface ChannelView extends ChannelRecord {
+  unread: boolean;
+  /** Miembros que están trabajando ahora en algo de este canal. */
+  working: string[];
+}
+
+export interface ChannelInput {
+  name?: unknown;
+  topic?: unknown;
+  memberIds?: unknown;
+  leadId?: unknown;
+}
+
 export type ServiceEvent =
   | { type: "agents"; agents: AgentView[] }
+  | { type: "channels"; channels: ChannelView[]; deleted: ChannelView[] }
   | { type: "message"; agentId: string; message: MessageRecord }
-  | { type: "delta"; agentId: string; messageId: string; delta: string }
+  | { type: "delta"; agentId: string; messageId: string; delta: string; channelId?: string | null }
   | { type: "queue"; agentId: string; queue: DeliveryRecord[] }
   | { type: "providers"; providers: ProviderStatus[] }
   | { type: "routines"; routines: RoutineView[] }
@@ -244,6 +266,8 @@ interface TurnState {
   askedQuestion: string | null;
   /** Agentes que creó en este turno (solo el bot principal). */
   createdAgents: number;
+  /** Canal del encargo: lo que escriba el agente se publica allí. */
+  channelId: string | null;
 }
 
 export class ServiceError extends Error {
@@ -614,8 +638,10 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (this.#active.has(id)) throw new ServiceError("Detén el turno en curso antes de eliminar el agente.", 409);
     this.#store.cancelQueuedForAgent(id);
     await this.#closeThread(agent);
+    const touchedChannels = this.#leaveChannels(id);
     this.#store.deleteAgent(id);
     this.#emitAgents();
+    if (touchedChannels) this.#emitChannels();
     // Sus rutinas se borran con él (ON DELETE CASCADE).
     this.#emitRoutines();
     this.#armRoutines();
@@ -662,13 +688,20 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   markAllRead(): number {
     const now = Date.now();
     let changed = 0;
+    let channels = 0;
     for (const agent of this.#store.listAgents()) {
       if (agent.lastAt <= agent.readAt) continue;
       this.#store.updateAgent(agent.id, { readAt: Math.max(now, agent.lastAt) });
       changed += 1;
     }
+    for (const channel of this.#store.listChannels()) {
+      if (channel.lastAt <= channel.readAt) continue;
+      this.#store.updateChannel(channel.id, { readAt: Math.max(now, channel.lastAt) });
+      channels += 1;
+    }
     if (changed) this.#emitAgents();
-    return changed;
+    if (channels) this.#emitChannels();
+    return changed + channels;
   }
 
   // ---------- secciones de la barra lateral ----------
@@ -1014,6 +1047,257 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     return this.getSettings().fullAccess ? "total" : agent.access;
   }
 
+  // ---------- canales ----------
+
+  listChannels(): ChannelView[] {
+    return this.#store.listChannels().map((channel) => this.#channelView(channel));
+  }
+
+  /** «Canales eliminados»: se pueden restaurar o borrar para siempre. */
+  listDeletedChannels(): ChannelView[] {
+    return this.#store.listChannels({ deleted: true }).map((channel) => this.#channelView(channel));
+  }
+
+  getChannel(id: string): ChannelView {
+    return this.#channelView(this.#requireChannel(id));
+  }
+
+  createChannel(input: ChannelInput): ChannelView {
+    if (this.#store.listChannels().length >= MAX_CHANNELS) {
+      throw new ServiceError(`Ya tienes ${MAX_CHANNELS} canales, el máximo. Elimina alguno que no uses.`, 409);
+    }
+    const name = channelName(input.name);
+    if (this.#store.findChannelByName(name)) throw new ServiceError(`Ya existe un canal llamado «${name}».`, 409);
+    const memberIds = this.#channelMembers(input.memberIds);
+    const leadId = this.#channelLead(input.leadId, memberIds);
+    const channel = this.#store.createChannel({ name, topic: channelTopic(input.topic), leadId, memberIds });
+    this.#log("info", `Creé el canal «${name}».`);
+    this.#emitChannels();
+    return this.#channelView(channel);
+  }
+
+  updateChannel(id: string, patch: ChannelInput): ChannelView {
+    const channel = this.#requireChannel(id);
+    const next: Partial<Pick<ChannelRecord, "name" | "topic" | "leadId" | "memberIds">> = {};
+    if (patch.name !== undefined) {
+      const name = channelName(patch.name);
+      const other = this.#store.findChannelByName(name);
+      if (other && other.id !== id) throw new ServiceError(`Ya existe un canal llamado «${name}».`, 409);
+      next.name = name;
+    }
+    if (patch.topic !== undefined) next.topic = channelTopic(patch.topic);
+    const memberIds = patch.memberIds !== undefined ? this.#channelMembers(patch.memberIds) : channel.memberIds;
+    if (patch.memberIds !== undefined) next.memberIds = memberIds;
+    if (patch.leadId !== undefined || patch.memberIds !== undefined) {
+      // Si el encargado deja el canal, pasa a serlo el primero de los que quedan.
+      const wanted = patch.leadId !== undefined ? patch.leadId : memberIds.includes(channel.leadId ?? "") ? channel.leadId : null;
+      next.leadId = this.#channelLead(wanted, memberIds);
+    }
+    const updated = this.#store.updateChannel(id, next);
+    this.#emitChannels();
+    return this.#channelView(updated);
+  }
+
+  /** Lo mueve a «Canales eliminados»: lo que esperaba turno se cancela y se puede restaurar después. */
+  deleteChannel(id: string): ChannelView {
+    const channel = this.#requireChannel(id);
+    if (channel.deletedAt) return this.#channelView(channel);
+    const cancelled = this.#store.cancelQueuedForChannel(id);
+    const updated = this.#store.updateChannel(id, { deletedAt: Date.now() });
+    for (const agentId of new Set(cancelled.map((delivery) => delivery.agentId))) this.#emitQueue(agentId);
+    this.#emitAgents();
+    this.#emitChannels();
+    return this.#channelView(updated);
+  }
+
+  restoreChannel(id: string): ChannelView {
+    const channel = this.#requireChannel(id);
+    if (!channel.deletedAt) return this.#channelView(channel);
+    if (this.#store.listChannels().length >= MAX_CHANNELS) {
+      throw new ServiceError(`Ya tienes ${MAX_CHANNELS} canales activos: elimina uno antes de restaurar otro.`, 409);
+    }
+    // Si mientras tanto se creó otro con el mismo nombre, el restaurado se llama «Nombre (2)».
+    const name = uniqueName(channel.name, (candidate) => Boolean(this.#store.findChannelByName(candidate)), CHANNEL_LIMITS.name);
+    const memberIds = channel.memberIds.filter((agentId) => this.#store.getAgent(agentId));
+    const updated = this.#store.updateChannel(id, {
+      name,
+      memberIds,
+      leadId: memberIds.includes(channel.leadId ?? "") ? channel.leadId : (memberIds[0] ?? null),
+      deletedAt: null,
+    });
+    this.#emitChannels();
+    return this.#channelView(updated);
+  }
+
+  /** Borra para siempre un canal de «Canales eliminados», con todos sus mensajes. */
+  purgeChannel(id: string): void {
+    const channel = this.#requireChannel(id);
+    if (!channel.deletedAt) throw new ServiceError("Primero elimina el canal; después se puede borrar para siempre desde «Canales eliminados».", 409);
+    if ([...this.#active.values()].some((state) => state.channelId === id)) {
+      throw new ServiceError("Un agente todavía está terminando algo de este canal: espera un momento y vuelve a intentarlo.", 409);
+    }
+    this.#store.deleteChannel(id);
+    this.#emitChannels();
+  }
+
+  listChannelMessages(id: string, limit?: number, beforeSeq?: number) {
+    this.#requireChannel(id);
+    return this.#store.listChannelMessages(id, limit, beforeSeq);
+  }
+
+  /**
+   * Mensaje del usuario en el canal: lo atiende el encargado, salvo que nombre a alguien con @Nombre
+   * (o a todos con @todos). Cada uno lo recibe en su cola y responde en el canal.
+   */
+  sendChannelMessage(id: string, text: string): { message: MessageRecord; recipients: Array<{ id: string; name: string }> } {
+    const channel = this.#requireChannel(id);
+    if (channel.deletedAt) throw new ServiceError("Ese canal está en «Canales eliminados»: restáuralo para escribir en él.", 409);
+    const body = text.trim();
+    if (!body) throw new ServiceError("El mensaje está vacío.");
+    if (body.length > 100_000) throw new ServiceError("El mensaje supera los 100.000 caracteres.");
+    const members = channel.memberIds.map((agentId) => this.#store.getAgent(agentId)).filter((agent): agent is AgentRecord => agent !== null);
+    if (!members.length) throw new ServiceError("Este canal no tiene agentes: agrega al menos uno con «Editar canal».", 409);
+    const lead = members.find((agent) => agent.id === channel.leadId) ?? (members[0] as AgentRecord);
+    const mentioned = findMentions(body, members);
+    const recipients = mentioned.length ? members.filter((agent) => mentioned.includes(agent.id)) : [lead];
+    // El mensaje lo guarda el bot principal (que no se elimina) para que no desaparezca con un agente.
+    const owner = this.#mainAgentId && this.#store.getAgent(this.#mainAgentId) ? this.#mainAgentId : (recipients[0] as AgentRecord).id;
+    const message = this.#store.transaction(() => {
+      const inserted = this.#store.insertMessage({
+        agentId: owner,
+        channelId: id,
+        role: "user",
+        text: body,
+        status: "completed",
+        payload: { to: recipients.map((agent) => agent.id) },
+      });
+      for (const recipient of recipients) {
+        this.#store.enqueueDelivery({ agentId: recipient.id, messageId: inserted.id, senderKind: "user", text: body, channelId: id });
+      }
+      this.#store.updateChannel(id, { preview: `Tú: ${body}`.slice(0, 240), readAt: Date.now() });
+      return inserted;
+    });
+    this.#emit({ type: "message", agentId: owner, message });
+    for (const recipient of recipients) {
+      this.#emitQueue(recipient.id);
+      this.#scheduleDrain(recipient.id);
+    }
+    this.#emitAgents();
+    this.#emitChannels();
+    return { message, recipients: recipients.map((agent) => ({ id: agent.id, name: agent.name })) };
+  }
+
+  markChannelRead(id: string): ChannelView {
+    const channel = this.#requireChannel(id);
+    if (channel.lastAt <= channel.readAt) return this.#channelView(channel);
+    const updated = this.#store.updateChannel(id, { readAt: Math.max(Date.now(), channel.lastAt) });
+    this.#emitChannels();
+    return this.#channelView(updated);
+  }
+
+  markChannelUnread(id: string): ChannelView {
+    this.#requireChannel(id);
+    const updated = this.#store.updateChannel(id, { readAt: -1 });
+    this.#emitChannels();
+    return this.#channelView(updated);
+  }
+
+  /** «Detener» en un canal: corta lo que esté haciendo cada miembro para él y lo que esperaba turno. */
+  async interruptChannel(id: string): Promise<boolean> {
+    this.#requireChannel(id);
+    const cancelled = this.#store.cancelQueuedForChannel(id);
+    for (const agentId of new Set(cancelled.map((delivery) => delivery.agentId))) this.#emitQueue(agentId);
+    const working = [...this.#active.values()].filter((state) => state.channelId === id).map((state) => state.agentId);
+    const results = await Promise.all(working.map((agentId) => this.interrupt(agentId)));
+    this.#emitAgents();
+    this.#emitChannels();
+    return results.some(Boolean) || cancelled.length > 0;
+  }
+
+  #requireChannel(id: string): ChannelRecord {
+    const channel = this.#store.getChannel(id);
+    if (!channel) throw new ServiceError("Canal no encontrado.", 404);
+    return channel;
+  }
+
+  #channelView(channel: ChannelRecord): ChannelView {
+    const working = [...this.#active.values()].filter((state) => state.channelId === channel.id).map((state) => state.agentId);
+    return { ...channel, unread: channel.lastAt > channel.readAt, working: [...new Set(working)] };
+  }
+
+  #emitChannels(): void {
+    this.#emit({ type: "channels", channels: this.listChannels(), deleted: this.listDeletedChannels() });
+  }
+
+  /** Miembros válidos: agentes que existen, sin repetir, como mucho MAX_CHANNEL_MEMBERS. */
+  #channelMembers(value: unknown): string[] {
+    if (!Array.isArray(value)) throw new ServiceError("Elige los agentes del canal.");
+    const ids = [...new Set(value.filter((item): item is string => typeof item === "string"))];
+    if (!ids.length) throw new ServiceError("Un canal necesita al menos un agente.");
+    if (ids.length > MAX_CHANNEL_MEMBERS) throw new ServiceError(`Un canal admite hasta ${MAX_CHANNEL_MEMBERS} agentes.`);
+    for (const agentId of ids) {
+      if (!this.#store.getAgent(agentId)) throw new ServiceError("Uno de los agentes elegidos ya no existe.", 404);
+    }
+    return ids;
+  }
+
+  #channelLead(value: unknown, memberIds: string[]): string | null {
+    if (value === null || value === undefined || value === "") return memberIds[0] ?? null;
+    if (typeof value !== "string" || !memberIds.includes(value)) throw new ServiceError("El encargado tiene que ser uno de los agentes del canal.");
+    return value;
+  }
+
+  /** Al eliminar un agente: deja los canales y, si era el encargado, lo reemplaza el siguiente. */
+  #leaveChannels(agentId: string): boolean {
+    let touched = false;
+    for (const channel of [...this.#store.listChannels(), ...this.#store.listChannels({ deleted: true })]) {
+      if (!channel.memberIds.includes(agentId)) continue;
+      const memberIds = channel.memberIds.filter((id) => id !== agentId);
+      this.#store.updateChannel(channel.id, {
+        memberIds,
+        leadId: channel.leadId === agentId || !channel.leadId ? (memberIds[0] ?? null) : channel.leadId,
+      });
+      touched = true;
+    }
+    // Lo que escribió el usuario en los canales no se pierde con el agente que lo guardaba.
+    const heir = (this.#mainAgentId && this.#mainAgentId !== agentId && this.#store.getAgent(this.#mainAgentId) ? this.#mainAgentId : null) ??
+      this.#store.listAgents().find((agent) => agent.id !== agentId)?.id ?? null;
+    if (heir) this.#store.moveChannelUserMessages(agentId, heir);
+    return touched;
+  }
+
+  /** Lo que recibe un miembro: el canal, quién está, lo último que se dijo y el mensaje. */
+  #channelInput(channel: ChannelRecord, agent: AgentRecord, delivery: DeliveryRecord, body: string): string {
+    const members = channel.memberIds.map((id) => this.#store.getAgent(id)).filter((item): item is AgentRecord => item !== null);
+    const lead = members.find((member) => member.id === channel.leadId) ?? null;
+    const recent = this.#store
+      .listChannelMessages(channel.id, CHANNEL_HISTORY + 1)
+      .filter((message) => message.id !== delivery.messageId && message.text.trim())
+      .filter((message) => message.role === "user" || message.role === "assistant" || (message.role === "notice" && message.toAgentIds.length > 0))
+      .slice(-CHANNEL_HISTORY);
+    const name = (id: string | null) => (id ? (this.#store.getAgent(id)?.name ?? "un agente eliminado") : "alguien");
+    const history = recent.map((message) => ({
+      author:
+        message.role === "user"
+          ? "Usuario"
+          : message.role === "notice"
+            ? `${name(message.agentId)} → ${message.toAgentIds.map(name).join(", ")}`
+            : name(message.agentId),
+      text: message.text,
+    }));
+    return composeChannelInput(
+      {
+        name: channel.name,
+        topic: channel.topic,
+        you: agent.name,
+        leadName: lead?.name ?? null,
+        members: members.map((member) => ({ name: member.name, role: member.role })),
+        history,
+      },
+      body,
+    );
+  }
+
   // ---------- preguntas al usuario ----------
 
   /** El usuario eligió una opción de una tarjeta de decisión: la respuesta le llega al agente como mensaje. */
@@ -1037,12 +1321,15 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       ]
         .filter(Boolean)
         .join(" ");
+      // Una pregunta hecha en un canal se contesta en el canal.
+      const channelId = decision.channelId;
       const message = this.#store.insertMessage({
         agentId,
         role: "user",
         text: `${letter}. ${option.label}`,
-        status: "queued",
-        payload: { decisionId: messageId, choice: index },
+        status: channelId ? "completed" : "queued",
+        payload: { decisionId: messageId, choice: index, ...(channelId ? { to: [agentId] } : {}) },
+        channelId,
       });
       const { delivery } = this.#store.enqueueDelivery({
         agentId,
@@ -1050,15 +1337,18 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         senderKind: "user",
         text: agentText,
         idempotencyKey: `decision:${messageId}`,
+        channelId,
       });
       const linked = this.#store.updateMessage(message.id, { deliveryId: delivery.id }) as MessageRecord;
+      if (channelId && this.#store.getChannel(channelId)) this.#store.updateChannel(channelId, { readAt: Date.now() });
       return { decision: updated, message: linked, delivery };
     });
-    this.#store.updateAgent(agentId, { readAt: Date.now() });
+    if (!result.decision.channelId) this.#store.updateAgent(agentId, { readAt: Date.now() });
     this.#emit({ type: "message", agentId, message: result.decision });
     this.#emit({ type: "message", agentId, message: result.message });
     this.#emitQueue(agentId);
     this.#emitAgents();
+    if (result.decision.channelId) this.#emitChannels();
     this.#scheduleDrain(agentId);
     return result;
   }
@@ -1369,6 +1659,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       await this.#startDelivery(agent, delivery);
     } finally {
       this.#draining.delete(agentId);
+      // Si esa entrega no quedó en curso (falló o se canceló), se sigue con la próxima de la cola.
+      if (!this.#active.has(agentId)) this.#scheduleDrain(agentId);
     }
   }
 
@@ -1385,12 +1677,22 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       lastAssistantText: "",
       askedQuestion: null,
       createdAgents: 0,
+      channelId: delivery.channelId,
     };
+    // Un encargo de un canal que se movió a «Canales eliminados» ya no se atiende.
+    const channel = delivery.channelId ? this.#store.getChannel(delivery.channelId) : null;
+    if (delivery.channelId && (!channel || channel.deletedAt)) {
+      this.#store.updateDelivery(delivery.id, { status: "cancelled", finishedAt: Date.now() });
+      this.#emitQueue(agent.id);
+      this.#scheduleDrain(agent.id);
+      return;
+    }
     this.#active.set(agent.id, state);
     this.#store.updateDelivery(delivery.id, { status: "starting", startedAt: Date.now() });
     this.#updateMessageStatus(agent.id, delivery.messageId, "running");
     this.#emitQueue(agent.id);
     this.#emitAgents();
+    if (channel) this.#emitChannels();
     try {
       const client = await this.#getClient(agent.provider);
       const fresh = this.#requireAgent(agent.id);
@@ -1398,7 +1700,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       state.threadId = threadId;
       const sender = delivery.senderAgentId ? this.#store.getAgent(delivery.senderAgentId) : null;
       const original = delivery.replyTo ? this.#store.getMessage(delivery.replyTo) : null;
-      const text = composeDeliveryInput(delivery, sender ? { id: sender.id, name: sender.name } : null, original?.text ?? null);
+      const body = composeDeliveryInput(delivery, sender ? { id: sender.id, name: sender.name } : null, original?.text ?? null);
+      const text = channel ? this.#channelInput(channel, fresh, delivery, body) : body;
       const response = await client.request<TurnResponse>(
         "turn/start",
         {
@@ -1431,9 +1734,10 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       this.#active.delete(agent.id);
       this.#store.updateDelivery(delivery.id, { status: "failed", error: errorText(error), finishedAt: Date.now() });
       this.#updateMessageStatus(agent.id, delivery.messageId, "failed");
-      this.#notice(agent.id, `No se pudo entregar el mensaje: ${errorText(error)}`);
+      this.#notice(agent.id, `No se pudo entregar el mensaje${channel ? ` a ${agent.name}` : ""}: ${errorText(error)}`, delivery.channelId);
       this.#emitQueue(agent.id);
       this.#emitAgents();
+      if (channel) this.#emitChannels();
       this.#scheduleDrain(agent.id);
     }
   }
@@ -1451,14 +1755,17 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       const message = this.#store.getMessage(messageId);
       if (message?.status === "streaming") this.#updateMessageStatus(agentId, messageId, terminal);
     }
-    if (state.askedQuestion) {
-      // Lo pendiente es la pregunta: es lo que el usuario debe ver en la lista.
-      this.#store.updateAgent(agentId, { preview: `Pregunta: ${state.askedQuestion}`.slice(0, 240) });
-    } else if (terminal === "completed" && state.lastAssistantText.trim()) {
-      this.#store.updateAgent(agentId, { preview: state.lastAssistantText.trim().slice(0, 240) });
-    }
+    const channel = state.channelId ? this.#store.getChannel(state.channelId) : null;
+    const speaker = channel ? `${this.#store.getAgent(agentId)?.name ?? "Un agente"}: ` : "";
+    let preview: string | null = null;
+    // Lo pendiente es la pregunta: es lo que el usuario debe ver en la lista.
+    if (state.askedQuestion) preview = `${channel ? `Pregunta de ${speaker}` : "Pregunta: "}${state.askedQuestion}`;
+    else if (terminal === "completed" && state.lastAssistantText.trim()) preview = `${speaker}${state.lastAssistantText.trim()}`;
+    if (preview && channel) this.#store.updateChannel(channel.id, { preview: preview.slice(0, 240) });
+    else if (preview && !state.channelId) this.#store.updateAgent(agentId, { preview: preview.slice(0, 240) });
     this.#emitQueue(agentId);
     this.#emitAgents();
+    if (state.channelId) this.#emitChannels();
     if (delivery && this.#store.listRoutines(agentId).some((routine) => routine.lastDeliveryId === delivery.id)) this.#emitRoutines();
     if (state.provider !== "demo") this.#usageAfterTurn();
 
@@ -1470,18 +1777,23 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       !state.sentTo.has(delivery.senderAgentId) &&
       state.lastAssistantText.trim()
     ) {
-      // El compañero no contestó con send_message: le hacemos llegar su resultado igual.
+      // El compañero no contestó con send_message: le hacemos llegar su resultado igual. En un canal
+      // su respuesta ya se ve, así que no se repite como aviso (y si el canal se eliminó, no sigue).
       try {
-        this.#sendTeammateMessage({
-          fromAgentId: agentId,
-          to: [delivery.senderAgentId],
-          text: state.lastAssistantText.trim(),
-          replyTo: delivery.messageId,
-          hops: delivery.hops + 1,
-          idempotencyKey: `auto:${delivery.id}`,
-        });
+        if (!delivery.channelId || (channel && !channel.deletedAt)) {
+          this.#sendTeammateMessage({
+            fromAgentId: agentId,
+            to: [delivery.senderAgentId],
+            text: state.lastAssistantText.trim(),
+            replyTo: delivery.messageId,
+            hops: delivery.hops + 1,
+            idempotencyKey: `auto:${delivery.id}`,
+            channelId: delivery.channelId,
+            quiet: Boolean(delivery.channelId),
+          });
+        }
       } catch (error) {
-        this.#notice(agentId, `No se pudo devolver el resultado al remitente: ${errorText(error)}`);
+        this.#notice(agentId, `No se pudo devolver el resultado al remitente: ${errorText(error)}`, delivery.channelId);
       }
     }
     this.#scheduleDrain(agentId);
@@ -1513,8 +1825,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         if (!itemId || delta === null) return;
         const messageId = this.#ensureAssistantMessage(agentId, itemId, getString(params, "turnId"));
         this.#store.appendMessageText(messageId, delta);
-        this.#emit({ type: "delta", agentId, messageId, delta });
         const state = this.#active.get(agentId);
+        this.#emit({ type: "delta", agentId, messageId, delta, channelId: state?.channelId ?? null });
         if (state) state.lastAssistantText = this.#store.getMessage(messageId)?.text ?? state.lastAssistantText;
         return;
       }
@@ -1547,6 +1859,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
             text: summary,
             status: "completed",
             turnId: getString(params, "turnId"),
+            channelId: this.#active.get(agentId)?.channelId ?? null,
           });
           this.#emit({ type: "message", agentId, message });
         }
@@ -1583,6 +1896,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       status: "streaming",
       turnId,
       deliveryId: state?.deliveryId ?? null,
+      channelId: state?.channelId ?? null,
     });
     this.#emit({ type: "message", agentId, message });
     return messageId;
@@ -1732,6 +2046,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       replyTo: args.replyToMessageId,
       hops: (state?.hops ?? 0) + 1,
       idempotencyKey: `${params.threadId}:${params.turnId}:${params.callId}`,
+      channelId: state?.channelId ?? null,
     });
     for (const recipient of receipt.recipients) state?.sentTo.add(recipient.id);
     return toolResult(receipt);
@@ -1745,12 +2060,14 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       status: "completed",
       turnId,
       payload: { options: args.options, recommended: args.recommended, answer: null, answeredAt: null },
+      channelId: this.#active.get(agentId)?.channelId ?? null,
     });
     const state = this.#active.get(agentId);
     if (state) state.askedQuestion = args.question;
     else this.#store.updateAgent(agentId, { preview: `Pregunta: ${args.question}`.slice(0, 240) });
     this.#emit({ type: "message", agentId, message });
     this.#emitAgents();
+    if (message.channelId) this.#emitChannels();
     return toolResult({
       preguntado: true,
       messageId: message.id,
@@ -1945,6 +2262,10 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     replyTo: string | null;
     hops: number;
     idempotencyKey: string;
+    /** Canal donde ocurre: el encargo y lo que responda el compañero se ven allí. */
+    channelId?: string | null;
+    /** Sin el aviso «Enviado a…» (cuando el texto ya se ve en el canal). */
+    quiet?: boolean;
   }): { enviado: true; recipients: Array<{ id: string; name: string; messageId: string }> } {
     const sender = this.#requireAgent(input.fromAgentId);
     if (input.hops > this.#options.maxHops) {
@@ -1970,6 +2291,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
           status: "queued",
           fromAgentId: sender.id,
           replyTo: input.replyTo,
+          channelId: input.channelId ?? null,
         });
         const { delivery } = this.#store.enqueueDelivery({
           agentId: recipient.id,
@@ -1980,12 +2302,13 @@ export class AgentService extends EventEmitter<ServiceEvents> {
           replyTo: input.replyTo,
           hops: input.hops,
           idempotencyKey: key,
+          channelId: input.channelId ?? null,
         });
         return { recipient, message: this.#store.updateMessage(message.id, { deliveryId: delivery.id }), created: true };
       }),
     );
 
-    if (results.some((result) => result.created)) {
+    if (results.some((result) => result.created) && !input.quiet) {
       const notice = this.#store.insertMessage({
         agentId: sender.id,
         role: "notice",
@@ -1993,6 +2316,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         status: "completed",
         toAgentIds: recipients.map((agent) => agent.id),
         replyTo: input.replyTo,
+        channelId: input.channelId ?? null,
       });
       this.#emit({ type: "message", agentId: sender.id, message: notice });
     }
@@ -2041,13 +2365,18 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   }
 
   #updateMessageStatus(agentId: string, messageId: string, status: MessageRecord["status"]): void {
+    // El mensaje del usuario en un canal puede ir a varios agentes: no sigue el estado de cada entrega.
+    const current = this.#store.getMessage(messageId);
+    if (!current || (current.channelId && current.role === "user")) return;
     const message = this.#store.updateMessage(messageId, { status });
     if (message) this.#emit({ type: "message", agentId, message });
   }
 
-  #notice(agentId: string, text: string): void {
+  /** Aviso en la conversación del agente; durante un encargo de un canal, en ese canal. */
+  #notice(agentId: string, text: string, channelId: string | null = this.#active.get(agentId)?.channelId ?? null): void {
     if (!this.#store.getAgent(agentId)) return;
-    const message = this.#store.insertMessage({ agentId, role: "notice", text, status: "completed" });
+    const channel = channelId ? this.#store.getChannel(channelId) : null;
+    const message = this.#store.insertMessage({ agentId, role: "notice", text, status: "completed", channelId: channel ? channel.id : null });
     this.#emit({ type: "message", agentId, message });
   }
 
@@ -2071,6 +2400,22 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 function signInProvider(value: unknown): SignInProvider {
   if (value === "claude" || value === "codex" || value === "grok" || value === "gemini") return value;
   throw new ServiceError("Ese proveedor no tiene inicio de sesión.", 400);
+}
+
+function channelName(value: unknown): string {
+  const name = typeof value === "string" ? value.trim().replace(/\s+/g, " ").replace(/^#+\s*/, "") : "";
+  if (!name) throw new ServiceError("El canal necesita un nombre.");
+  if (name.length > CHANNEL_LIMITS.name) throw new ServiceError(`El nombre admite hasta ${CHANNEL_LIMITS.name} caracteres.`);
+  if (/[\u0000-\u001f]/.test(name)) throw new ServiceError("El nombre tiene caracteres no válidos.");
+  return name;
+}
+
+function channelTopic(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string") throw new ServiceError("El tema del canal debe ser texto.");
+  const topic = value.trim();
+  if (topic.length > CHANNEL_LIMITS.topic) throw new ServiceError(`El tema admite hasta ${CHANNEL_LIMITS.topic} caracteres.`);
+  return topic;
 }
 
 function installProvider(value: unknown): InstallProvider {

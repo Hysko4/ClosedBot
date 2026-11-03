@@ -654,3 +654,64 @@ test("HTTP: dictado local (estado, descarga, transcripción y avisos por el fluj
     temp.cleanup();
   }
 });
+
+test("HTTP: canales (crear, escribir, leer, eliminar, restaurar y borrar para siempre)", async () => {
+  const s = await startServer();
+  try {
+    await s.login();
+    const ana = (await s.call("/api/agents", { method: "POST", body: { name: "Ana", provider: "demo" } })).json?.agent as { id: string };
+    const created = await s.call("/api/channels", { method: "POST", body: { name: "#Ventas", topic: "Precios", memberIds: [ana.id] } });
+    assert.equal(created.status, 201);
+    const channel = created.json?.channel as { id: string; name: string; leadId: string };
+    assert.equal(channel.name, "Ventas");
+    assert.equal(channel.leadId, ana.id);
+    const duplicate = await s.call("/api/channels", { method: "POST", body: { name: "ventas", memberIds: [ana.id] } });
+    assert.equal(duplicate.status, 409);
+    const empty = await s.call("/api/channels", { method: "POST", body: { name: "Vacío", memberIds: [] } });
+    assert.equal(empty.status, 400);
+    const state = await s.call("/api/state");
+    assert.equal(state.json?.channels[0].id, channel.id);
+
+    const sent = await s.call(`/api/channels/${channel.id}/messages`, { method: "POST", body: { text: "hola canal" } });
+    assert.equal(sent.status, 202);
+    assert.deepEqual(sent.json?.recipients, [{ id: ana.id, name: "Ana" }]);
+    const noText = await s.call(`/api/channels/${channel.id}/messages`, { method: "POST", body: {} });
+    assert.equal(noText.status, 400);
+    await waitFor(
+      () => s.h.service.listChannelMessages(channel.id).some((message) => message.role === "assistant" && message.status === "completed"),
+      5_000,
+      "respuesta en el canal",
+    );
+    const history = await s.call(`/api/channels/${channel.id}/messages?limit=1`);
+    assert.equal(history.json?.messages.length, 1);
+    assert.equal(history.json?.messages[0].role, "assistant");
+    assert.equal(history.json?.hasMore, true);
+    const agentHistory = await s.call(`/api/agents/${ana.id}/messages`);
+    assert.deepEqual(agentHistory.json?.messages, [], "lo del canal no aparece en la conversación privada");
+
+    const renamed = await s.call(`/api/channels/${channel.id}`, { method: "PATCH", body: { name: "Ventas 2026", ignored: true } });
+    assert.equal(renamed.json?.channel.name, "Ventas 2026");
+    assert.equal((await s.call(`/api/channels/${channel.id}/read`, { method: "POST" })).json?.channel.unread, false);
+    assert.equal((await s.call(`/api/channels/${channel.id}/unread`, { method: "POST" })).json?.channel.unread, true);
+    assert.equal((await s.call(`/api/channels/${channel.id}/interrupt`, { method: "POST" })).json?.interrupted, false);
+
+    const notYet = await s.call(`/api/channels/${channel.id}/permanent`, { method: "DELETE" });
+    assert.equal(notYet.status, 409);
+    const removed = await s.call(`/api/channels/${channel.id}`, { method: "DELETE" });
+    assert.equal(removed.status, 200);
+    assert.ok(removed.json?.channel.deletedAt);
+    const lists = await s.call("/api/channels");
+    assert.deepEqual(lists.json?.channels, []);
+    assert.equal(lists.json?.deleted[0].id, channel.id);
+    const restored = await s.call(`/api/channels/${channel.id}/restore`, { method: "POST" });
+    assert.equal(restored.json?.channel.deletedAt, null);
+    await s.call(`/api/channels/${channel.id}`, { method: "DELETE" });
+    const purged = await s.call(`/api/channels/${channel.id}/permanent`, { method: "DELETE" });
+    assert.equal(purged.status, 200);
+    assert.equal((await s.call(`/api/channels/${channel.id}`)).status, 404);
+    const noCsrf = await s.call("/api/channels", { method: "POST", body: { name: "Sin CSRF", memberIds: [ana.id] }, headers: { "x-cuadrilla": "" } });
+    assert.equal(noCsrf.status, 403);
+  } finally {
+    await s.close();
+  }
+});
