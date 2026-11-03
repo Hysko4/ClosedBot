@@ -51,8 +51,22 @@ if errorlevel 1 goto fallo
 
 echo.
 echo   [4/4] Preparando la clave y los accesos directos...
-move /y "ClosedBot.nuevo.exe" "ClosedBot.exe" >nul
-if errorlevel 1 goto fallo
+rem Si alguien abrio ClosedBot mientras se instalaba, Windows no deja cambiar el programa:
+rem se le pide que se cierre y se reintenta unas veces antes de rendirse.
+set /a INTENTOS=0
+:mover
+move /y "ClosedBot.nuevo.exe" "ClosedBot.exe" >nul 2>nul
+if not errorlevel 1 goto movido
+set /a INTENTOS+=1
+if %INTENTOS% geq 5 (
+  echo   No pude cambiar ClosedBot.exe porque sigue abierto.
+  echo   Cierra ClosedBot desde su icono junto al reloj ^(Salir^) y vuelve a abrir este archivo.
+  goto fallo
+)
+start "" /wait "ClosedBot.nuevo.exe" /salir
+timeout /t 2 /nobreak >nul
+goto mover
+:movido
 rem Restos de cuando la app se llamaba Cuadrilla: el programa viejo y el nombre del archivo de la clave.
 if exist "Cuadrilla.exe" del /q "Cuadrilla.exe"
 if exist "CONTRASENA-CUADRILLA.txt" if not exist "CONTRASENA-CLOSEDBOT.txt" ren "CONTRASENA-CUADRILLA.txt" "CONTRASENA-CLOSEDBOT.txt"
