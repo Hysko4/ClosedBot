@@ -1,6 +1,10 @@
 // Canales: conversaciones con varios agentes. El encargado responde a lo que no nombra a nadie y
 // reparte el trabajo; con @Nombre se le habla a un agente en particular (o a todos con @todos).
 
+/** Agentes por canal como máximo, y largo del nombre y del tema. */
+export const MAX_CHANNEL_MEMBERS = 12;
+export const CHANNEL_LIMITS = { name: 60, topic: 300 } as const;
+
 /** Quita tildes y mayúsculas para comparar nombres («@Diseñador» = «@disenador»). */
 export function foldText(text: string): string {
   return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();

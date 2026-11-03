@@ -256,7 +256,7 @@ test("política de permisos por nivel de acceso", async () => {
   assert.equal(await decide(total, "AskUserQuestion", {}), "deny");
 });
 
-test("Claude: solo Claude Bot recibe las herramientas para crear y ajustar agentes, también al reanudar", async () => {
+test("Claude: solo Claude Bot recibe las herramientas para crear y ajustar agentes y crear canales, también al reanudar", async () => {
   const { h, recorder } = await claudeHarness("linux", true);
   try {
     const mainId = h.service.mainAgentId() as string;
@@ -267,7 +267,7 @@ test("Claude: solo Claude Bot recibe las herramientas para crear y ajustar agent
     }
     const [mainOptions, claraOptions] = recorder.options as [Options, Options];
     const base = ["ask_user", "create_routine", "delete_routine", "list_agents", "list_routines", "send_message"];
-    assert.deepEqual(await teamToolNames(mainOptions), [...base, "create_agent", "update_agent"].sort());
+    assert.deepEqual(await teamToolNames(mainOptions), [...base, "create_agent", "create_channel", "update_agent"].sort());
     assert.deepEqual(await teamToolNames(claraOptions), base);
     assert.match((mainOptions.systemPrompt as { append: string }).append, /Eres el bot principal de ClosedBot/);
     assert.doesNotMatch((claraOptions.systemPrompt as { append: string }).append, /bot principal/);

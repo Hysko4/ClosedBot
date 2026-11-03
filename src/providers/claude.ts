@@ -20,13 +20,16 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { CHANNEL_LIMITS, MAX_CHANNEL_MEMBERS } from "../channels.js";
 import { MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES } from "../schedule.js";
 import {
   AGENT_FIELD_HELP,
   AGENT_LIMITS,
   AGENT_PROVIDERS,
   ASK_USER_DESCRIPTION,
+  CHANNEL_FIELD_HELP,
   CREATE_AGENT_DESCRIPTION,
+  CREATE_CHANNEL_DESCRIPTION,
   CREATE_ROUTINE_DESCRIPTION,
   DELETE_ROUTINE_DESCRIPTION,
   LIST_AGENTS_DESCRIPTION,
@@ -38,6 +41,7 @@ import {
   TEAM_TOOLS,
   TOOL_ASK_USER,
   TOOL_CREATE_AGENT,
+  TOOL_CREATE_CHANNEL,
   TOOL_CREATE_ROUTINE,
   TOOL_DELETE_ROUTINE,
   TOOL_LIST_AGENTS,
@@ -673,6 +677,17 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
           model: z.string().max(AGENT_LIMITS.model).optional().describe("Modelo nuevo; vacío vuelve al modelo por defecto."),
         },
         (args) => call(TOOL_UPDATE_AGENT, args),
+      ),
+      tool(
+        TOOL_CREATE_CHANNEL,
+        CREATE_CHANNEL_DESCRIPTION,
+        {
+          name: z.string().min(1).max(CHANNEL_LIMITS.name).describe(CHANNEL_FIELD_HELP.name),
+          members: z.array(z.string().min(1)).min(1).max(MAX_CHANNEL_MEMBERS).describe(CHANNEL_FIELD_HELP.members),
+          lead: z.string().min(1).optional().describe(CHANNEL_FIELD_HELP.lead),
+          topic: z.string().max(CHANNEL_LIMITS.topic).optional().describe(CHANNEL_FIELD_HELP.topic),
+        },
+        (args) => call(TOOL_CREATE_CHANNEL, args),
       ),
     ];
     const allowed = new Set(names);

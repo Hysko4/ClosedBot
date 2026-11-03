@@ -1283,6 +1283,22 @@ function buildMessage(message) {
       node.hidden = true;
       return node;
     }
+    if (kind === "channel-created") {
+      const channel = findChannel(message.payload.channelId);
+      const name = channel?.name ?? message.text.match(/«(.+?)»/)?.[1] ?? "un canal";
+      const link = document.createElement(channel ? "button" : "span");
+      link.className = "what";
+      link.textContent = name;
+      if (channel) {
+        link.type = "button";
+        link.title = `Abrir el canal ${name}`;
+        link.addEventListener("click", () => navigateChannel(channel.id));
+      }
+      node.append(icon("hash"), "Creó el canal", link);
+      const members = message.payload.members ?? [];
+      if (members.length) node.append(`· ${members.join(", ")}`);
+      return node;
+    }
     if (kind === "agent-created" || kind === "agent-updated") {
       const target = findAgent(message.payload.agentId);
       const created = kind === "agent-created";

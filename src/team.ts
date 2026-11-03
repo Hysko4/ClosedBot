@@ -1,10 +1,11 @@
 /**
  * Herramientas de ClosedBot que ve cada agente: compañeros, preguntas al usuario y rutinas.
- * El bot principal (Claude Bot) tiene además las que crean y ajustan agentes.
+ * El bot principal (Claude Bot) tiene además las que crean y ajustan agentes y crean canales.
  * Codex las recibe como herramientas dinámicas (`dynamicTools` en thread/start) y
  * Claude como un servidor MCP en proceso; ambos terminan en una petición `item/tool/call`.
  */
 
+import { CHANNEL_LIMITS, MAX_CHANNEL_MEMBERS } from "./channels.js";
 import type { ProviderId } from "./providers/client.js";
 import { MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES } from "./schedule.js";
 
@@ -17,6 +18,7 @@ export const TOOL_LIST_ROUTINES = "list_routines";
 export const TOOL_DELETE_ROUTINE = "delete_routine";
 export const TOOL_CREATE_AGENT = "create_agent";
 export const TOOL_UPDATE_AGENT = "update_agent";
+export const TOOL_CREATE_CHANNEL = "create_channel";
 
 /** Herramientas de todos los agentes. */
 export const TEAM_TOOLS = [
@@ -28,8 +30,8 @@ export const TEAM_TOOLS = [
   TOOL_DELETE_ROUTINE,
 ] as const;
 
-/** Herramientas que solo tiene el bot principal: arman y ajustan los equipos. */
-export const MAIN_TOOLS = [TOOL_CREATE_AGENT, TOOL_UPDATE_AGENT] as const;
+/** Herramientas que solo tiene el bot principal: arman y ajustan los equipos, y les crean su canal. */
+export const MAIN_TOOLS = [TOOL_CREATE_AGENT, TOOL_UPDATE_AGENT, TOOL_CREATE_CHANNEL] as const;
 
 export const LIST_AGENTS_DESCRIPTION =
   "Lista los agentes de tu equipo con su id, nombre, rol, proyecto y estado (libre, trabajando o con cola).";
@@ -45,6 +47,16 @@ export const CREATE_AGENT_DESCRIPTION =
   "Crea un agente nuevo en el equipo del usuario, con nombre, rol, instrucciones permanentes y proyecto (el grupo de la barra lateral donde aparece). Antes revisa con list_agents que no exista uno parecido. Usa el mismo proyecto para todos los agentes de un equipo.";
 export const UPDATE_AGENT_DESCRIPTION =
   "Cambia el nombre, el rol, las instrucciones, el proyecto o el modelo de un agente que ya existe (indícalo por id o nombre). Solo cambia lo que pases. No sirve para cambiarte a ti mismo.";
+
+export const CREATE_CHANNEL_DESCRIPTION =
+  "Crea un canal: una conversación del usuario con varios agentes a la vez. El encargado responde lo que no nombra a nadie y reparte el trabajo; con @Nombre el usuario le habla a uno en particular. Al armar un equipo, crea su canal (uno por equipo, con el nombre del proyecto y el líder como encargado); créalo también cuando el usuario lo pida. Antes revisa con list_agents los canales que ya existen.";
+
+export const CHANNEL_FIELD_HELP = {
+  name: "Nombre del canal. Para un equipo, el de su proyecto (p. ej. «Creación de Juegos»).",
+  members: "Ids o nombres de los agentes del canal: todo el equipo (de 1 a 12). No te incluyas.",
+  lead: "Id o nombre del encargado, uno de los miembros: el líder del equipo. Si no lo indicas, el primero.",
+  topic: "Tema opcional, en una frase: de qué trata el canal.",
+} as const;
 
 export const ROUTINE_LIMITS = { name: 80, prompt: 4_000, times: 12 } as const;
 export const QUESTION_LIMITS = { question: 300, label: 80, detail: 200, minOptions: 2, maxOptions: 4 } as const;
@@ -207,6 +219,28 @@ const MAIN_DYNAMIC_TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    type: "function",
+    name: TOOL_CREATE_CHANNEL,
+    description: CREATE_CHANNEL_DESCRIPTION,
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", minLength: 1, maxLength: CHANNEL_LIMITS.name, description: CHANNEL_FIELD_HELP.name },
+        members: {
+          type: "array",
+          items: { type: "string", minLength: 1 },
+          minItems: 1,
+          maxItems: MAX_CHANNEL_MEMBERS,
+          description: CHANNEL_FIELD_HELP.members,
+        },
+        lead: { type: "string", minLength: 1, description: CHANNEL_FIELD_HELP.lead },
+        topic: { type: "string", maxLength: CHANNEL_LIMITS.topic, description: CHANNEL_FIELD_HELP.topic },
+      },
+      required: ["name", "members"],
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 /** Herramientas dinámicas de un hilo (Codex las fija al crearlo). El bot principal recibe además las de equipos. */
@@ -215,7 +249,7 @@ export function teamDynamicTools(main: boolean) {
     type: "namespace",
     name: TEAM_NAMESPACE,
     description: main
-      ? "Arma y ajusta los equipos de agentes del usuario, habla con ellos, pregúntale al usuario y programa rutinas."
+      ? "Arma y ajusta los equipos de agentes del usuario y sus canales, habla con ellos, pregúntale al usuario y programa rutinas."
       : "Habla con tus compañeros de ClosedBot, pregúntale al usuario y programa rutinas.",
     tools: main ? [...BASE_DYNAMIC_TOOLS, ...MAIN_DYNAMIC_TOOLS] : [...BASE_DYNAMIC_TOOLS],
   };
@@ -352,6 +386,30 @@ export function parseUpdateAgentArgs(value: unknown): UpdateAgentArgs {
   if (record.project !== undefined && record.project !== null) args.project = optionalText(record.project, "project", AGENT_LIMITS.project);
   if (record.model !== undefined) args.model = optionalText(record.model, "model", AGENT_LIMITS.model) || null;
   return args;
+}
+
+export interface CreateChannelArgs {
+  name: string;
+  /** Ids o nombres de los miembros, en orden. */
+  members: string[];
+  /** Id o nombre del encargado; null = el primero de los miembros. */
+  lead: string | null;
+  topic: string;
+}
+
+export function parseCreateChannelArgs(value: unknown): CreateChannelArgs {
+  const record = argsRecord(value);
+  const raw = typeof record.members === "string" ? [record.members] : record.members;
+  if (!Array.isArray(raw) || raw.length === 0 || !raw.every((item) => typeof item === "string" && item.trim())) {
+    throw new Error("`members` debe ser una lista con ids o nombres de agentes.");
+  }
+  if (raw.length > MAX_CHANNEL_MEMBERS) throw new Error(`Un canal admite hasta ${MAX_CHANNEL_MEMBERS} agentes.`);
+  return {
+    name: requiredText(record.name, "name", CHANNEL_LIMITS.name),
+    members: raw.map((item) => (item as string).trim()),
+    lead: optionalText(record.lead, "lead", 100) || null,
+    topic: optionalText(record.topic, "topic", CHANNEL_LIMITS.topic),
+  };
 }
 
 function parseProvider(value: unknown): ProviderId | null {

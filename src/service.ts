@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
-import { composeChannelInput, findMentions, uniqueName } from "./channels.js";
+import { CHANNEL_LIMITS, composeChannelInput, findMentions, MAX_CHANNEL_MEMBERS, uniqueName } from "./channels.js";
 import {
   type AgentRecord,
   AVATAR_MAX,
@@ -34,8 +34,10 @@ import { describeSchedule, nextRun, normalizeSchedule } from "./schedule.js";
 import {
   type AskUserArgs,
   type CreateAgentArgs,
+  type CreateChannelArgs,
   parseAskUserArgs,
   parseCreateAgentArgs,
+  parseCreateChannelArgs,
   parseCreateRoutineArgs,
   parseRoutineIdArgs,
   parseSendMessageArgs,
@@ -45,6 +47,7 @@ import {
   teamDynamicTools,
   TOOL_ASK_USER,
   TOOL_CREATE_AGENT,
+  TOOL_CREATE_CHANNEL,
   TOOL_CREATE_ROUTINE,
   TOOL_DELETE_ROUTINE,
   TOOL_LIST_AGENTS,
@@ -55,7 +58,7 @@ import {
 } from "./team.js";
 import { VERSION } from "./version.js";
 
-export { VERSION };
+export { CHANNEL_LIMITS, MAX_CHANNEL_MEMBERS, VERSION };
 export const PROVIDERS: ProviderId[] = [...PROVIDER_IDS];
 /** Proveedores que se pueden instalar desde Ajustes (Claude viene con la app). */
 export type InstallProvider = "codex" | "grok" | "gemini";
@@ -86,9 +89,9 @@ export const MAX_SECTIONS = 50;
 export const MAX_LIBRARY_ENTRIES = 500;
 /** Canales activos como máximo, agentes por canal y mensajes anteriores que ve cada agente. */
 export const MAX_CHANNELS = 50;
-export const MAX_CHANNEL_MEMBERS = 12;
 const CHANNEL_HISTORY = 12;
-export const CHANNEL_LIMITS = { name: 60, topic: 300 } as const;
+/** Canales que el bot principal puede crear en un mismo turno. */
+export const MAX_CHANNELS_PER_TURN = 3;
 /** Uso del plan: cada cuánto se vuelve a leer y cuánto esperar como mínimo entre lecturas. */
 const USAGE_INTERVAL_MS = 10 * 60_000;
 const USAGE_MIN_GAP_MS = 60_000;
@@ -278,8 +281,9 @@ interface TurnState {
   lastAssistantText: string;
   /** Pregunta que el agente le hizo al usuario en este turno (para la vista previa). */
   askedQuestion: string | null;
-  /** Agentes que creó en este turno (solo el bot principal). */
+  /** Agentes y canales que creó en este turno (solo el bot principal). */
   createdAgents: number;
+  createdChannels: number;
   /** Canal del encargo: lo que escriba el agente se publica allí. */
   channelId: string | null;
 }
@@ -1717,6 +1721,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       lastAssistantText: "",
       askedQuestion: null,
       createdAgents: 0,
+      createdChannels: 0,
       channelId: delivery.channelId,
     };
     // Un encargo de un canal que se movió a «Canales eliminados» ya no se atiende.
@@ -2036,12 +2041,20 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       const ready = forMain
         ? this.#providers.filter((status) => status.id !== "demo" && status.available && status.loggedIn !== false).map((status) => status.id)
         : null;
-      return toolResult({ agentes: agents, ...(ready ? { proveedoresListos: ready } : {}) });
+      // Y los canales que ya existen, para no crear dos para el mismo equipo.
+      const channels = forMain
+        ? this.listChannels().map((channel) => {
+            const names = this.#channelNames(channel);
+            return { nombre: channel.name, encargado: names.lead, miembros: names.members };
+          })
+        : null;
+      return toolResult({ agentes: agents, ...(ready ? { proveedoresListos: ready } : {}), ...(channels ? { canales: channels } : {}) });
     }
-    if (params.tool === TOOL_CREATE_AGENT || params.tool === TOOL_UPDATE_AGENT) {
+    if (params.tool === TOOL_CREATE_AGENT || params.tool === TOOL_UPDATE_AGENT || params.tool === TOOL_CREATE_CHANNEL) {
       if (senderId !== this.#mainAgentId) {
-        throw new Error("Solo el bot principal puede crear o cambiar agentes. Si hace falta, pídeselo al usuario.");
+        throw new Error("Solo el bot principal puede crear o cambiar agentes y crear canales. Si hace falta, pídeselo al usuario.");
       }
+      if (params.tool === TOOL_CREATE_CHANNEL) return this.#createChannelFromMain(senderId, parseCreateChannelArgs(params.arguments), params.turnId);
       return params.tool === TOOL_CREATE_AGENT
         ? this.#createAgentFromMain(senderId, parseCreateAgentArgs(params.arguments), params.turnId)
         : this.#updateAgentFromMain(senderId, parseUpdateAgentArgs(params.arguments), params.turnId);
@@ -2171,6 +2184,50 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       proveedor: agent.provider,
       modelo: agent.model ?? "predeterminado",
     });
+  }
+
+  /** create_channel del bot principal: crea el canal (normalmente, el de un equipo) y lo deja anotado en su conversación. */
+  #createChannelFromMain(mainId: string, args: CreateChannelArgs, turnId: string | null): DynamicToolResult {
+    const state = this.#active.get(mainId);
+    if (state && state.createdChannels >= MAX_CHANNELS_PER_TURN) {
+      throw new Error(`Ya creaste ${MAX_CHANNELS_PER_TURN} canales en este turno, el máximo por pedido.`);
+    }
+    const members = args.members.map((ref) => this.#resolveAgentRef(ref));
+    if (members.some((agent) => agent.id === mainId)) {
+      throw new Error("No te incluyas en el canal: es para el equipo. Quítate de members y vuelve a crearlo.");
+    }
+    const memberIds = [...new Set(members.map((agent) => agent.id))];
+    const lead = args.lead ? this.#resolveAgentRef(args.lead) : null;
+    if (lead && !memberIds.includes(lead.id)) {
+      throw new Error(`${lead.name} no está entre los miembros: agrégalo o elige otro encargado.`);
+    }
+    let channel: ChannelView;
+    try {
+      channel = this.createChannel({ name: args.name, topic: args.topic, memberIds, leadId: lead?.id ?? null });
+    } catch (error) {
+      if (error instanceof ServiceError && error.status === 409 && this.#store.findChannelByName(args.name.trim())) {
+        throw new Error(`${error.message} Si es el de este equipo, no hace falta otro: díselo al usuario.`);
+      }
+      throw new Error(errorText(error));
+    }
+    if (state) state.createdChannels += 1;
+    const names = this.#channelNames(channel);
+    const activity = this.#store.insertMessage({
+      agentId: mainId,
+      role: "activity",
+      text: `Creó el canal «${channel.name}» · ${names.members.join(", ")}`,
+      status: "completed",
+      turnId,
+      payload: { kind: "channel-created", channelId: channel.id, members: names.members },
+    });
+    this.#emit({ type: "message", agentId: mainId, message: activity });
+    return toolResult({ creado: true, id: channel.id, nombre: channel.name, encargado: names.lead, miembros: names.members });
+  }
+
+  /** Nombres del encargado y de los miembros de un canal. */
+  #channelNames(channel: ChannelRecord): { lead: string | null; members: string[] } {
+    const members = channel.memberIds.map((id) => this.#store.getAgent(id)).filter((item): item is AgentRecord => item !== null);
+    return { lead: members.find((member) => member.id === channel.leadId)?.name ?? null, members: members.map((member) => member.name) };
   }
 
   /** update_agent del bot principal: cambia solo lo indicado y lo deja marcado en ambas conversaciones. */

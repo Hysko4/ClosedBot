@@ -132,6 +132,60 @@ test("Claude Bot arma un equipo: crea los agentes en un proyecto, los ajusta y l
   }
 });
 
+test("Claude Bot crea el canal del equipo: con el líder de encargado, sin incluirse y sin repetirlo", async () => {
+  const h = await createHarness({ mainAgent: true });
+  try {
+    const mainId = h.service.mainAgentId() as string;
+    const reply = await talk(
+      h,
+      mainId,
+      [
+        "/crear Directora | Coordina el equipo | Creación de Juegos",
+        "/crear Programador | Escribe el código | Creación de Juegos",
+        "/canal Creación de Juegos | Directora | Programador, Directora",
+      ].join("\n"),
+    );
+    assert.match(reply, /Creé el canal «Creación de Juegos»\./);
+    const directora = h.store.findAgentByName("Directora");
+    const programador = h.store.findAgentByName("Programador");
+    assert.ok(directora && programador);
+    const channels = h.service.listChannels();
+    assert.equal(channels.length, 1);
+    const channel = channels[0]!;
+    assert.equal(channel.name, "Creación de Juegos");
+    assert.equal(channel.leadId, directora.id, "el líder queda de encargado");
+    assert.deepEqual(channel.memberIds, [programador.id, directora.id]);
+    const activity = h.service.listMessages(mainId).find((item) => item.payload?.kind === "channel-created");
+    assert.equal(activity?.text, "Creó el canal «Creación de Juegos» · Programador, Directora");
+    assert.equal(activity?.payload?.channelId, channel.id);
+
+    // list_agents le muestra los canales que ya hay, para no repetirlos.
+    const seen = JSON.parse(/Compañeros: (\{.*\})/.exec(await talk(h, mainId, "/equipo"))?.[1] ?? "{}");
+    assert.deepEqual(seen.canales, [{ nombre: "Creación de Juegos", encargado: "Directora", miembros: ["Programador", "Directora"] }]);
+
+    // Errores claros para el bot, sin crear nada: repetido, él mismo como miembro, encargado de fuera y un agente que no existe.
+    const again = await talk(h, mainId, "/canal Creación de Juegos | Directora | Directora, Programador");
+    assert.match(again, /Ya existe un canal llamado «Creación de Juegos»\. Si es el de este equipo, no hace falta otro/);
+    const self = await talk(h, mainId, `/canal Otro | Directora | Directora, ${MAIN_AGENT_NAME}`);
+    assert.match(self, /No te incluyas en el canal/);
+    const outsider = await talk(h, mainId, "/canal Otro | Directora | Programador");
+    assert.match(outsider, /Directora no está entre los miembros/);
+    const unknown = await talk(h, mainId, "/canal Otro | | Nadie");
+    assert.match(unknown, /No existe el agente «Nadie»/);
+    assert.equal(h.service.listChannels().length, 1);
+
+    // Sin encargado, queda el primero; y otro agente no puede crear canales.
+    await talk(h, mainId, "/canal Revisión | | Programador, Directora");
+    assert.equal(h.service.listChannels().find((item) => item.name === "Revisión")?.leadId, programador.id);
+    const ana = h.service.createAgent({ name: "Ana", provider: "demo" });
+    const refused = await talk(h, ana.id, "/canal Intrusos | | Ana");
+    assert.match(refused, /No pude crear el canal «Intrusos»: Solo el bot principal puede crear o cambiar agentes y crear canales/);
+    assert.equal(h.service.listChannels().length, 2);
+  } finally {
+    await h.close();
+  }
+});
+
 test("solo el bot principal crea agentes, y tiene un tope por pedido", async () => {
   const h = await createHarness({ mainAgent: true });
   try {

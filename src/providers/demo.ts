@@ -5,6 +5,7 @@ import {
   TEAM_NAMESPACE,
   TOOL_ASK_USER,
   TOOL_CREATE_AGENT,
+  TOOL_CREATE_CHANNEL,
   TOOL_CREATE_ROUTINE,
   TOOL_LIST_AGENTS,
   TOOL_LIST_ROUTINES,
@@ -199,6 +200,23 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
           notes.push(`Le cambié el rol a ${agent}.`);
         } catch (error) {
           notes.push(`No pude ajustar a ${agent}: ${errorMessage(error)}`);
+        }
+      }
+      for (const match of body.matchAll(/^\/canal\s+(.+)$/gm)) {
+        const [name = "", lead = "", members = ""] = (match[1] ?? "").split("|").map((part) => part.trim());
+        const args = {
+          name,
+          members: members
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+          ...(lead ? { lead } : {}),
+        };
+        try {
+          await this.#callTool(threadId, state.turnId, TOOL_CREATE_CHANNEL, args);
+          notes.push(`Creé el canal «${name}».`);
+        } catch (error) {
+          notes.push(`No pude crear el canal «${name}»: ${errorMessage(error)}`);
         }
       }
       if (/(^|\s)\/rutinas(\s|$)/.test(body)) {
