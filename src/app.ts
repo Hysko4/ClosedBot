@@ -314,6 +314,60 @@ export function createApp(options: AppOptions): App {
 
   route("POST", "/api/read-all", () => ({ changed: service.markAllRead() }));
 
+  // ---------- lo que sabe cada agente ----------
+
+  route("GET", "/api/agents/:id/instructions", (ctx) => service.getInstructions(param(ctx, 0)));
+
+  route("PUT", "/api/agents/:id/instructions", async (ctx) => {
+    const body = await readJson(ctx.req);
+    return { agent: service.saveInstructions(param(ctx, 0), body.text, body.base) };
+  });
+
+  route("GET", "/api/agents/:id/memories", (ctx) => ({ memories: service.listMemories(param(ctx, 0)) }));
+
+  route("POST", "/api/agents/:id/memories", async (ctx) => {
+    const body = await readJson(ctx.req);
+    ctx.res.statusCode = 201;
+    return { memory: service.createMemory(param(ctx, 0), { text: body.text, always: body.always }) };
+  });
+
+  route("PATCH", "/api/memories/:id", async (ctx) => {
+    const body = await readJson(ctx.req);
+    return { memory: service.updateMemory(param(ctx, 0), { text: body.text, always: body.always }) };
+  });
+
+  route("DELETE", "/api/memories/:id", (ctx) => {
+    service.deleteMemory(param(ctx, 0));
+    return NO_CONTENT;
+  });
+
+  route("GET", "/api/agents/:id/skills", (ctx) => ({ skills: service.listSkills(param(ctx, 0)) }));
+
+  route("POST", "/api/agents/:id/skills", async (ctx) => {
+    const body = await readJson(ctx.req);
+    ctx.res.statusCode = 201;
+    return { skill: service.createSkill(param(ctx, 0), { name: body.name, description: body.description, body: body.body }) };
+  });
+
+  // Una habilidad va por su carpeta (?id=.agents/skills/nombre), que lleva «/».
+  route("GET", "/api/agents/:id/skill", (ctx) => service.getSkill(param(ctx, 0), skillParam(ctx.url)));
+
+  route("PUT", "/api/agents/:id/skill", async (ctx) => {
+    const body = await readJson(ctx.req);
+    return { skill: service.saveSkill(param(ctx, 0), skillParam(ctx.url), body.text) };
+  });
+
+  route("PATCH", "/api/agents/:id/skill", async (ctx) => {
+    const body = await readJson(ctx.req);
+    if (typeof body.enabled !== "boolean") throw new HttpError(400, "Indica enabled: true o false.");
+    return { skill: service.setSkillEnabled(param(ctx, 0), skillParam(ctx.url), body.enabled) };
+  });
+
+  route("DELETE", "/api/agents/:id/skill", (ctx) => {
+    service.deleteSkill(param(ctx, 0), skillParam(ctx.url));
+    return NO_CONTENT;
+  });
+
   // ---------- biblioteca y carpetas ----------
 
   route("GET", "/api/agents/:id/library", (ctx) =>
@@ -550,6 +604,8 @@ export function createApp(options: AppOptions): App {
   });
 
   route("POST", "/api/routines/:id/run", (ctx) => ({ routine: service.runRoutineNow(param(ctx, 0)) }));
+
+  route("GET", "/api/routines/:id/runs", (ctx) => ({ runs: service.routineRuns(param(ctx, 0)) }));
 
   // ---------- eventos en vivo (SSE) ----------
 
@@ -816,6 +872,8 @@ function agentInput(body: Record<string, unknown>, creating: boolean): Partial<A
   if (name !== undefined) input.name = name;
   const role = text("role");
   if (role !== undefined) input.role = role;
+  const description = text("description");
+  if (description !== undefined) input.description = description;
   const instructions = text("instructions");
   if (instructions !== undefined) input.instructions = instructions;
   const provider = text("provider");
@@ -845,6 +903,12 @@ function agentInput(body: Record<string, unknown>, creating: boolean): Partial<A
     if (!isRecord(body.voice)) throw new HttpError(400, "El campo voice debe ser un objeto.");
     input.voice = body.voice as Partial<VoiceSettings>;
   }
+  if (body.notify !== undefined) {
+    if (body.notify !== null && body.notify !== "all" && body.notify !== "needs" && body.notify !== "none") {
+      throw new HttpError(400, "«Avisarme» debe ser all, needs, none o null.");
+    }
+    input.notify = body.notify;
+  }
   if (creating && (input.name === undefined || input.provider === undefined)) {
     throw new HttpError(400, "Indica al menos el nombre y el proveedor.");
   }
@@ -855,6 +919,12 @@ function header(req: IncomingMessage, name: string): string | null {
   const value = req.headers[name];
   if (Array.isArray(value)) return value[0] ?? null;
   return value ?? null;
+}
+
+function skillParam(url: URL): string {
+  const id = url.searchParams.get("id");
+  if (!id) throw new HttpError(400, "Indica la habilidad (?id=…).");
+  return id;
 }
 
 function libraryRoot(value: string | null): LibraryRoot {

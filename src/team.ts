@@ -1,11 +1,13 @@
 /**
- * Herramientas de ClosedBot que ve cada agente: compañeros, preguntas al usuario y rutinas.
+ * Herramientas de ClosedBot que ve cada agente: compañeros, preguntas al usuario, rutinas y recuerdos.
  * El bot principal (Claude Bot) tiene además las que crean y ajustan agentes y crean canales.
  * Codex las recibe como herramientas dinámicas (`dynamicTools` en thread/start) y
  * Claude como un servidor MCP en proceso; ambos terminan en una petición `item/tool/call`.
  */
 
+import { INSTRUCTIONS_MAX } from "./agent-files.js";
 import { CHANNEL_LIMITS, MAX_CHANNEL_MEMBERS } from "./channels.js";
+import { MEMORY_LIMITS } from "./memories.js";
 import type { ProviderId } from "./providers/client.js";
 import { MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES } from "./schedule.js";
 
@@ -19,6 +21,14 @@ export const TOOL_DELETE_ROUTINE = "delete_routine";
 export const TOOL_CREATE_AGENT = "create_agent";
 export const TOOL_UPDATE_AGENT = "update_agent";
 export const TOOL_CREATE_CHANNEL = "create_channel";
+export const TOOL_REMEMBER = "remember";
+export const TOOL_FORGET_MEMORY = "forget_memory";
+export const TOOL_SEARCH_MEMORIES = "search_memories";
+export const TOOL_LIST_MEMORIES = "list_memories";
+export const TOOL_SET_MEMORY_INCLUSION = "set_memory_inclusion";
+
+/** Herramientas de recuerdos (todos los agentes). */
+export const MEMORY_TOOLS = [TOOL_REMEMBER, TOOL_FORGET_MEMORY, TOOL_SEARCH_MEMORIES, TOOL_LIST_MEMORIES, TOOL_SET_MEMORY_INCLUSION] as const;
 
 /** Herramientas de todos los agentes. */
 export const TEAM_TOOLS = [
@@ -28,6 +38,7 @@ export const TEAM_TOOLS = [
   TOOL_CREATE_ROUTINE,
   TOOL_LIST_ROUTINES,
   TOOL_DELETE_ROUTINE,
+  ...MEMORY_TOOLS,
 ] as const;
 
 /** Herramientas que solo tiene el bot principal: arman y ajustan los equipos, y les crean su canal. */
@@ -44,9 +55,17 @@ export const CREATE_ROUTINE_DESCRIPTION =
 export const LIST_ROUTINES_DESCRIPTION = "Lista tus rutinas con su id, nombre, horario, si están activas y su próxima ejecución.";
 export const DELETE_ROUTINE_DESCRIPTION = "Elimina una de tus rutinas por su id (míralo con list_routines).";
 export const CREATE_AGENT_DESCRIPTION =
-  "Crea un agente nuevo en el equipo del usuario, con nombre, rol, instrucciones permanentes y proyecto (el grupo de la barra lateral donde aparece). Antes revisa con list_agents que no exista uno parecido. Usa el mismo proyecto para todos los agentes de un equipo.";
+  "Crea un agente nuevo en el equipo del usuario, con nombre, rol, descripción, instrucciones permanentes y proyecto (el grupo de la barra lateral donde aparece). Antes revisa con list_agents que no exista uno parecido. Usa el mismo proyecto para todos los agentes de un equipo.";
 export const UPDATE_AGENT_DESCRIPTION =
-  "Cambia el nombre, el rol, las instrucciones, el proyecto o el modelo de un agente que ya existe (indícalo por id o nombre). Solo cambia lo que pases. No sirve para cambiarte a ti mismo.";
+  "Cambia el nombre, el rol, la descripción, las instrucciones, el proyecto o el modelo de un agente que ya existe (indícalo por id o nombre). Solo cambia lo que pases. No sirve para cambiarte a ti mismo.";
+export const REMEMBER_DESCRIPTION =
+  "Guarda un recuerdo duradero: un dato, preferencia o decisión del usuario que te servirá en otras conversaciones (no lo uses para notas de la tarea actual). Con always true se usa siempre (va en tus instrucciones desde tu próximo mensaje); si no, lo buscas con search_memories cuando haga falta. Antes de guardar, revisa que no lo tengas ya.";
+export const FORGET_MEMORY_DESCRIPTION = "Borra uno de tus recuerdos por su id (míralo con list_memories o search_memories). Úsalo si quedó viejo, es falso o el usuario te pide olvidarlo.";
+export const SEARCH_MEMORIES_DESCRIPTION =
+  "Busca entre tus recuerdos los que tratan de un tema (palabras clave, p. ej. «correo cliente factura»). Úsala antes de responder algo en lo que el usuario te pudo haber dado preferencias o datos antes.";
+export const LIST_MEMORIES_DESCRIPTION = "Lista todos tus recuerdos con su id y si se usan siempre o solo si hacen falta.";
+export const SET_MEMORY_INCLUSION_DESCRIPTION =
+  "Cambia si un recuerdo se usa siempre (always true: va en tus instrucciones) o solo cuando lo buscas (always false). Deja en «siempre» solo lo que sirve en casi todas tus tareas.";
 
 export const CREATE_CHANNEL_DESCRIPTION =
   "Crea un canal: una conversación del usuario con varios agentes a la vez. El encargado responde lo que no nombra a nadie y reparte el trabajo; con @Nombre el usuario le habla a uno en particular. Al armar un equipo, crea su canal (uno por equipo, con el nombre del proyecto y el líder como encargado); créalo también cuando el usuario lo pida. Antes revisa con list_agents los canales que ya existen.";
@@ -60,13 +79,14 @@ export const CHANNEL_FIELD_HELP = {
 
 export const ROUTINE_LIMITS = { name: 80, prompt: 4_000, times: 12 } as const;
 export const QUESTION_LIMITS = { question: 300, label: 80, detail: 200, minOptions: 2, maxOptions: 4 } as const;
-export const AGENT_LIMITS = { name: 60, role: 200, instructions: 8_000, project: 60, model: 120 } as const;
+export const AGENT_LIMITS = { name: 60, role: 200, description: 2_000, instructions: INSTRUCTIONS_MAX, project: 60, model: 120 } as const;
 /** Proveedores que el bot principal puede elegir para un agente nuevo. */
 export const AGENT_PROVIDERS = ["claude", "codex", "grok", "gemini"] as const;
 
 export const AGENT_FIELD_HELP = {
   name: "Nombre corto, claro y único, p. ej. «Diseñador de Niveles».",
   role: "Su rol en una frase.",
+  description: "Descripción opcional en dos o tres frases: para qué sirve y qué entrega. La ven el usuario en su ficha y los demás agentes.",
   instructions: "Instrucciones permanentes: qué hace, qué entrega, con quién coordina y cuándo preguntarle al usuario.",
   project: "Proyecto (grupo de la barra lateral), p. ej. «Creación de Juegos». El mismo para todo el equipo.",
   provider: "Proveedor del agente: uno de proveedoresListos (lo da list_agents). Si no lo indicas, el tuyo.",
@@ -180,6 +200,59 @@ const BASE_DYNAMIC_TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    type: "function",
+    name: TOOL_REMEMBER,
+    description: REMEMBER_DESCRIPTION,
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", minLength: 1, maxLength: MEMORY_LIMITS.text, description: "Lo que debes recordar, en una o dos frases claras." },
+        always: { type: "boolean", description: "true: se usa siempre. false o sin indicar: solo cuando lo buscas." },
+      },
+      required: ["text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: TOOL_FORGET_MEMORY,
+    description: FORGET_MEMORY_DESCRIPTION,
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", minLength: 1 } },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: TOOL_SEARCH_MEMORIES,
+    description: SEARCH_MEMORIES_DESCRIPTION,
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string", minLength: 1, maxLength: 300, description: "Palabras clave del tema." } },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: TOOL_LIST_MEMORIES,
+    description: LIST_MEMORIES_DESCRIPTION,
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    type: "function",
+    name: TOOL_SET_MEMORY_INCLUSION,
+    description: SET_MEMORY_INCLUSION_DESCRIPTION,
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", minLength: 1 }, always: { type: "boolean" } },
+      required: ["id", "always"],
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 const MAIN_DYNAMIC_TOOLS = [
@@ -192,6 +265,7 @@ const MAIN_DYNAMIC_TOOLS = [
       properties: {
         name: { type: "string", minLength: 1, maxLength: AGENT_LIMITS.name, description: AGENT_FIELD_HELP.name },
         role: { type: "string", minLength: 1, maxLength: AGENT_LIMITS.role, description: AGENT_FIELD_HELP.role },
+        description: { type: "string", maxLength: AGENT_LIMITS.description, description: AGENT_FIELD_HELP.description },
         instructions: { type: "string", minLength: 1, maxLength: AGENT_LIMITS.instructions, description: AGENT_FIELD_HELP.instructions },
         project: { type: "string", minLength: 1, maxLength: AGENT_LIMITS.project, description: AGENT_FIELD_HELP.project },
         provider: { type: "string", enum: [...AGENT_PROVIDERS], description: AGENT_FIELD_HELP.provider },
@@ -211,6 +285,7 @@ const MAIN_DYNAMIC_TOOLS = [
         agent: { type: "string", minLength: 1, description: "Id o nombre actual del agente." },
         name: { type: "string", minLength: 1, maxLength: AGENT_LIMITS.name, description: "Nombre nuevo." },
         role: { type: "string", minLength: 1, maxLength: AGENT_LIMITS.role, description: AGENT_FIELD_HELP.role },
+        description: { type: "string", maxLength: AGENT_LIMITS.description, description: "Descripción nueva; vacía la borra." },
         instructions: { type: "string", minLength: 1, maxLength: AGENT_LIMITS.instructions, description: AGENT_FIELD_HELP.instructions },
         project: { type: "string", maxLength: AGENT_LIMITS.project, description: "Proyecto nuevo; vacío lo saca de su grupo." },
         model: { type: "string", maxLength: AGENT_LIMITS.model, description: "Modelo nuevo; vacío vuelve al modelo por defecto." },
@@ -249,8 +324,8 @@ export function teamDynamicTools(main: boolean) {
     type: "namespace",
     name: TEAM_NAMESPACE,
     description: main
-      ? "Arma y ajusta los equipos de agentes del usuario y sus canales, habla con ellos, pregúntale al usuario y programa rutinas."
-      : "Habla con tus compañeros de ClosedBot, pregúntale al usuario y programa rutinas.",
+      ? "Arma y ajusta los equipos de agentes del usuario y sus canales, habla con ellos, pregúntale al usuario, programa rutinas y guarda recuerdos."
+      : "Habla con tus compañeros de ClosedBot, pregúntale al usuario, programa rutinas y guarda recuerdos.",
     tools: main ? [...BASE_DYNAMIC_TOOLS, ...MAIN_DYNAMIC_TOOLS] : [...BASE_DYNAMIC_TOOLS],
   };
 }
@@ -345,6 +420,7 @@ export function parseRoutineIdArgs(value: unknown): { id: string } {
 export interface CreateAgentArgs {
   name: string;
   role: string;
+  description: string;
   instructions: string;
   project: string;
   /** null = el mismo proveedor del bot principal. */
@@ -357,6 +433,7 @@ export function parseCreateAgentArgs(value: unknown): CreateAgentArgs {
   return {
     name: requiredText(record.name, "name", AGENT_LIMITS.name),
     role: requiredText(record.role, "role", AGENT_LIMITS.role),
+    description: optionalText(record.description, "description", AGENT_LIMITS.description),
     instructions: requiredText(record.instructions, "instructions", AGENT_LIMITS.instructions),
     project: requiredText(record.project, "project", AGENT_LIMITS.project),
     provider: parseProvider(record.provider),
@@ -368,6 +445,8 @@ export interface UpdateAgentArgs {
   agent: string;
   name?: string;
   role?: string;
+  /** "" borra la descripción. */
+  description?: string;
   instructions?: string;
   /** "" saca al agente de su proyecto. */
   project?: string;
@@ -380,6 +459,9 @@ export function parseUpdateAgentArgs(value: unknown): UpdateAgentArgs {
   const args: UpdateAgentArgs = { agent: requiredText(record.agent, "agent", 100) };
   if (record.name !== undefined && record.name !== null) args.name = requiredText(record.name, "name", AGENT_LIMITS.name);
   if (record.role !== undefined && record.role !== null) args.role = requiredText(record.role, "role", AGENT_LIMITS.role);
+  if (record.description !== undefined && record.description !== null) {
+    args.description = optionalText(record.description, "description", AGENT_LIMITS.description);
+  }
   if (record.instructions !== undefined && record.instructions !== null) {
     args.instructions = requiredText(record.instructions, "instructions", AGENT_LIMITS.instructions);
   }
@@ -410,6 +492,29 @@ export function parseCreateChannelArgs(value: unknown): CreateChannelArgs {
     lead: optionalText(record.lead, "lead", 100) || null,
     topic: optionalText(record.topic, "topic", CHANNEL_LIMITS.topic),
   };
+}
+
+export function parseRememberArgs(value: unknown): { text: string; always: boolean } {
+  const record = argsRecord(value);
+  const text = requiredText(record.text, "text", MEMORY_LIMITS.text);
+  if (record.always !== undefined && record.always !== null && typeof record.always !== "boolean") throw new Error("`always` debe ser true o false.");
+  return { text, always: record.always === true };
+}
+
+export function parseMemoryIdArgs(value: unknown): { id: string } {
+  const record = argsRecord(value);
+  return { id: requiredText(record.id, "id", 100) };
+}
+
+export function parseSearchMemoriesArgs(value: unknown): { query: string } {
+  const record = argsRecord(value);
+  return { query: requiredText(record.query, "query", 300) };
+}
+
+export function parseMemoryInclusionArgs(value: unknown): { id: string; always: boolean } {
+  const record = argsRecord(value);
+  if (typeof record.always !== "boolean") throw new Error("`always` debe ser true o false.");
+  return { id: requiredText(record.id, "id", 100), always: record.always };
 }
 
 function parseProvider(value: unknown): ProviderId | null {

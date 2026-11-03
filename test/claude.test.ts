@@ -268,7 +268,19 @@ test("Claude: solo Claude Bot recibe las herramientas para crear y ajustar agent
       await waitFor(() => h.store.getMessage(message.id)?.status === "completed", 5_000, "turno de Claude");
     }
     const [mainOptions, claraOptions] = recorder.options as [Options, Options];
-    const base = ["ask_user", "create_routine", "delete_routine", "list_agents", "list_routines", "send_message"];
+    const base = [
+      "ask_user",
+      "create_routine",
+      "delete_routine",
+      "forget_memory",
+      "list_agents",
+      "list_memories",
+      "list_routines",
+      "remember",
+      "search_memories",
+      "send_message",
+      "set_memory_inclusion",
+    ];
     assert.deepEqual(await teamToolNames(mainOptions), [...base, "create_agent", "create_channel", "update_agent"].sort());
     assert.deepEqual(await teamToolNames(claraOptions), base);
     assert.match((mainOptions.systemPrompt as { append: string }).append, /Eres el bot principal de ClosedBot/);

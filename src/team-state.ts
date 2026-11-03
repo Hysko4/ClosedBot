@@ -10,6 +10,7 @@ export interface TeamAgentInfo {
   id: string;
   name: string;
   role: string;
+  description?: string;
   instructions: string;
   project: string;
   provider: string;
@@ -29,6 +30,8 @@ export interface TeamChannelInfo {
 export interface AgentSnapshot {
   name: string;
   role: string;
+  /** Huella de la descripción («» si no tiene). */
+  description: string;
   /** Huella de las instrucciones: basta para avisar que cambiaron. */
   instructions: string;
   project: string;
@@ -66,6 +69,7 @@ export function snapshotAgent(agent: TeamAgentInfo): AgentSnapshot {
   return {
     name: agent.name,
     role: agent.role,
+    description: agent.description?.trim() ? fingerprint(agent.description) : "",
     instructions: fingerprint(agent.instructions),
     project: agent.project,
     provider: agent.provider,
@@ -97,6 +101,7 @@ export function parseTeamSnapshot(raw: string | null): TeamSnapshot | null {
       snapshot.agents[id] = {
         name: item.name,
         role: text(item.role),
+        description: text(item.description),
         instructions: text(item.instructions),
         project: text(item.project),
         provider: text(item.provider),
@@ -184,6 +189,9 @@ export function describeChanges(before: TeamSnapshot, after: TeamSnapshot, label
     if (old.role !== now.role) {
       const role = oneLine(now.role, ROLE_MAX);
       lines.push(role ? `Cambió el rol de ${quote(now.name)}: ${quote(role)}.` : `Le quitó el rol a ${quote(now.name)}.`);
+    }
+    if (old.description !== now.description) {
+      lines.push(now.description ? `Cambió la descripción de ${quote(now.name)} (léela con list_agents).` : `Le quitó la descripción a ${quote(now.name)}.`);
     }
     if (old.instructions !== now.instructions) lines.push(`Cambió las instrucciones de ${quote(now.name)} (léelas con list_agents).`);
     if (old.provider !== now.provider) {

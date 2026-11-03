@@ -224,7 +224,7 @@ test("Store: una base de la 0.5 recibe los canales sin perder la cola", () => {
     old.close();
     const store = new Store(path);
     try {
-      assert.equal(store.getMeta("schema_version"), "4");
+      assert.equal(store.getMeta("schema_version"), "5");
       assert.equal(store.getDelivery("d1")?.channelId, null);
       assert.equal(store.countQueued("a1"), 1, "la cola sigue igual");
       assert.deepEqual(
@@ -287,7 +287,7 @@ test("Store: una base de la versión 0.1 se actualiza sin perder datos", () => {
       });
       assert.equal(carla.avatar, 2);
       assert.equal(store.getMessage("m1")?.payload, null);
-      assert.equal(store.getMeta("schema_version"), "4");
+      assert.equal(store.getMeta("schema_version"), "5");
       assert.equal(store.getMessage("m1")?.channelId, null, "los mensajes viejos no son de ningún canal");
       assert.deepEqual(store.listChannels(), []);
       assert.deepEqual(store.listRoutines(), []);

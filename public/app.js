@@ -65,7 +65,6 @@ let events = null;
 let reconnectTimer = null;
 let toastTimer = null;
 let readTimer = null;
-let editingAgentId = null;
 let routinesFilter = null;
 let recognition = null;
 let dictation = null; // { engine: "browser" | "local", mode: "dictate" | "voice", agentId, cancelled, … }
@@ -134,6 +133,11 @@ async function uploadFile(agentId, file) {
 async function boot() {
   if ("serviceWorker" in navigator && window.isSecureContext) {
     navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    // Al tocar un aviso del sistema («Avisarme»), el service worker pide abrir esa conversación.
+    navigator.serviceWorker.addEventListener("message", (event) => {
+      const hash = event.data?.type === "open" ? event.data.hash : null;
+      if (typeof hash === "string" && /^#\/[ac]\/[^/?#]+$/.test(hash)) location.hash = hash;
+    });
   }
   bindUi();
   renderMascots();
@@ -387,6 +391,21 @@ function handleEvent(event) {
       break;
     case "notice":
       if (!event.agentId || event.agentId !== state.currentId) showToast(event.message, event.level === "error" ? "error" : "info");
+      break;
+    case "alert":
+      void showAlert(event);
+      break;
+    case "memories":
+      if (details.agentId === event.agentId) {
+        details.memories = { agentId: event.agentId, items: event.memories };
+        renderDetailsIfOpen();
+      }
+      break;
+    case "skills":
+      if (details.agentId === event.agentId) {
+        details.skills = { agentId: event.agentId, items: event.skills };
+        renderDetailsIfOpen();
+      }
       break;
     default:
       break;
@@ -701,6 +720,14 @@ const ICONS = {
   restore: ["M5 12a7 7 0 1 0 2.1-5", "M5 4.5V9h4.5"],
   select: ["M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16", "M8.6 12.3l2.3 2.3 4.6-4.9"],
   dash: ["M7.5 12h9"],
+  cpu: ["M8 6.5h8a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H8A1.5 1.5 0 0 1 6.5 16V8A1.5 1.5 0 0 1 8 6.5z", "M10 10h4v4h-4z", "M10 4v2.5M14 4v2.5M10 17.5V20M14 17.5V20M4 10h2.5M4 14h2.5M17.5 10H20M17.5 14H20"],
+  book: ["M12 6.8C10.2 5.5 7.7 4.8 4.5 4.8v12.6c3.2 0 5.7.7 7.5 2 1.8-1.3 4.3-2 7.5-2V4.8c-3.2 0-5.7.7-7.5 2z", "M12 6.8v12.6"],
+  bookmark: ["M7 4.5h10v15l-5-3.6-5 3.6z"],
+  bell: ["M5.5 17h13l-1.6-2V11a4.9 4.9 0 0 0-9.8 0v4z", "M10.2 19.6a1.9 1.9 0 0 0 3.6 0"],
+  sliders: ["M4.5 7h9M17.5 7h2", "M15.5 5v4", "M4.5 12h2M10.5 12h9", "M8.5 10v4", "M4.5 17h7M15.5 17h4", "M13.5 15v4"],
+  shield: ["M12 3.8l7 2.7v5.2c0 4.2-2.9 7.3-7 8.5-4.1-1.2-7-4.3-7-8.5V6.5z", "M9.2 12l2 2 3.8-3.9"],
+  arrowUp: ["M12 18.5V5.8", "M6.8 11L12 5.8 17.2 11"],
+  arrowDown: ["M12 5.5v12.7", "M6.8 13l5.2 5.2 5.2-5.2"],
 };
 
 function icon(name, className = "") {
@@ -2830,7 +2857,7 @@ async function agentAction(action, agentId = state.currentId) {
   const path = `/api/agents/${encodeURIComponent(agent.id)}`;
   try {
     if (action === "edit") {
-      await openAgentDialog(agent);
+      openDetails(agent.id, "profile");
     } else if (action === "routines") {
       openRoutines(agent.id);
     } else if (action === "pause") {
@@ -4124,41 +4151,15 @@ async function stopAgent() {
   }
 }
 
-// ---------- diálogo de agente ----------
-
-async function openAgentDialog(agent = null) {
-  editingAgentId = agent?.id ?? null;
-  const form = $("#agent-form");
-  form.reset();
-  $("#agent-error").textContent = "";
-  $("#agent-dialog-title").textContent = agent ? `Editar a ${agent.name}` : "Nuevo agente";
-  const main = Boolean(agent?.main);
-  $("#project-field").hidden = main;
-  $("#instructions-label").textContent = main ? "Tus preferencias para armar equipos" : "Instrucciones permanentes";
-  form.elements.instructions.placeholder = main
-    ? "Opcional. Ej.: equipos de 3 agentes como máximo; usa Sonnet para tareas simples; escríbeme siempre en español."
-    : "Cómo quieres que trabaje, qué debe priorizar, cuándo pedir ayuda…";
-  form.elements.name.value = agent?.name ?? "";
-  form.elements.project.value = agent ? agent.project : (findAgent(state.currentId)?.project ?? "");
-  form.elements.role.placeholder = main ? "Ej.: Bot principal: arma y coordina mis equipos" : "Ej.: Investigadora, Programador, Revisora";
-  form.elements.role.value = agent?.role ?? "";
-  form.elements.instructions.value = agent?.instructions ?? "";
-  form.elements.access.value = agent?.access ?? "carpeta";
-  $("#project-options").replaceChildren(...allSections().map((section) => new Option(section, section)));
-  fillProviders(agent?.provider);
-  updateAccessWarning();
-  openDialog($("#agent-dialog"));
-  await refreshModelOptions(agent?.model ?? "", agent?.effort ?? "");
-  if (!coarsePointer) form.elements.name.focus();
-}
+// ---------- proveedor, modelo y razonamiento (ficha → Modelo) ----------
 
 /** Proveedor para un agente nuevo: el primero con IA instalado y con sesión; si no hay, Claude (pedirá entrar). */
 function preferredProvider() {
   return state.providers.find((provider) => provider.id !== "demo" && provider.available && provider.loggedIn !== false)?.id ?? "claude";
 }
 
-function fillProviders(selected) {
-  const select = $("#agent-form").elements.provider;
+function fillProviders(form, selected) {
+  const select = form.elements.provider;
   select.replaceChildren();
   const preferred = selected ?? preferredProvider();
   for (const provider of state.providers) {
@@ -4171,19 +4172,17 @@ function fillProviders(selected) {
     select.append(option);
   }
   select.value = preferred;
-  updateProviderHint();
+  updateProviderHint(form);
 }
 
-function updateProviderHint() {
-  const providerId = $("#agent-form").elements.provider.value;
-  const provider = state.providers.find((item) => item.id === providerId);
+function updateProviderHint(form) {
+  const provider = state.providers.find((item) => item.id === form.elements.provider.value);
   const hint = $("#provider-hint");
-  hint.textContent = provider?.detail ?? "";
-  hint.dataset.tone = provider && (!provider.available || provider.loggedIn === false) ? "warn" : "";
+  hint.textContent = provider && (!provider.available || provider.loggedIn === false) ? (provider.detail ?? "") : "";
+  hint.dataset.tone = hint.textContent ? "warn" : "";
 }
 
-async function refreshModelOptions(model = "", effort = "") {
-  const form = $("#agent-form");
+async function refreshModelOptions(form, model = "", effort = "") {
   const provider = form.elements.provider.value;
   const modelSelect = form.elements.model;
   modelSelect.replaceChildren(new Option("Predeterminado", ""));
@@ -4208,7 +4207,7 @@ async function refreshModelOptions(model = "", effort = "") {
   if (model && !models.some((entry) => entry.model === model)) modelSelect.append(new Option(model, model));
   modelSelect.value = model;
   modelSelect.disabled = false;
-  refreshEffortOptions(effort);
+  refreshEffortOptions(form, effort);
 }
 
 /** El modelo de la lista que tiene ese id como una de sus variantes de nivel (si no es ya uno de la lista). */
@@ -4231,10 +4230,8 @@ function modelLabel(agent) {
   return effort && entry.efforts?.includes(effort) ? `${name} · ${EFFORT_LABELS[effort] ?? effort}` : name;
 }
 
-function refreshEffortOptions(effort = "") {
-  const form = $("#agent-form");
-  const provider = form.elements.provider.value;
-  const models = state.models.get(provider) ?? [];
+function refreshEffortOptions(form, effort = "") {
+  const models = state.models.get(form.elements.provider.value) ?? [];
   const selected = models.find((entry) => entry.model === form.elements.model.value) ?? models.find((entry) => entry.isDefault) ?? models[0];
   const efforts = selected?.efforts ?? [];
   const select = form.elements.effort;
@@ -4243,59 +4240,6 @@ function refreshEffortOptions(effort = "") {
   if (effort && !efforts.includes(effort)) select.append(new Option(effort, effort));
   select.value = effort;
   select.disabled = efforts.length === 0 && !effort;
-}
-
-function updateAccessWarning() {
-  const form = $("#agent-form");
-  // Con «Acceso total para todos» en Ajustes, el nivel de cada agente no se usa: la sección no se muestra y al
-  // guardar se conserva el que tenía (vuelve a valer si un día se apaga ese ajuste).
-  const forced = Boolean(state.settings.fullAccess);
-  $("#access-field").hidden = forced;
-  $("#access-warning").hidden = forced || form.elements.access.value !== "total";
-  $("#access-hint").hidden =
-    forced || !(state.platform === "win32" && form.elements.provider.value === "claude" && form.elements.access.value === "carpeta");
-}
-
-async function saveAgent(event) {
-  event.preventDefault();
-  const form = $("#agent-form");
-  const error = $("#agent-error");
-  error.textContent = "";
-  const name = form.elements.name.value.trim();
-  if (!name) {
-    error.textContent = "Ponle un nombre al agente.";
-    form.elements.name.focus();
-    return;
-  }
-  const editing = editingAgentId ? findAgent(editingAgentId) : null;
-  const body = {
-    name,
-    ...(editing?.main ? {} : { project: form.elements.project.value }),
-    role: form.elements.role.value,
-    instructions: form.elements.instructions.value,
-    provider: form.elements.provider.value,
-    model: form.elements.model.value || null,
-    effort: form.elements.effort.value || null,
-    access: form.elements.access.value === "total" ? "total" : "carpeta",
-  };
-  const button = $("#agent-save");
-  button.disabled = true;
-  try {
-    if (editingAgentId) {
-      await api(`/api/agents/${encodeURIComponent(editingAgentId)}`, { method: "PATCH", body });
-      closeDialog($("#agent-dialog"));
-    } else {
-      const result = await api("/api/agents", { method: "POST", body });
-      closeDialog($("#agent-dialog"));
-      if (!findAgent(result.agent.id)) state.agents.push(result.agent);
-      renderSidebar();
-      await navigate(result.agent.id);
-    }
-  } catch (problem) {
-    error.textContent = problem.message;
-  } finally {
-    button.disabled = false;
-  }
 }
 
 // ---------- crear agente: figura, color y nombre ----------
@@ -5029,7 +4973,7 @@ async function refreshProviders() {
   }
 }
 
-// ---------- ficha del agente: Detalles, Biblioteca y Computadora ----------
+// ---------- ficha del agente: ajustes por secciones, como OpenBot ----------
 
 const DEFAULT_VOICE = { name: "", rate: 1, lang: "auto", autoRead: false };
 const VOICE_LANGS = [
@@ -5046,9 +4990,48 @@ const VOICE_LANGS = [
   ["de-DE", "Alemán"],
   ["it-IT", "Italiano"],
 ];
-const details = { agentId: null, tab: "info", root: "agent", path: "", library: null, loading: false, request: 0, uploading: false };
+const PAGE_TITLES = {
+  profile: "Perfil",
+  brain: "Modelo",
+  instructions: "Instrucciones",
+  memories: "Recuerdos",
+  skills: "Habilidades",
+  files: "Archivos",
+  routines: "Rutinas",
+  voice: "Chat de voz",
+  folders: "Carpetas",
+  access: "Acceso",
+  advanced: "Avanzado",
+  notify: "Avisarme",
+};
+const NOTIFY_LABELS = { all: "Toda la actividad", needs: "Solo cuando me necesite", none: "Nada" };
+const MEMORY_MAX = 64;
 
-function openDetails(agentId = state.currentId, tab = "info") {
+const details = {
+  agentId: null,
+  /** Subpantalla abierta; null = la lista de ajustes. */
+  page: null,
+  root: "agent",
+  path: "",
+  library: null,
+  loading: false,
+  request: 0,
+  uploading: false,
+  /** Recuerdos y habilidades del agente abierto: { agentId, items }. */
+  memories: null,
+  skills: null,
+  /** Instrucciones como se leyeron de AGENTS.md: { agentId, base, loading, error }. */
+  instructions: null,
+  /** Habilidad que se está editando: "new" o su id. */
+  skillEditing: null,
+  /** Recuerdo que se está editando en su lugar (mientras tanto la lista no se repinta). */
+  memoryEditing: null,
+  /** Rutinas con el historial abierto y lo que se leyó de cada una. */
+  openRuns: new Set(),
+  runs: new Map(),
+};
+
+function openDetails(agentId = state.currentId, page = null) {
   closeContextMenu();
   const agent = findAgent(agentId);
   if (!agent) return;
@@ -5056,11 +5039,44 @@ function openDetails(agentId = state.currentId, tab = "info") {
     details.root = "agent";
     details.path = "";
     details.library = null;
+    details.memories = null;
+    details.skills = null;
+    details.instructions = null;
+    details.skillEditing = null;
+    details.memoryEditing = null;
+    details.openRuns.clear();
+    details.runs.clear();
   }
   details.agentId = agent.id;
-  selectTab(tab);
-  renderDetails();
+  showPage(page, { focus: false });
   openDialog($("#details-dialog"));
+  void loadMemories(agent.id);
+  void loadSkills(agent.id);
+}
+
+/** Cambia de subpantalla (null = la lista de ajustes). Las que se editan se llenan al entrar, no al refrescar. */
+function showPage(page, { focus = true } = {}) {
+  const previous = details.page;
+  details.page = page;
+  const agent = findAgent(details.agentId);
+  if (page === "files") details.library = null;
+  if (page === "instructions") details.instructions = null;
+  if (page === "skills") details.skillEditing = null;
+  if (page === "profile" && agent) fillProfileForm(agent);
+  if (page === "brain" && agent) void fillBrainForm(agent);
+  if (page === "memories") {
+    details.memoryEditing = null;
+    resetMemoryForm();
+  }
+  $("#details-home").hidden = page !== null;
+  $("#details-sub").hidden = page === null;
+  for (const node of document.querySelectorAll("#details-sub .page")) node.hidden = node.dataset.page !== page;
+  $("#page-title").textContent = page ? (PAGE_TITLES[page] ?? "") : "";
+  renderDetails();
+  if (page) $("#page-body").scrollTop = 0;
+  if (!focus) return;
+  if (page) $("#page-title").focus({ preventScroll: true });
+  else document.querySelector(`#details-groups [data-page="${previous}"]`)?.focus({ preventScroll: true });
 }
 
 function renderDetailsIfOpen() {
@@ -5073,6 +5089,12 @@ function renderDetails() {
     closeDialog($("#details-dialog"));
     return;
   }
+  renderDetailsHeader(agent);
+  if (details.page === null) renderSettingsHome(agent);
+  else renderPage(agent);
+}
+
+function renderDetailsHeader(agent) {
   const avatar = $("#details-avatar");
   const key = `${agent.id}:${agent.avatar}:${agent.main}`;
   if (avatar.dataset.key !== key) {
@@ -5082,79 +5104,553 @@ function renderDetails() {
   avatar.disabled = Boolean(agent.main);
   avatar.title = agent.main ? agent.name : "Cambiar figura y color";
   $("#details-name").textContent = agent.name;
-  const parts = [agent.role || (agent.main ? "Bot principal" : "Asistente general"), providerLabel(agent.provider)];
-  if (agent.model) parts.push(modelLabel(agent));
-  if (agent.project) parts.push(agent.project);
-  $("#details-meta").textContent = parts.filter(Boolean).join(" · ");
-  if (details.tab === "info") renderDetailsInfo(agent);
-  else if (details.tab === "library") renderLibrary(agent);
-  else renderComputer(agent);
+  $("#details-title").textContent = agent.role || (agent.main ? "Bot principal" : "Asistente general");
+  const description = $("#details-description");
+  description.textContent = agent.description || "Agrega una descripción";
+  description.dataset.empty = String(!agent.description);
 }
 
-function selectTab(tab, { focus = false } = {}) {
-  details.tab = tab;
-  for (const button of document.querySelectorAll("#details-dialog [role='tab']")) {
-    const selected = button.dataset.tab === tab;
-    button.setAttribute("aria-selected", String(selected));
-    button.tabIndex = selected ? 0 : -1;
-    if (selected && focus) button.focus();
-  }
-  $("#panel-info").hidden = tab !== "info";
-  $("#panel-library").hidden = tab !== "library";
-  $("#panel-computer").hidden = tab !== "computer";
-}
-
-function onTabKeydown(event) {
-  const tabs = [...document.querySelectorAll("#details-dialog [role='tab']")];
-  const index = tabs.indexOf(event.target);
-  if (index < 0) return;
-  const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
-  let next = step === undefined ? null : (index + step + tabs.length) % tabs.length;
-  if (event.key === "Home") next = 0;
-  if (event.key === "End") next = tabs.length - 1;
-  if (next === null) return;
-  event.preventDefault();
-  showTab(tabs[next].dataset.tab, { focus: true });
-}
-
-function showTab(tab, { focus = false } = {}) {
-  // La biblioteca se vuelve a leer cada vez que se abre: los agentes crean archivos todo el tiempo.
-  if (tab === "library") details.library = null;
-  selectTab(tab, { focus });
-  renderDetails();
-}
-
-function renderDetailsInfo(agent) {
+function renderSettingsHome(agent) {
+  for (const row of document.querySelectorAll("#details-groups .row-icon:empty")) row.append(icon(row.dataset.icon));
+  $("#row-brain").textContent = [providerLabel(agent.provider), modelLabel(agent) || "Predeterminado"].join(" · ");
+  $("#row-instructions").textContent = agent.instructions ? agent.instructions.replace(/\s+/g, " ").slice(0, 80) : "Sin instrucciones";
+  const memories = details.memories?.agentId === agent.id ? details.memories.items : null;
+  $("#row-memories").textContent = memories === null ? "" : memories.length ? String(memories.length) : "Ninguno";
+  const skills = details.skills?.agentId === agent.id ? details.skills.items : null;
+  $("#row-skills").textContent = skills === null ? "" : skills.length ? String(skills.filter((skill) => skill.enabled).length) : "Ninguna";
   const routines = state.routines.filter((routine) => routine.agentId === agent.id);
-  $("#details-routines").replaceChildren(...routines.map(miniRoutine));
-  $("#details-routines-empty").hidden = routines.length > 0;
-  renderVoiceSettings(agent);
-  const instructions = agent.instructions?.trim();
-  $("#details-role").textContent = instructions
-    ? instructions.length > 240
-      ? `${instructions.slice(0, 240).trimEnd()}…`
-      : instructions
-    : agent.main
-      ? "Arma y coordina tus equipos de agentes."
-      : "Sin instrucciones permanentes: hace lo que le pidas en el chat.";
-  $("#details-edit").textContent = agent.main ? "Preferencias y modelo" : "Instrucciones y modelo";
-  $("#details-pause").textContent = agent.paused ? "Reanudar la cola" : "Pausar la cola";
+  const active = routines.filter((routine) => routine.enabled).length;
+  $("#row-routines").textContent = routines.length ? (active === routines.length ? String(active) : `${active} de ${routines.length} activas`) : "Ninguna";
+  const voice = { ...DEFAULT_VOICE, ...(agent.voice ?? {}) };
+  $("#row-voice").textContent = voice.autoRead ? "Lee sus respuestas" : "";
+  const full = Boolean(state.settings.fullAccess);
+  $("#row-access-button").hidden = full;
+  $("#row-access").textContent = agent.access === "total" ? "Acceso total" : "Solo su carpeta";
+  $("#row-advanced").textContent = agent.paused ? "Cola en pausa" : "";
+  $("#row-notify").textContent = NOTIFY_LABELS[agent.notify] ?? "";
   $("#details-delete").hidden = Boolean(agent.main);
 }
 
-function miniRoutine(routine) {
+function renderPage(agent) {
+  switch (details.page) {
+    case "profile":
+      updateDescriptionCount();
+      break;
+    case "instructions":
+      renderInstructionsPage(agent);
+      break;
+    case "memories":
+      renderMemories(agent);
+      break;
+    case "skills":
+      renderSkills(agent);
+      break;
+    case "files":
+      renderLibrary(agent);
+      break;
+    case "routines":
+      renderDetailsRoutines(agent);
+      break;
+    case "voice":
+      renderVoiceSettings(agent);
+      break;
+    case "folders":
+      renderFolders(agent);
+      break;
+    case "access":
+      renderAccessPage(agent);
+      break;
+    case "advanced":
+      $("#details-pause").setAttribute("aria-checked", String(agent.paused));
+      break;
+    case "notify":
+      renderNotifyPage(agent);
+      break;
+    default:
+      break;
+  }
+}
+
+// Perfil: nombre, título, descripción y sección.
+
+function fillProfileForm(agent) {
+  const form = $("#profile-form");
+  form.elements.name.value = agent.name;
+  form.elements.role.value = agent.role;
+  form.elements.role.placeholder = agent.main ? "Ej.: Bot principal: arma y coordina mis equipos" : "Ej.: Investigadora de mercado";
+  form.elements.description.value = agent.description ?? "";
+  form.elements.project.value = agent.project;
+  $("#profile-project").hidden = Boolean(agent.main);
+  $("#project-options").replaceChildren(...allSections().map((section) => new Option(section, section)));
+  $("#profile-error").textContent = "";
+  updateDescriptionCount();
+}
+
+function updateDescriptionCount() {
+  const length = $("#profile-form").elements.description.value.length;
+  $("#description-count").textContent = length > 1500 ? `${length} / 2000` : "";
+}
+
+async function saveProfile(event) {
+  event.preventDefault();
+  const agent = findAgent(details.agentId);
+  if (!agent) return;
+  const form = $("#profile-form");
+  const error = $("#profile-error");
+  error.textContent = "";
+  const name = form.elements.name.value.trim();
+  if (!name) {
+    error.textContent = "Ponle un nombre al agente.";
+    form.elements.name.focus();
+    return;
+  }
+  const body = {
+    name,
+    role: form.elements.role.value,
+    description: form.elements.description.value,
+    ...(agent.main ? {} : { project: form.elements.project.value }),
+  };
+  const button = $("#profile-save");
+  button.disabled = true;
+  try {
+    const result = await api(`/api/agents/${encodeURIComponent(agent.id)}`, { method: "PATCH", body });
+    replaceAgent(result.agent);
+    showPage(null);
+  } catch (problem) {
+    error.textContent = problem.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// Cerebro: proveedor, modelo y razonamiento.
+
+async function fillBrainForm(agent) {
+  const form = $("#brain-form");
+  $("#brain-error").textContent = "";
+  fillProviders(form, agent.provider);
+  await refreshModelOptions(form, agent.model ?? "", agent.effort ?? "");
+}
+
+async function saveBrain(event) {
+  event.preventDefault();
+  const agent = findAgent(details.agentId);
+  if (!agent) return;
+  const form = $("#brain-form");
+  const provider = form.elements.provider.value;
+  if (provider !== agent.provider) {
+    const ok = await confirmAction(
+      `¿Cambiar a ${providerLabel(provider)}?`,
+      `Su próxima respuesta empieza una conversación nueva: no recordará lo que hablaron. Sus instrucciones, recuerdos, habilidades y archivos se mantienen.`,
+      "Cambiar",
+      "primary",
+    );
+    if (!ok) return;
+  }
+  const button = $("#brain-save");
+  button.disabled = true;
+  try {
+    const result = await api(`/api/agents/${encodeURIComponent(agent.id)}`, {
+      method: "PATCH",
+      body: { provider, model: form.elements.model.value || null, effort: form.elements.effort.value || null },
+    });
+    replaceAgent(result.agent);
+    showPage(null);
+  } catch (problem) {
+    $("#brain-error").textContent = problem.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// Sabe → Instrucciones: su AGENTS.md (el agente también lo edita).
+
+function renderInstructionsPage(agent) {
+  const current = details.instructions;
+  if (!current || current.agentId !== agent.id) {
+    void loadInstructions(agent.id);
+    return;
+  }
+  $("#instructions-lead").textContent = agent.main
+    ? "Tus preferencias para armar equipos. Están en el archivo AGENTS.md de su carpeta."
+    : "Están en el archivo AGENTS.md de su carpeta: el agente también puede cambiarlas si se lo pides.";
+  const editor = $("#instructions-text");
+  editor.disabled = current.loading;
+  editor.placeholder = current.loading
+    ? "Cargando…"
+    : agent.main
+      ? "Ej.: equipos de 3 agentes como máximo; usa Sonnet para tareas simples; escríbeme siempre en español."
+      : "Cómo quieres que trabaje, qué debe priorizar, qué entrega y cuándo pedir ayuda…";
+  $("#instructions-error").textContent = current.error ?? "";
+  updateInstructionsCount();
+}
+
+async function loadInstructions(agentId) {
+  details.instructions = { agentId, base: "", loading: true, error: null };
+  $("#instructions-text").value = "";
+  renderDetailsIfOpen();
+  try {
+    const data = await api(`/api/agents/${encodeURIComponent(agentId)}/instructions`);
+    if (details.instructions?.agentId !== agentId) return;
+    details.instructions = { agentId, base: data.text, loading: false, error: null };
+    $("#instructions-text").value = data.text;
+  } catch (error) {
+    if (details.instructions?.agentId !== agentId) return;
+    details.instructions = { agentId, base: "", loading: false, error: error.message };
+  }
+  renderDetailsIfOpen();
+}
+
+function updateInstructionsCount() {
+  const length = $("#instructions-text").value.length;
+  $("#instructions-count").textContent = `${length.toLocaleString("es")} / 32.000`;
+}
+
+async function saveInstructions({ force = false } = {}) {
+  const agent = findAgent(details.agentId);
+  const current = details.instructions;
+  if (!agent || !current || current.loading) return;
+  const text = $("#instructions-text").value;
+  const button = $("#instructions-save");
+  button.disabled = true;
+  $("#instructions-error").textContent = "";
+  try {
+    const result = await api(`/api/agents/${encodeURIComponent(agent.id)}/instructions`, {
+      method: "PUT",
+      body: force ? { text } : { text, base: current.base },
+    });
+    replaceAgent(result.agent);
+    details.instructions = { ...current, base: text.trim() };
+    showToast("Instrucciones guardadas: las usa desde su próximo mensaje.");
+  } catch (error) {
+    if (error.status === 409) {
+      const ok = await confirmAction(
+        `${agent.name} cambió sus instrucciones`,
+        "Mientras editabas, el agente cambió su AGENTS.md. ¿Guardar tu versión de todos modos? Se pierde lo que cambió él.",
+        "Guardar la mía",
+        "primary",
+      );
+      if (ok) {
+        button.disabled = false;
+        await saveInstructions({ force: true });
+        return;
+      }
+    } else {
+      $("#instructions-error").textContent = error.message;
+    }
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// Sabe → Recuerdos.
+
+async function loadMemories(agentId) {
+  try {
+    const data = await api(`/api/agents/${encodeURIComponent(agentId)}/memories`);
+    if (details.agentId !== agentId) return;
+    details.memories = { agentId, items: data.memories };
+    renderDetailsIfOpen();
+  } catch {
+    // Sin recuerdos que mostrar: la fila queda sin número.
+  }
+}
+
+function resetMemoryForm() {
+  const form = $("#memory-form");
+  form.reset();
+  $("#memory-error").textContent = "";
+}
+
+function renderMemories(agent) {
+  const items = details.memories?.agentId === agent.id ? details.memories.items : [];
+  $("#memories-count").textContent = items.length ? `${items.length} de ${MEMORY_MAX}` : "";
+  const full = items.length >= MEMORY_MAX;
+  $("#memory-save").disabled = full;
+  const error = $("#memory-error");
+  if (full) error.textContent = `Ya tiene ${MEMORY_MAX} recuerdos: borra alguno para guardar otro.`;
+  else if (error.dataset.full === "true") error.textContent = "";
+  error.dataset.full = String(full);
+  if (details.memoryEditing && items.some((memory) => memory.id === details.memoryEditing)) return;
+  details.memoryEditing = null;
+  const always = items.filter((memory) => memory.always);
+  const relevant = items.filter((memory) => !memory.always);
+  $("#memories-always").replaceChildren(...always.map((memory) => memoryItem(agent, memory)));
+  $("#memories-relevant").replaceChildren(...relevant.map((memory) => memoryItem(agent, memory)));
+  $("#memories-always-empty").hidden = always.length > 0;
+  $("#memories-relevant-empty").hidden = relevant.length > 0;
+}
+
+function memoryItem(agent, memory) {
   const item = document.createElement("li");
-  item.className = "mini-routine";
+  item.className = "item";
+  const body = document.createElement("div");
+  body.className = "item-body";
+  const text = document.createElement("p");
+  text.className = "item-text";
+  text.textContent = memory.text;
+  const meta = document.createElement("p");
+  meta.className = "item-meta";
+  meta.textContent = `${memory.createdBy === "agent" ? `Lo guardó ${agent.name}` : "Lo guardaste tú"} · ${formatTime(memory.createdAt)}`;
+  body.append(text, meta);
+  const actions = document.createElement("div");
+  actions.className = "item-actions";
+  actions.append(
+    iconButton(memory.always ? "arrowDown" : "arrowUp", memory.always ? "Usar solo si hace falta" : "Usar siempre", () => void patchMemory(memory.id, { always: !memory.always })),
+    iconButton("pencil", "Editar", () => editMemory(item, memory)),
+    iconButton("trash", "Borrar", () => void removeMemory(memory)),
+  );
+  item.append(body, actions);
+  return item;
+}
+
+function iconButton(name, label, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "icon-button";
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.append(icon(name));
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+/** Edita el texto de un recuerdo en su lugar. */
+function editMemory(item, memory) {
+  const form = document.createElement("form");
+  form.className = "item-edit";
+  const input = document.createElement("textarea");
+  input.rows = 3;
+  input.maxLength = 1000;
+  input.value = memory.text;
+  input.setAttribute("aria-label", "Recuerdo");
+  const row = document.createElement("div");
+  row.className = "page-actions";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "button ghost small";
+  cancel.textContent = "Cancelar";
+  cancel.addEventListener("click", () => {
+    details.memoryEditing = null;
+    renderDetailsIfOpen();
+  });
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.className = "button primary small";
+  save.textContent = "Guardar";
+  row.append(cancel, save);
+  form.append(input, row);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void patchMemory(memory.id, { text: input.value });
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) form.requestSubmit();
+  });
+  details.memoryEditing = memory.id;
+  item.replaceChildren(form);
+  input.focus();
+}
+
+async function saveMemory(event) {
+  event.preventDefault();
+  const agentId = details.agentId;
+  const form = $("#memory-form");
+  const text = form.elements.text.value.trim();
+  if (!text) {
+    form.elements.text.focus();
+    return;
+  }
+  $("#memory-error").textContent = "";
+  try {
+    await api(`/api/agents/${encodeURIComponent(agentId)}/memories`, { method: "POST", body: { text, always: form.elements.always.checked } });
+    form.reset();
+    await loadMemories(agentId);
+  } catch (error) {
+    $("#memory-error").textContent = error.message;
+  }
+}
+
+async function patchMemory(id, body) {
+  try {
+    await api(`/api/memories/${encodeURIComponent(id)}`, { method: "PATCH", body });
+    if (details.memoryEditing === id) details.memoryEditing = null;
+    await loadMemories(details.agentId);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function removeMemory(memory) {
+  const ok = await confirmAction("¿Borrar este recuerdo?", memory.text.length > 160 ? `${memory.text.slice(0, 160)}…` : memory.text, "Borrar");
+  if (!ok) return;
+  try {
+    await api(`/api/memories/${encodeURIComponent(memory.id)}`, { method: "DELETE" });
+    await loadMemories(details.agentId);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+// Sabe → Habilidades: carpetas con un SKILL.md en la carpeta del agente.
+
+async function loadSkills(agentId) {
+  try {
+    const data = await api(`/api/agents/${encodeURIComponent(agentId)}/skills`);
+    if (details.agentId !== agentId) return;
+    details.skills = { agentId, items: data.skills };
+    renderDetailsIfOpen();
+  } catch {
+    // Sin habilidades que mostrar.
+  }
+}
+
+function renderSkills(agent) {
+  const items = details.skills?.agentId === agent.id ? details.skills.items : [];
+  const editing = details.skillEditing;
+  $("#skills-list").replaceChildren(...items.map((skill) => skillItem(agent, skill)));
+  $("#skills-list").hidden = Boolean(editing);
+  $("#skills-empty").hidden = items.length > 0 || Boolean(editing);
+  $("#skill-actions").hidden = Boolean(editing);
+  $("#skill-form").hidden = !editing;
+}
+
+function skillItem(agent, skill) {
+  const item = document.createElement("li");
+  item.className = "item";
+  item.dataset.enabled = String(skill.enabled);
+  const body = document.createElement("div");
+  body.className = "item-body";
+  const name = document.createElement("p");
+  name.className = "item-name";
+  name.textContent = skill.name;
+  const text = document.createElement("p");
+  text.className = "item-meta";
+  text.textContent = skill.description || skill.file;
+  body.append(name, text);
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "switch";
+  toggle.setAttribute("role", "switch");
+  toggle.setAttribute("aria-checked", String(skill.enabled));
+  toggle.setAttribute("aria-label", skill.enabled ? `Apagar «${skill.name}»` : `Encender «${skill.name}»`);
+  toggle.addEventListener("click", () => void setSkillEnabled(agent.id, skill, !skill.enabled));
+  const actions = document.createElement("div");
+  actions.className = "item-actions";
+  actions.append(
+    iconButton("pencil", "Editar", () => void editSkill(agent.id, skill)),
+    iconButton("trash", "Eliminar", () => void removeSkill(agent.id, skill)),
+    toggle,
+  );
+  item.append(body, actions);
+  return item;
+}
+
+function skillUrl(agentId, skillId) {
+  return `/api/agents/${encodeURIComponent(agentId)}/skill?id=${encodeURIComponent(skillId)}`;
+}
+
+function newSkill() {
+  details.skillEditing = "new";
+  const form = $("#skill-form");
+  form.reset();
+  $("#skill-form-title").textContent = "Nueva habilidad";
+  $("#skill-fields").hidden = false;
+  $("#skill-raw").hidden = true;
+  $("#skill-error").textContent = "";
+  renderDetailsIfOpen();
+  form.elements.name.focus();
+}
+
+async function editSkill(agentId, skill) {
+  try {
+    const data = await api(skillUrl(agentId, skill.id));
+    details.skillEditing = skill.id;
+    const form = $("#skill-form");
+    form.reset();
+    $("#skill-form-title").textContent = skill.name;
+    $("#skill-fields").hidden = true;
+    $("#skill-raw").hidden = false;
+    form.elements.text.value = data.text;
+    $("#skill-error").textContent = "";
+    renderDetailsIfOpen();
+    form.elements.text.focus();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function closeSkillForm() {
+  details.skillEditing = null;
+  renderDetailsIfOpen();
+}
+
+async function saveSkill(event) {
+  event.preventDefault();
+  const agentId = details.agentId;
+  const form = $("#skill-form");
+  const editing = details.skillEditing;
+  $("#skill-error").textContent = "";
+  const button = $("#skill-save");
+  button.disabled = true;
+  try {
+    if (editing === "new") {
+      await api(`/api/agents/${encodeURIComponent(agentId)}/skills`, {
+        method: "POST",
+        body: { name: form.elements.name.value, description: form.elements.description.value, body: form.elements.body.value },
+      });
+    } else {
+      await api(skillUrl(agentId, editing), { method: "PUT", body: { text: form.elements.text.value } });
+    }
+    details.skillEditing = null;
+    await loadSkills(agentId);
+    showToast("Habilidad guardada: la usa desde su próximo mensaje.");
+  } catch (error) {
+    $("#skill-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function setSkillEnabled(agentId, skill, enabled) {
+  try {
+    await api(skillUrl(agentId, skill.id), { method: "PATCH", body: { enabled } });
+    await loadSkills(agentId);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function removeSkill(agentId, skill) {
+  const ok = await confirmAction(`¿Eliminar «${skill.name}»?`, `Se borra su carpeta (${skill.id}) con todo lo que tenga.`, "Eliminar");
+  if (!ok) return;
+  try {
+    await api(skillUrl(agentId, skill.id), { method: "DELETE" });
+    await loadSkills(agentId);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+// Hace → Rutinas: con «Probar ahora» e historial.
+
+function renderDetailsRoutines(agent) {
+  const routines = state.routines.filter((routine) => routine.agentId === agent.id);
+  $("#details-routines").replaceChildren(...routines.map((routine) => detailsRoutine(routine)));
+  $("#details-routines-empty").hidden = routines.length > 0;
+}
+
+function detailsRoutine(routine) {
+  const item = document.createElement("li");
+  item.className = "item routine-item";
   item.dataset.enabled = String(routine.enabled);
-  const open = document.createElement("button");
-  open.type = "button";
-  open.className = "mini-routine-open";
-  open.title = "Ver y editar en Rutinas";
-  const name = document.createElement("span");
-  name.className = "mini-routine-name";
+  const body = document.createElement("div");
+  body.className = "item-body";
+  const name = document.createElement("p");
+  name.className = "item-name";
   name.textContent = routine.name;
-  const meta = document.createElement("span");
-  meta.className = "mini-routine-meta";
+  const meta = document.createElement("p");
+  meta.className = "item-meta";
   const when = routine.running
     ? "en curso…"
     : routine.enabled
@@ -5163,19 +5659,119 @@ function miniRoutine(routine) {
         : "sin próxima ejecución"
       : "en pausa";
   meta.textContent = [routine.description, when].filter(Boolean).join(" · ");
-  open.append(icon("clock"), name, meta);
-  open.addEventListener("click", () => openRoutines(routine.agentId));
+  const prompt = document.createElement("p");
+  prompt.className = "item-text small-text";
+  prompt.textContent = routine.prompt;
+  body.append(name, meta, prompt);
   const toggle = document.createElement("button");
   toggle.type = "button";
   toggle.className = "switch";
   toggle.setAttribute("role", "switch");
   toggle.setAttribute("aria-checked", String(routine.enabled));
   toggle.setAttribute("aria-label", routine.enabled ? `Pausar «${routine.name}»` : `Activar «${routine.name}»`);
-  toggle.title = routine.enabled ? "Activa" : "En pausa";
   toggle.addEventListener("click", () => void routineRequest(`/api/routines/${encodeURIComponent(routine.id)}`, "PATCH", { enabled: !routine.enabled }));
-  item.append(open, toggle);
+  const head = document.createElement("div");
+  head.className = "item-head";
+  head.append(body, toggle);
+  const actions = document.createElement("div");
+  actions.className = "item-buttons";
+  const run = document.createElement("button");
+  run.type = "button";
+  run.className = "button ghost small";
+  run.textContent = routine.running ? "En curso…" : "Probar ahora";
+  run.disabled = routine.running;
+  run.addEventListener("click", async () => {
+    if (await routineRequest(`/api/routines/${encodeURIComponent(routine.id)}/run`, "POST")) {
+      details.openRuns.add(routine.id);
+      void loadRuns(routine.id);
+      showToast(`«${routine.name}» quedó en su cola.`);
+    }
+  });
+  const open = details.openRuns.has(routine.id);
+  const history = document.createElement("button");
+  history.type = "button";
+  history.className = "button ghost small";
+  history.textContent = open ? "Ocultar historial" : "Historial";
+  history.setAttribute("aria-expanded", String(open));
+  history.addEventListener("click", () => {
+    if (details.openRuns.has(routine.id)) details.openRuns.delete(routine.id);
+    else {
+      details.openRuns.add(routine.id);
+      void loadRuns(routine.id);
+    }
+    renderDetailsIfOpen();
+  });
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "button danger-soft small";
+  remove.textContent = "Eliminar";
+  remove.addEventListener("click", async () => {
+    const ok = await confirmAction(`¿Eliminar la rutina «${routine.name}»?`, "Deja de ejecutarse. Lo que ya hizo queda en la conversación.", "Eliminar");
+    if (ok) await routineRequest(`/api/routines/${encodeURIComponent(routine.id)}`, "DELETE");
+  });
+  actions.append(run, history, remove);
+  item.append(head, actions);
+  if (open) item.append(routineHistory(routine));
   return item;
 }
+
+async function loadRuns(routineId) {
+  try {
+    const data = await api(`/api/routines/${encodeURIComponent(routineId)}/runs`);
+    details.runs.set(routineId, data.runs);
+  } catch (error) {
+    details.runs.set(routineId, { error: error.message });
+  }
+  renderDetailsIfOpen();
+}
+
+const RUN_STATUS = {
+  queued: "En cola",
+  starting: "Empezando…",
+  running: "En curso…",
+  completed: "Terminó",
+  failed: "Falló",
+  interrupted: "Se detuvo",
+  cancelled: "Cancelada",
+  missing: "Sin datos",
+};
+
+function routineHistory(routine) {
+  const list = document.createElement("ul");
+  list.className = "run-list";
+  const runs = details.runs.get(routine.id);
+  const note = (text) => {
+    const item = document.createElement("li");
+    item.className = "run-empty";
+    item.textContent = text;
+    return item;
+  };
+  if (!runs) list.append(note("Cargando…"));
+  else if (runs.error) list.append(note(runs.error));
+  else if (!runs.length) list.append(note("Todavía no ha corrido."));
+  else {
+    for (const run of runs) {
+      const item = document.createElement("li");
+      item.className = "run";
+      item.dataset.status = run.status;
+      const head = document.createElement("p");
+      head.className = "run-head";
+      head.textContent = `${formatWhen(run.at)} · ${RUN_STATUS[run.status] ?? run.status}${run.manual ? " · a mano" : ""}`;
+      item.append(head);
+      const detail = run.error || run.reply;
+      if (detail) {
+        const text = document.createElement("p");
+        text.className = "run-text";
+        text.textContent = detail;
+        item.append(text);
+      }
+      list.append(item);
+    }
+  }
+  return list;
+}
+
+// Hace → Chat de voz.
 
 function renderVoiceSettings(agent) {
   const voice = { ...DEFAULT_VOICE, ...(agent.voice ?? {}) };
@@ -5252,7 +5848,7 @@ function testVoice() {
   speak(sample, agent, { messageId: "voice-test" });
 }
 
-// Biblioteca: archivos de su carpeta o de la compartida.
+// Sabe → Archivos: su carpeta o la compartida.
 
 function libraryUrl(agentId, root, path, file = false) {
   const base = `/api/agents/${encodeURIComponent(agentId)}/library${file ? "/file" : ""}`;
@@ -5295,7 +5891,7 @@ async function loadLibrary(agentId, root, path) {
 
 function renderLibraryView() {
   const agent = findAgent(details.agentId);
-  if (!agent || details.tab !== "library") return;
+  if (!agent || details.page !== "files") return;
   for (const radio of document.querySelectorAll('input[name="library-root"]')) radio.checked = radio.value === details.root;
   const upload = $("#library-upload");
   upload.hidden = details.root !== "agent";
@@ -5420,25 +6016,103 @@ async function uploadToLibrary(files) {
   if (details.agentId === agentId) await loadLibrary(agentId, "agent", saved ? "adjuntos" : details.path);
 }
 
-// Computadora: dónde trabaja y con qué acceso.
+// Reglas → Carpetas y Acceso.
 
-function renderComputer(agent) {
+function renderFolders(agent) {
   $("#computer-workspace").textContent = agent.workspace || "—";
   $("#computer-shared").textContent = state.paths?.shared ?? "—";
   const local = isThisComputer();
-  for (const button of document.querySelectorAll("#panel-computer [data-local-only]")) button.hidden = !local;
+  for (const button of document.querySelectorAll('#details-sub .page[data-page="folders"] [data-local-only]')) button.hidden = !local;
   $("#computer-remote").hidden = local;
-  const full = Boolean(state.settings.fullAccess);
-  let text = full
-    ? "Acceso total para todos (lo activaste en Ajustes): ejecuta comandos y usa todo el equipo sin pedir permiso."
-    : agent.access === "total"
-      ? "Acceso total: ejecuta comandos y usa todo el equipo sin pedir permiso."
-      : "Solo su carpeta: escribe en su carpeta y en la compartida, con sandbox.";
-  if (!full && agent.access !== "total" && state.platform === "win32" && agent.provider === "claude") {
-    text += " En Windows, así no tiene terminal: trabaja con archivos, la web y sus compañeros.";
+}
+
+function renderAccessPage(agent) {
+  const form = $("#access-form");
+  if (document.activeElement?.name !== "access") form.elements.access.value = agent.access;
+  $("#access-warning").hidden = agent.access !== "total";
+  $("#access-hint").hidden = !(state.platform === "win32" && agent.provider === "claude" && agent.access === "carpeta");
+}
+
+async function changeAccess(value) {
+  const agent = findAgent(details.agentId);
+  if (!agent || value === agent.access) return;
+  if (value === "total") {
+    const ok = await confirmAction(
+      `¿Dar acceso total a ${agent.name}?`,
+      "Podrá ejecutar comandos, instalar programas y borrar o leer cualquier archivo del equipo sin preguntarte. Los conectores de tu cuenta de Claude siguen fuera de su alcance.",
+      "Dar acceso total",
+    );
+    if (!ok) {
+      renderDetailsIfOpen();
+      return;
+    }
   }
-  $("#computer-access").textContent = `${text} Los conectores de tu cuenta de Claude (servidores, bancos, brókeres) siguen fuera de su alcance.`;
-  $("#computer-change").textContent = full ? "Abrir Ajustes" : "Cambiar el acceso";
+  await patchAgent(agent.id, { access: value });
+  renderDetailsIfOpen();
+}
+
+// Reglas → Avisarme.
+
+function renderNotifyPage(agent) {
+  const form = $("#notify-form");
+  form.elements.notify.value = agent.notify;
+  const status = $("#notify-status");
+  const enable = $("#notify-enable");
+  enable.hidden = true;
+  if (!("Notification" in window) || !window.isSecureContext) {
+    status.textContent = "Este navegador no muestra avisos. Ábrelo en la app de escritorio de ClosedBot.";
+  } else if (Notification.permission === "granted") {
+    status.textContent = "En este equipo aparecen mientras ClosedBot esté abierta, aunque esté minimizada.";
+  } else if (Notification.permission === "denied") {
+    status.textContent = "Los avisos están bloqueados en este navegador: permítelos en la configuración del sitio.";
+  } else {
+    status.textContent = "Para verlos en este equipo, permite los avisos.";
+    enable.hidden = false;
+  }
+}
+
+async function enableNotifications() {
+  if (!("Notification" in window)) return;
+  try {
+    await Notification.requestPermission();
+  } catch {
+    // Algunos navegadores viejos usan una función con callback: no importa, se vuelve a mirar el permiso.
+  }
+  renderDetailsIfOpen();
+  if (Notification.permission === "granted") showToast("Listo: los avisos aparecerán en este equipo.");
+}
+
+/** Un aviso del servidor («Avisarme»): se muestra en el sistema si ClosedBot no está a la vista o es otra conversación. */
+async function showAlert(alert) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const key = alert.channelId ? `c:${alert.channelId}` : alert.agentId;
+  const looking = document.visibilityState === "visible" && document.hasFocus();
+  if (looking && convKey() === key) return;
+  if (looking && alert.kind === "reply") return;
+  const hash = alert.channelId ? `#/c/${encodeURIComponent(alert.channelId)}` : `#/a/${encodeURIComponent(alert.agentId)}`;
+  const options = { body: alert.body, tag: `closedbot:${key}`, icon: "/icons/icon-192.png", data: { url: `/${hash}` } };
+  try {
+    const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : null;
+    if (registration) {
+      await registration.showNotification(alert.title, options);
+      return;
+    }
+    const notification = new Notification(alert.title, options);
+    notification.onclick = () => {
+      window.focus();
+      location.hash = hash;
+      notification.close();
+    };
+  } catch {
+    // Sin permiso o sin soporte: el aviso de no leído de la barra lateral sigue ahí.
+  }
+}
+
+async function setNotify(value) {
+  const agent = findAgent(details.agentId);
+  if (!agent || value === agent.notify) return;
+  await patchAgent(agent.id, { notify: value });
+  renderDetailsIfOpen();
 }
 
 async function openFolder(root) {
@@ -6040,26 +6714,69 @@ function bindUi() {
   $("#shape-grid").addEventListener("keydown", (event) => onPickerKeydown(event, "shape"));
   $("#color-row").addEventListener("keydown", (event) => onPickerKeydown(event, "color"));
 
-  // Ficha del agente.
+  // Ficha del agente: lista de ajustes y subpantallas.
   const detailsDialog = $("#details-dialog");
-  $("#details-close").addEventListener("click", () => closeDialog(detailsDialog));
+  for (const button of detailsDialog.querySelectorAll(".details-close")) button.addEventListener("click", () => closeDialog(detailsDialog));
   detailsDialog.addEventListener("click", (event) => {
     // Clic en el fondo oscuro (fuera del panel): se cierra.
     if (event.target === detailsDialog) closeDialog(detailsDialog);
+  });
+  detailsDialog.addEventListener("cancel", (event) => {
+    // Esc en una subpantalla vuelve a la lista; en la lista, cierra.
+    if (details.page === null) return;
+    event.preventDefault();
+    showPage(null);
   });
   detailsDialog.addEventListener("close", () => {
     if (speech.current?.messageId === "voice-test") stopSpeaking();
   });
   $("#details-avatar").addEventListener("click", () => openCreateDialog({ agentId: details.agentId }));
-  for (const tab of document.querySelectorAll("#details-dialog [role='tab']")) {
-    tab.addEventListener("click", () => showTab(tab.dataset.tab));
-    tab.addEventListener("keydown", onTabKeydown);
-  }
+  $("#details-profile").addEventListener("click", () => showPage("profile"));
+  for (const row of document.querySelectorAll("#details-groups [data-page]")) row.addEventListener("click", () => showPage(row.dataset.page));
+  $("#details-back").addEventListener("click", () => showPage(null));
+
+  const profileForm = $("#profile-form");
+  profileForm.addEventListener("submit", saveProfile);
+  profileForm.elements.description.addEventListener("input", updateDescriptionCount);
+
+  const brainForm = $("#brain-form");
+  brainForm.addEventListener("submit", saveBrain);
+  brainForm.elements.provider.addEventListener("change", () => {
+    updateProviderHint(brainForm);
+    void refreshModelOptions(brainForm);
+  });
+  brainForm.elements.model.addEventListener("change", () => refreshEffortOptions(brainForm));
+
+  $("#instructions-text").addEventListener("input", updateInstructionsCount);
+  $("#instructions-text").addEventListener("keydown", (event) => {
+    if (event.key === "s" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      void saveInstructions();
+    }
+  });
+  $("#instructions-save").addEventListener("click", () => void saveInstructions());
+
+  $("#memory-form").addEventListener("submit", saveMemory);
+  $("#skill-new").addEventListener("click", newSkill);
+  $("#skill-cancel").addEventListener("click", closeSkillForm);
+  $("#skill-form").addEventListener("submit", saveSkill);
+
   $("#details-new-routine").addEventListener("click", () => openRoutines(details.agentId));
-  $("#details-edit").addEventListener("click", () => void agentAction("edit", details.agentId));
   $("#details-pause").addEventListener("click", () => void agentAction("pause", details.agentId));
   $("#details-reset").addEventListener("click", () => void agentAction("reset", details.agentId));
   $("#details-delete").addEventListener("click", () => void agentAction("delete", details.agentId));
+  for (const radio of document.querySelectorAll('#access-form input[name="access"]')) {
+    radio.addEventListener("change", () => {
+      if (radio.checked) void changeAccess(radio.value);
+    });
+  }
+  for (const radio of document.querySelectorAll('#notify-form input[name="notify"]')) {
+    radio.addEventListener("change", () => {
+      if (radio.checked) void setNotify(radio.value);
+    });
+  }
+  $("#notify-enable").addEventListener("click", () => void enableNotifications());
+
   $("#voice-name").addEventListener("change", (event) => void saveVoice({ name: event.target.value }));
   $("#voice-rate").addEventListener("input", (event) => {
     $("#voice-rate-value").textContent = formatRate(Number(event.target.value));
@@ -6088,14 +6805,6 @@ function bindUi() {
   $("#open-shared").addEventListener("click", () => void openFolder("shared"));
   $("#copy-workspace").addEventListener("click", () => void copyText($("#computer-workspace").textContent));
   $("#copy-shared").addEventListener("click", () => void copyText($("#computer-shared").textContent));
-  $("#computer-change").addEventListener("click", () => {
-    if (state.settings.fullAccess) {
-      closeDialog(detailsDialog);
-      openSettings();
-    } else {
-      void agentAction("edit", details.agentId);
-    }
-  });
 
   // Uso del plan.
   $("#usage-button").addEventListener("click", toggleUsage);
@@ -6154,17 +6863,6 @@ function bindUi() {
   });
   $("#dictate").addEventListener("click", () => toggleDictation("dictate"));
   updateDictateButton();
-
-  const form = $("#agent-form");
-  form.addEventListener("submit", saveAgent);
-  $("#agent-cancel").addEventListener("click", () => closeDialog($("#agent-dialog")));
-  form.elements.provider.addEventListener("change", () => {
-    updateProviderHint();
-    updateAccessWarning();
-    void refreshModelOptions();
-  });
-  form.elements.model.addEventListener("change", () => refreshEffortOptions());
-  for (const radio of form.querySelectorAll('input[name="access"]')) radio.addEventListener("change", updateAccessWarning);
 
   buildDayPicker();
   const routineForm = $("#routine-form");

@@ -1,19 +1,41 @@
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
+import {
+  cleanInstructions,
+  composeSkill,
+  deleteSkill,
+  INSTRUCTIONS_MAX,
+  listSkills,
+  migrateInstructions,
+  newSkillId,
+  parseSkill,
+  readInstructions,
+  readSkill,
+  SKILL_LIMITS,
+  type SkillInfo,
+  writeInstructions,
+  writeSkill,
+} from "./agent-files.js";
 import { CHANNEL_LIMITS, composeChannelInput, findMentions, MAX_CHANNEL_MEMBERS, uniqueName } from "./channels.js";
 import {
   type AgentRecord,
   AVATAR_MAX,
   type ChannelRecord,
   type DeliveryRecord,
+  type MemoryRecord,
   type MessageRecord,
+  type NotifyLevel,
   type RoutineRecord,
+  type RoutineRun,
   type Store,
+  toNotify,
   toVoice,
   type VoiceSettings,
 } from "./db.js";
 import { buildInstructions, composeDeliveryInput, composeGreeting, GREETING_MARKER } from "./instructions.js";
+import { cleanMemory, describeMemories, MEMORY_LIMITS, searchMemories } from "./memories.js";
 import { type AccessLevel, type AgentClient, isProviderId, PROVIDER_IDS, type ProviderId } from "./providers/client.js";
 import {
   type AppServerNotification,
@@ -39,7 +61,11 @@ import {
   parseCreateAgentArgs,
   parseCreateChannelArgs,
   parseCreateRoutineArgs,
+  parseMemoryIdArgs,
+  parseMemoryInclusionArgs,
+  parseRememberArgs,
   parseRoutineIdArgs,
+  parseSearchMemoriesArgs,
   parseSendMessageArgs,
   parseUpdateAgentArgs,
   type QuestionOption,
@@ -50,9 +76,14 @@ import {
   TOOL_CREATE_CHANNEL,
   TOOL_CREATE_ROUTINE,
   TOOL_DELETE_ROUTINE,
+  TOOL_FORGET_MEMORY,
   TOOL_LIST_AGENTS,
+  TOOL_LIST_MEMORIES,
   TOOL_LIST_ROUTINES,
+  TOOL_REMEMBER,
+  TOOL_SEARCH_MEMORIES,
   TOOL_SEND_MESSAGE,
+  TOOL_SET_MEMORY_INCLUSION,
   TOOL_UPDATE_AGENT,
   type UpdateAgentArgs,
 } from "./team.js";
@@ -106,6 +137,11 @@ export const USAGE_META = "usage";
 const USAGE_PROVIDERS = ["claude", "codex", "grok", "gemini"] as const satisfies readonly ProviderId[];
 /** Al eliminar un agente que está trabajando: cuánto se espera a que su turno se detenga. */
 const STOP_WAIT_MS = 10_000;
+/** Ya se pasaron las instrucciones guardadas en la base a AGENTS.md (0.7.0). */
+export const INSTRUCTIONS_FILES_META = "instructions_files";
+/** Lo que se manda de las instrucciones en la lista de agentes (las completas se piden aparte). */
+const INSTRUCTIONS_PREVIEW = 400;
+export const DESCRIPTION_MAX = 2_000;
 
 /** Un modelo para elegir en el editor del agente. */
 export interface ModelOption {
@@ -159,6 +195,28 @@ export interface AgentView extends AgentRecord {
   unread: boolean;
   /** Es el bot principal (Claude Bot): arma los equipos y no se puede eliminar. */
   main: boolean;
+  /** Cuándo avisa (lo elegido o, si no eligió, lo de siempre: todo en Claude Bot y lo necesario en los demás). */
+  notify: NotifyLevel;
+  /** Largo de sus instrucciones: `instructions` trae solo el comienzo (las completas, en /instructions). */
+  instructionsLength: number;
+}
+
+/** Un recuerdo tal como lo ve la interfaz. */
+export type MemoryView = MemoryRecord;
+
+/** Una habilidad del agente tal como la ve la interfaz. */
+export interface SkillView extends SkillInfo {
+  enabled: boolean;
+}
+
+/** Aviso para el sistema (notificación del navegador), según «Avisarme» de cada agente. */
+export interface AlertEvent {
+  type: "alert";
+  agentId: string;
+  channelId: string | null;
+  kind: "reply" | "question" | "error";
+  title: string;
+  body: string;
 }
 
 export interface RoutineView extends RoutineRecord {
@@ -231,7 +289,10 @@ export type ServiceEvent =
   | { type: "settings"; settings: Settings }
   | { type: "sections"; sections: string[] }
   | { type: "usage"; usage: UsageView[] }
-  | { type: "notice"; level: "error" | "info"; message: string; agentId?: string };
+  | { type: "notice"; level: "error" | "info"; message: string; agentId?: string }
+  | { type: "memories"; agentId: string; memories: MemoryView[] }
+  | { type: "skills"; agentId: string; skills: SkillView[] }
+  | AlertEvent;
 
 export interface ServiceOptions {
   store: Store;
@@ -256,6 +317,7 @@ export interface ServiceOptions {
 export interface AgentInput {
   name: string;
   role?: string;
+  description?: string;
   instructions?: string;
   provider: ProviderId;
   model?: string | null;
@@ -268,6 +330,8 @@ export interface AgentInput {
   pinned?: boolean;
   hidden?: boolean;
   voice?: Partial<VoiceSettings>;
+  /** «Avisarme»: all, needs o none; null vuelve a lo de siempre. */
+  notify?: NotifyLevel | null;
 }
 
 export interface RoutineInput {
@@ -323,7 +387,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   readonly #clients = new Map<ProviderId, AgentClient>();
   readonly #clientReady = new Map<ProviderId, Promise<AgentClient>>();
   readonly #threadToAgent = new Map<string, string>();
-  readonly #loadedThreads = new Set<string>();
+  /** Hilos abiertos en su proveedor y la huella de las instrucciones con que se abrieron (si cambian, se reabren). */
+  readonly #loadedThreads = new Map<string, string>();
   readonly #active = new Map<string, TurnState>();
   readonly #draining = new Set<string>();
   readonly #scheduled = new Set<string>();
@@ -370,6 +435,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     mkdirSync(this.#options.workspacesDir, { recursive: true });
     mkdirSync(this.#options.sharedDir, { recursive: true });
     this.#ensureMainAgent();
+    this.#migrateInstructionFiles();
     for (const delivery of this.#store.reconcileUnfinished()) {
       this.#notice(delivery.agentId, "La app se reinició mientras este agente trabajaba; ese turno quedó interrumpido.");
     }
@@ -577,7 +643,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#clientReady.delete(provider);
     const client = this.#clients.get(provider) ?? (await ready?.catch(() => null)) ?? null;
     this.#clients.delete(provider);
-    for (const key of [...this.#loadedThreads]) if (key.startsWith(`${provider}:`)) this.#loadedThreads.delete(key);
+    for (const key of [...this.#loadedThreads.keys()]) if (key.startsWith(`${provider}:`)) this.#loadedThreads.delete(key);
     if (!client) return;
     client.removeAllListeners();
     await client.stop().catch(() => undefined);
@@ -623,10 +689,13 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const provider = validProvider(input.provider);
     const workspace = this.#uniqueWorkspace(name);
     mkdirSync(workspace, { recursive: true });
+    const instructions = cleanText(input.instructions, INSTRUCTIONS_MAX);
+    writeInstructions(workspace, instructions);
     const agent = this.#store.createAgent({
       name,
       role: cleanText(input.role, 200),
-      instructions: cleanText(input.instructions, 8_000),
+      description: cleanText(input.description, DESCRIPTION_MAX),
+      instructions: cleanInstructions(instructions),
       provider,
       model: cleanOptional(input.model, 120),
       effort: cleanOptional(input.effort, 20),
@@ -636,11 +705,12 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       ...(input.avatar === undefined ? {} : { avatar: cleanAvatar(input.avatar) }),
     });
     let created = agent;
-    if (input.voice !== undefined || input.pinned !== undefined || input.hidden !== undefined) {
+    if (input.voice !== undefined || input.pinned !== undefined || input.hidden !== undefined || input.notify !== undefined) {
       created = this.#store.updateAgent(agent.id, {
         ...(input.voice === undefined ? {} : { voice: toVoice({ ...agent.voice, ...input.voice }) }),
         ...(input.pinned === undefined ? {} : { pinned: input.pinned === true }),
         ...(input.hidden === undefined ? {} : { hidden: input.hidden === true }),
+        ...(input.notify === undefined ? {} : { notify: cleanNotify(input.notify) }),
       });
     }
     this.#emitAgents();
@@ -658,7 +728,9 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       next.name = name;
     }
     if (patch.role !== undefined) next.role = cleanText(patch.role, 200);
-    if (patch.instructions !== undefined) next.instructions = cleanText(patch.instructions, 8_000);
+    if (patch.description !== undefined) next.description = cleanText(patch.description, DESCRIPTION_MAX);
+    if (patch.instructions !== undefined) next.instructions = cleanInstructions(cleanText(patch.instructions, INSTRUCTIONS_MAX));
+    if (patch.notify !== undefined) next.notify = cleanNotify(patch.notify);
     if (patch.model !== undefined) next.model = cleanOptional(patch.model, 120);
     if (patch.effort !== undefined) next.effort = cleanOptional(patch.effort, 20);
     if (patch.access !== undefined) next.access = patch.access === "total" ? "total" : "carpeta";
@@ -677,6 +749,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         if (patch.effort === undefined) next.effort = null;
       }
     }
+    // El archivo es lo que lee el agente (y lo que él mismo edita): se escribe antes de guardarlo en la base.
+    if (next.instructions !== undefined) writeInstructions(agent.workspace, next.instructions);
     const updated = this.#store.updateAgent(id, next);
     if (agent.threadId) this.#loadedThreads.delete(`${agent.provider}:${agent.threadId}`);
     if (next.provider) {
@@ -911,7 +985,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     return { path: target, name: target.split(sep).pop() ?? "archivo", size: info.size, modifiedAt: Math.round(info.mtimeMs) };
   }
 
-  /** Carpeta de trabajo y compartida de un agente (para la pestaña «Computadora»). */
+  /** Carpeta de trabajo y compartida de un agente (para «Carpetas» en su ficha). */
   libraryBase(agentId: string, root: LibraryRoot): string {
     const agent = this.#requireAgent(agentId);
     return root === "shared" ? this.#options.sharedDir : agent.workspace;
@@ -1058,7 +1132,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   async #releaseClient(provider: ProviderId): Promise<void> {
     if (this.#stopping) return;
     if ([...this.#active.values()].some((state) => state.provider === provider)) return;
-    if ([...this.#loadedThreads].some((key) => key.startsWith(`${provider}:`))) return;
+    if ([...this.#loadedThreads.keys()].some((key) => key.startsWith(`${provider}:`))) return;
     const client = this.#clients.get(provider);
     if (!client) return;
     this.#clients.delete(provider);
@@ -1533,7 +1607,186 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     return result;
   }
 
+  // ---------- lo que sabe cada agente: instrucciones, recuerdos y habilidades ----------
+
+  /** Sus instrucciones completas, leídas de AGENTS.md (el agente también las edita). */
+  getInstructions(agentId: string): { text: string; max: number; file: string } {
+    const agent = this.#syncInstructions(this.#requireAgent(agentId));
+    return { text: agent.instructions, max: INSTRUCTIONS_MAX, file: join(agent.workspace, "AGENTS.md") };
+  }
+
+  /**
+   * Guarda sus instrucciones. Con `base` (lo que tenía la pantalla al empezar a editar), si el agente
+   * las cambió entre medio no se pisan: se avisa con un 409 y el texto nuevo.
+   */
+  saveInstructions(agentId: string, text: unknown, base?: unknown): AgentView {
+    const agent = this.#syncInstructions(this.#requireAgent(agentId));
+    if (typeof text !== "string") throw new ServiceError("Las instrucciones deben ser texto.");
+    if (typeof base === "string" && cleanInstructions(base) !== agent.instructions) {
+      throw new ServiceError("El agente cambió sus instrucciones mientras las editabas. Revisa la versión nueva antes de guardar.", 409);
+    }
+    return this.updateAgent(agentId, { instructions: text });
+  }
+
+  listMemories(agentId: string): MemoryView[] {
+    this.#requireAgent(agentId);
+    return this.#store.listMemories(agentId);
+  }
+
+  createMemory(agentId: string, input: { text?: unknown; always?: unknown }, createdBy: "user" | "agent" = "user"): MemoryView {
+    const agent = this.#requireAgent(agentId);
+    const text = asServiceError(() => cleanMemory(input.text));
+    const memories = this.#store.listMemories(agent.id);
+    const same = memories.find((memory) => memory.text.toLowerCase() === text.toLowerCase());
+    if (same) {
+      if (input.always === true && !same.always) return this.updateMemory(same.id, { always: true });
+      return same;
+    }
+    if (memories.length >= MEMORY_LIMITS.perAgent) {
+      throw new ServiceError(`${agent.name} ya tiene ${MEMORY_LIMITS.perAgent} recuerdos, el máximo: borra alguno antes de guardar otro.`, 409);
+    }
+    const memory = this.#store.insertMemory({ agentId: agent.id, text, always: input.always === true, createdBy });
+    this.#emitMemories(agent.id);
+    return memory;
+  }
+
+  updateMemory(id: string, input: { text?: unknown; always?: unknown }): MemoryView {
+    const memory = this.#requireMemory(id);
+    const patch: { text?: string; always?: boolean } = {};
+    if (input.text !== undefined) patch.text = asServiceError(() => cleanMemory(input.text));
+    if (input.always !== undefined) {
+      if (typeof input.always !== "boolean") throw new ServiceError("Indica always: true o false.");
+      patch.always = input.always;
+    }
+    const updated = this.#store.updateMemory(memory.id, patch) as MemoryRecord;
+    this.#emitMemories(memory.agentId);
+    return updated;
+  }
+
+  deleteMemory(id: string): void {
+    const memory = this.#requireMemory(id);
+    this.#store.deleteMemory(memory.id);
+    this.#emitMemories(memory.agentId);
+  }
+
+  /** Sus habilidades (carpetas con SKILL.md en .agents/skills o .claude/skills de su carpeta). */
+  listSkills(agentId: string): SkillView[] {
+    const agent = this.#requireAgent(agentId);
+    const off = new Set(agent.skillsOff);
+    return listSkills(agent.workspace).map((skill) => ({ ...skill, enabled: !off.has(skill.id) }));
+  }
+
+  getSkill(agentId: string, skillId: string): { skill: SkillView; text: string } {
+    const agent = this.#requireAgent(agentId);
+    const text = asServiceError(() => readSkill(agent.workspace, skillId));
+    const skill = this.listSkills(agentId).find((item) => item.id === skillId);
+    if (text === null || !skill) throw new ServiceError("Esa habilidad ya no existe.", 404);
+    return { skill, text };
+  }
+
+  /** Crea una habilidad: su carpeta en .agents/skills con un SKILL.md armado con nombre, descripción y pasos. */
+  createSkill(agentId: string, input: { name?: unknown; description?: unknown; body?: unknown }): SkillView {
+    const agent = this.#requireAgent(agentId);
+    const name = cleanText(input.name, SKILL_LIMITS.name).replace(/\s+/g, " ");
+    if (!name) throw new ServiceError("Ponle un nombre a la habilidad.");
+    const description = cleanText(input.description, SKILL_LIMITS.description).replace(/\s+/g, " ");
+    const body = cleanText(input.body, SKILL_LIMITS.text);
+    if (!body) throw new ServiceError("Escribe los pasos de la habilidad.");
+    if (this.listSkills(agentId).some((skill) => skill.name.toLowerCase() === name.toLowerCase())) {
+      throw new ServiceError(`${agent.name} ya tiene una habilidad llamada «${name}».`, 409);
+    }
+    const id = newSkillId(agent.workspace, name);
+    asServiceError(() => writeSkill(agent.workspace, id, composeSkill(name, description, body)));
+    this.#emitSkills(agent.id);
+    const skill = this.listSkills(agentId).find((item) => item.id === id);
+    if (!skill) throw new ServiceError("No se pudo crear la habilidad.", 500);
+    return skill;
+  }
+
+  /** Guarda el SKILL.md completo (encabezado y pasos). */
+  saveSkill(agentId: string, skillId: string, text: unknown): SkillView {
+    const agent = this.#requireAgent(agentId);
+    if (typeof text !== "string" || !text.trim()) throw new ServiceError("La habilidad no puede quedar vacía.");
+    if (text.length > SKILL_LIMITS.text) throw new ServiceError(`Una habilidad admite hasta ${SKILL_LIMITS.text} caracteres.`);
+    if (asServiceError(() => readSkill(agent.workspace, skillId)) === null) throw new ServiceError("Esa habilidad ya no existe.", 404);
+    const folder = skillId.split("/").pop() ?? "";
+    const parsed = parseSkill(text, folder);
+    const clash = this.listSkills(agentId).find((skill) => skill.id !== skillId && skill.name.toLowerCase() === parsed.name.toLowerCase());
+    if (clash) throw new ServiceError(`Ya hay otra habilidad llamada «${parsed.name}».`, 409);
+    asServiceError(() => writeSkill(agent.workspace, skillId, text));
+    this.#emitSkills(agent.id);
+    const skill = this.listSkills(agentId).find((item) => item.id === skillId);
+    if (!skill) throw new ServiceError("Esa habilidad ya no existe.", 404);
+    return skill;
+  }
+
+  setSkillEnabled(agentId: string, skillId: string, enabled: boolean): SkillView {
+    const agent = this.#requireAgent(agentId);
+    const skill = this.listSkills(agentId).find((item) => item.id === skillId);
+    if (!skill) throw new ServiceError("Esa habilidad ya no existe.", 404);
+    const off = new Set(agent.skillsOff.filter((id) => id !== skillId));
+    if (!enabled) off.add(skillId);
+    this.#store.updateAgent(agent.id, { skillsOff: [...off] });
+    this.#emitSkills(agent.id);
+    return { ...skill, enabled };
+  }
+
+  deleteSkill(agentId: string, skillId: string): void {
+    const agent = this.#requireAgent(agentId);
+    if (!this.listSkills(agentId).some((item) => item.id === skillId)) throw new ServiceError("Esa habilidad ya no existe.", 404);
+    asServiceError(() => deleteSkill(agent.workspace, skillId));
+    if (agent.skillsOff.includes(skillId)) this.#store.updateAgent(agent.id, { skillsOff: agent.skillsOff.filter((id) => id !== skillId) });
+    this.#emitSkills(agent.id);
+  }
+
+  /** Lo que lee el agente de AGENTS.md pasa a la base (para la lista y para Claude Bot). */
+  #syncInstructions(agent: AgentRecord): AgentRecord {
+    const text = readInstructions(agent.workspace) ?? "";
+    return text === agent.instructions ? agent : this.#store.updateAgent(agent.id, { instructions: text });
+  }
+
+  /** Al pasar a la 0.7.0: las instrucciones guardadas en la base pasan a AGENTS.md de cada agente (una sola vez). */
+  #migrateInstructionFiles(): void {
+    if (this.#store.getMeta(INSTRUCTIONS_FILES_META) === "1") return;
+    for (const agent of this.#store.listAgents()) {
+      try {
+        mkdirSync(agent.workspace, { recursive: true });
+        const text = migrateInstructions(agent.workspace, agent.instructions);
+        if (text !== agent.instructions) this.#store.updateAgent(agent.id, { instructions: text });
+      } catch (error) {
+        this.#log("warn", `No pude pasar a AGENTS.md las instrucciones de «${agent.name}»: ${errorText(error)}`);
+      }
+    }
+    this.#store.setMeta(INSTRUCTIONS_FILES_META, "1");
+  }
+
+  /** Las habilidades encendidas del agente, para sus instrucciones. */
+  #activeSkills(agent: AgentRecord): SkillInfo[] {
+    const off = new Set(agent.skillsOff);
+    return listSkills(agent.workspace).filter((skill) => !off.has(skill.id));
+  }
+
+  #requireMemory(id: string): MemoryRecord {
+    const memory = this.#store.getMemory(id);
+    if (!memory) throw new ServiceError("Ese recuerdo ya no existe.", 404);
+    return memory;
+  }
+
+  #emitMemories(agentId: string): void {
+    this.#emit({ type: "memories", agentId, memories: this.#store.listMemories(agentId) });
+  }
+
+  #emitSkills(agentId: string): void {
+    this.#emit({ type: "skills", agentId, skills: this.listSkills(agentId) });
+  }
+
   // ---------- rutinas ----------
+
+  /** Las últimas ejecuciones de una rutina, con lo que respondió el agente. */
+  routineRuns(id: string): RoutineRun[] {
+    this.#requireRoutine(id);
+    return this.#store.listRoutineRuns(id, 10).map((run) => ({ ...run, reply: clip(run.reply, 600) }));
+  }
 
   listRoutines(agentId?: string): RoutineView[] {
     return this.#store.listRoutines(agentId).map((routine) => this.#routineView(routine));
@@ -1762,7 +2015,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (this.#stopping) return;
     if (this.#clients.get(provider) === client) this.#clients.delete(provider);
     this.#clientReady.delete(provider);
-    for (const key of [...this.#loadedThreads]) if (key.startsWith(`${provider}:`)) this.#loadedThreads.delete(key);
+    for (const key of [...this.#loadedThreads.keys()]) if (key.startsWith(`${provider}:`)) this.#loadedThreads.delete(key);
     for (const [agentId, state] of [...this.#active]) {
       if (state.provider !== provider) continue;
       // Si se cerró porque le falta la sesión (Antigravity sin entrar), el aviso ya lo explica.
@@ -1788,7 +2041,11 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       runtimeWorkspaceRoots: [agent.workspace, this.#options.sharedDir],
       approvalPolicy: "never",
       sandbox: this.#access(agent) === "total" ? "danger-full-access" : "workspace-write",
-      developerInstructions: buildInstructions({ ...agent, access: this.#access(agent) }, this.#options.sharedDir, this.getSettings().userName, { main }),
+      developerInstructions: buildInstructions({ ...agent, access: this.#access(agent) }, this.#options.sharedDir, this.getSettings().userName, {
+        main,
+        memories: describeMemories(this.#store.listMemories(agent.id)),
+        skills: this.#activeSkills(agent),
+      }),
     };
     if (agent.model) params.model = agent.model;
     if (agent.effort && agent.provider !== "codex") params.effort = agent.effort;
@@ -1801,10 +2058,13 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (agent.threadId) {
       this.#threadToAgent.set(agent.threadId, agent.id);
       const key = `${agent.provider}:${agent.threadId}`;
-      if (this.#loadedThreads.has(key)) return agent.threadId;
+      const params = this.#threadParams(agent, false);
+      // Si cambió lo que sabe (instrucciones, recuerdos, habilidades…), se reabre para que lo use desde este mensaje.
+      const print = paramsPrint(params);
+      if (this.#loadedThreads.get(key) === print) return agent.threadId;
       try {
-        await client.request("thread/resume", { threadId: agent.threadId, ...this.#threadParams(agent, false) });
-        this.#loadedThreads.add(key);
+        await client.request("thread/resume", { threadId: agent.threadId, ...params });
+        this.#loadedThreads.set(key, print);
         return agent.threadId;
       } catch (error) {
         this.#notice(agent.id, `No se pudo reanudar la conversación anterior (${errorText(error)}). Empiezo una nueva: el agente no recordará lo anterior.`);
@@ -1819,7 +2079,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const threadId = response.thread.id;
     this.#store.updateAgent(agent.id, { threadId });
     this.#threadToAgent.set(threadId, agent.id);
-    this.#loadedThreads.add(`${agent.provider}:${threadId}`);
+    // La huella es la de reanudar (Codex no repite ahí las herramientas): así el próximo mensaje no lo reabre por nada.
+    this.#loadedThreads.set(`${agent.provider}:${threadId}`, paramsPrint(this.#threadParams(agent, false)));
     return threadId;
   }
 
@@ -1883,7 +2144,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     let known: { note: string | null; saved: string; previous: string | null } | null = null;
     try {
       const client = await this.#getClient(agent.provider);
-      const fresh = this.#requireAgent(agent.id);
+      // Lo que tenga ahora su AGENTS.md (el usuario o el propio agente pudieron cambiarlo).
+      const fresh = this.#syncInstructions(this.#requireAgent(agent.id));
       const threadId = await this.#ensureThread(fresh, client);
       state.threadId = threadId;
       const sender = delivery.senderAgentId ? this.#store.getAgent(delivery.senderAgentId) : null;
@@ -1932,6 +2194,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       this.#store.updateDelivery(delivery.id, { status: "failed", error: errorText(error), finishedAt: Date.now() });
       this.#updateMessageStatus(agent.id, delivery.messageId, "failed");
       this.#notice(agent.id, `No se pudo entregar el mensaje${channel ? ` a ${agent.name}` : ""}: ${errorText(error)}`, delivery.channelId);
+      this.#alert(agent.id, "error", `No pudo empezar: ${errorText(error)}`, delivery.channelId);
       this.#emitQueue(agent.id);
       this.#emitAgents();
       if (channel) this.#emitChannels();
@@ -1948,6 +2211,14 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const terminal = status === "failed" ? "failed" : status === "interrupted" ? "interrupted" : "completed";
     const delivery = this.#store.updateDelivery(state.deliveryId, { status: terminal, finishedAt: Date.now() });
     if (delivery) this.#updateMessageStatus(agentId, delivery.messageId, terminal);
+    // Pudo editar su AGENTS.md en este turno: la lista y Claude Bot ven lo nuevo.
+    const record = this.#store.getAgent(agentId);
+    if (record) this.#syncInstructions(record);
+    // «Avisarme»: la pregunta ya avisó al hacerse; aquí, lo que respondió o que no pudo terminar.
+    if (terminal === "failed") this.#alert(agentId, "error", "No pudo terminar. Abre la conversación para ver qué pasó.", state.channelId);
+    else if (terminal === "completed" && !state.askedQuestion && state.lastAssistantText.trim()) {
+      this.#alert(agentId, "reply", state.lastAssistantText, state.channelId);
+    }
     for (const messageId of state.assistantMessageIds) {
       const message = this.#store.getMessage(messageId);
       if (message?.status === "streaming") this.#updateMessageStatus(agentId, messageId, terminal);
@@ -2182,6 +2453,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         id: agent.id,
         nombre: agent.name,
         rol: agent.role || "Asistente general",
+        ...(agent.description ? { descripcion: clip(agent.description, 300) } : {}),
         proyecto: agent.project || null,
         proveedor: agent.provider,
         estado: agent.state === "working" ? "trabajando" : agent.state === "queued" ? "con cola" : agent.state === "paused" ? "en pausa" : "libre",
@@ -2212,6 +2484,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         : this.#updateAgentFromMain(senderId, parseUpdateAgentArgs(params.arguments), params.turnId);
     }
     if (params.tool === TOOL_ASK_USER) return this.#askUser(senderId, parseAskUserArgs(params.arguments), params.turnId);
+    if (params.tool === TOOL_REMEMBER || params.tool === TOOL_FORGET_MEMORY || params.tool === TOOL_SEARCH_MEMORIES) return this.#memoryTool(senderId, params);
+    if (params.tool === TOOL_LIST_MEMORIES || params.tool === TOOL_SET_MEMORY_INCLUSION) return this.#memoryTool(senderId, params);
     if (params.tool === TOOL_CREATE_ROUTINE) {
       const routine = this.createRoutine(senderId, isRecord(params.arguments) ? params.arguments : {}, "agent");
       return toolResult({
@@ -2257,6 +2531,73 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     return toolResult(receipt);
   }
 
+  /** Herramientas de recuerdos: cada agente solo ve y toca los suyos. */
+  #memoryTool(agentId: string, params: DynamicToolCallParams): DynamicToolResult {
+    const view = (memory: MemoryRecord) => ({ id: memory.id, texto: memory.text, siempre: memory.always });
+    const own = (id: string): MemoryRecord => {
+      const memory = this.#store.getMemory(id);
+      if (!memory || memory.agentId !== agentId) throw new Error("No tienes un recuerdo con ese id; míralos con list_memories.");
+      return memory;
+    };
+    switch (params.tool) {
+      case TOOL_REMEMBER: {
+        const args = parseRememberArgs(params.arguments);
+        const before = this.#store.countMemories(agentId);
+        let memory: MemoryRecord;
+        try {
+          memory = this.createMemory(agentId, args, "agent");
+        } catch (error) {
+          throw new Error(errorText(error));
+        }
+        const fresh = this.#store.countMemories(agentId) > before;
+        if (fresh) this.#activity(agentId, `Guardó un recuerdo: «${clip(memory.text, 120)}»`, params.turnId, { kind: "memory-saved", memoryId: memory.id });
+        return toolResult({
+          guardado: true,
+          ...(fresh ? {} : { nota: "Ya lo tenías guardado." }),
+          ...view(memory),
+          ...(memory.always ? { cuando: "Desde tu próximo mensaje va en tus instrucciones." } : {}),
+        });
+      }
+      case TOOL_FORGET_MEMORY: {
+        const memory = own(parseMemoryIdArgs(params.arguments).id);
+        this.deleteMemory(memory.id);
+        this.#activity(agentId, `Olvidó un recuerdo: «${clip(memory.text, 120)}»`, params.turnId, { kind: "memory-deleted" });
+        return toolResult({ borrado: true, texto: memory.text });
+      }
+      case TOOL_SEARCH_MEMORIES: {
+        const { query } = parseSearchMemoriesArgs(params.arguments);
+        const found = searchMemories(this.#store.listMemories(agentId), query);
+        return toolResult(found.length ? { recuerdos: found.map(view) } : { recuerdos: [], nota: "No encontré recuerdos sobre eso." });
+      }
+      case TOOL_LIST_MEMORIES: {
+        const memories = this.#store.listMemories(agentId);
+        return toolResult({ recuerdos: memories.map(view), total: memories.length, maximo: MEMORY_LIMITS.perAgent });
+      }
+      case TOOL_SET_MEMORY_INCLUSION: {
+        const args = parseMemoryInclusionArgs(params.arguments);
+        const memory = own(args.id);
+        const updated = memory.always === args.always ? memory : this.updateMemory(memory.id, { always: args.always });
+        return toolResult({ actualizado: true, ...view(updated) });
+      }
+      default:
+        throw new Error(`Herramienta desconocida: ${params.tool}`);
+    }
+  }
+
+  /** Una línea de actividad en la conversación del agente (y en su canal, si trabaja para uno). */
+  #activity(agentId: string, text: string, turnId: string | null, payload: Record<string, unknown>): void {
+    const message = this.#store.insertMessage({
+      agentId,
+      role: "activity",
+      text,
+      status: "completed",
+      turnId,
+      payload,
+      channelId: this.#active.get(agentId)?.channelId ?? null,
+    });
+    this.#emit({ type: "message", agentId, message });
+  }
+
   #askUser(agentId: string, args: AskUserArgs, turnId: string | null): DynamicToolResult {
     const message = this.#store.insertMessage({
       agentId,
@@ -2271,6 +2612,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (state) state.askedQuestion = args.question;
     else this.#store.updateAgent(agentId, { preview: `Pregunta: ${args.question}`.slice(0, 240) });
     this.#emit({ type: "message", agentId, message });
+    this.#alert(agentId, "question", args.question, message.channelId);
     this.#emitAgents();
     if (message.channelId) this.#emitChannels();
     return toolResult({
@@ -2303,6 +2645,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       agent = this.createAgent({
         name: args.name,
         role: args.role,
+        description: args.description,
         instructions: args.instructions,
         provider,
         model: args.model,
@@ -2397,7 +2740,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   /** update_agent del bot principal: cambia solo lo indicado y lo deja marcado en ambas conversaciones. */
   #updateAgentFromMain(mainId: string, args: UpdateAgentArgs, turnId: string | null): DynamicToolResult {
     const main = this.#requireAgent(mainId);
-    const target = this.#resolveAgentRef(args.agent);
+    const target = this.#syncInstructions(this.#resolveAgentRef(args.agent));
     if (target.id === mainId) throw new Error("No puedes cambiarte a ti mismo: eso lo hace el usuario desde «Editar agente».");
     const patch: Partial<AgentInput> = {};
     const changes: string[] = [];
@@ -2409,7 +2752,11 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       patch.role = args.role;
       changes.push("rol");
     }
-    if (args.instructions !== undefined && args.instructions !== target.instructions) {
+    if (args.description !== undefined && args.description !== target.description) {
+      patch.description = args.description;
+      changes.push("descripción");
+    }
+    if (args.instructions !== undefined && cleanInstructions(args.instructions) !== target.instructions) {
       patch.instructions = args.instructions;
       changes.push("instrucciones");
     }
@@ -2620,14 +2967,31 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   #view(agent: AgentRecord): AgentView {
     const queued = this.#store.countQueued(agent.id);
     const state: AgentState = this.#active.has(agent.id) ? "working" : agent.paused ? "paused" : queued > 0 ? "queued" : "idle";
-    return { ...agent, state, queued, unread: agent.lastAt > agent.readAt, main: this.#isMain(agent) };
+    const main = this.#isMain(agent);
+    return {
+      ...agent,
+      // Las instrucciones pueden ser largas (hasta 32 000 caracteres): en la lista va solo el comienzo.
+      instructions: agent.instructions.length > INSTRUCTIONS_PREVIEW ? `${agent.instructions.slice(0, INSTRUCTIONS_PREVIEW)}…` : agent.instructions,
+      instructionsLength: agent.instructions.length,
+      notify: this.#notifyLevel(agent),
+      state,
+      queued,
+      unread: agent.lastAt > agent.readAt,
+      main,
+    };
+  }
+
+  /** «Avisarme» del agente: lo que eligió el usuario o, si no eligió, todo en Claude Bot y lo necesario en los demás. */
+  #notifyLevel(agent: AgentRecord): NotifyLevel {
+    return agent.notify || (this.#isMain(agent) ? "all" : "needs");
   }
 
   #uniqueWorkspace(name: string): string {
     const base = slugify(name) || "agente";
     const taken = new Set(this.#store.listAgents().map((agent) => agent.workspace));
+    // Una carpeta que ya existe (la de un agente eliminado) no se reutiliza: traería sus instrucciones y habilidades.
     let candidate = join(this.#options.workspacesDir, base);
-    for (let index = 2; taken.has(candidate); index += 1) candidate = join(this.#options.workspacesDir, `${base}-${index}`);
+    for (let index = 2; taken.has(candidate) || existsSync(candidate); index += 1) candidate = join(this.#options.workspacesDir, `${base}-${index}`);
     return candidate;
   }
 
@@ -2637,6 +3001,27 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (!current || (current.channelId && current.role === "user")) return;
     const message = this.#store.updateMessage(messageId, { status });
     if (message) this.#emit({ type: "message", agentId, message });
+  }
+
+  /**
+   * Notificación para el sistema según «Avisarme» del agente: con «Solo cuando me necesite», sus preguntas
+   * y errores; con «Toda la actividad», además lo que responde. La interfaz la muestra si no está a la vista.
+   */
+  #alert(agentId: string, kind: AlertEvent["kind"], text: string, channelId: string | null): void {
+    const agent = this.#store.getAgent(agentId);
+    if (!agent) return;
+    const level = this.#notifyLevel(agent);
+    if (level === "none" || (kind === "reply" && level !== "all")) return;
+    const channel = channelId ? this.#store.getChannel(channelId) : null;
+    const body = clip(text.replace(/\s+/g, " "), 180);
+    this.#emit({
+      type: "alert",
+      agentId,
+      channelId: channel ? channel.id : null,
+      kind,
+      title: channel ? `${agent.name} en «${channel.name}»` : agent.name,
+      body: kind === "question" ? `Pregunta: ${body}` : body,
+    });
   }
 
   /** Aviso en la conversación del agente; durante un encargo de un canal, en ese canal. */
@@ -2727,6 +3112,13 @@ function cleanText(value: unknown, max: number): string {
   const text = typeof value === "string" ? value.trim() : "";
   if (text.length > max) throw new ServiceError(`El texto admite hasta ${max} caracteres.`);
   return text;
+}
+
+function cleanNotify(value: unknown): NotifyLevel | "" {
+  if (value === null || value === "") return "";
+  const level = toNotify(value);
+  if (!level) throw new ServiceError("«Avisarme» debe ser all, needs o none.");
+  return level;
 }
 
 function cleanAvatar(value: unknown): number {
@@ -2850,6 +3242,11 @@ function readOptions(payload: Record<string, unknown>): QuestionOption[] {
     label: typeof option.label === "string" ? option.label : "",
     detail: typeof option.detail === "string" ? option.detail : "",
   }));
+}
+
+/** Huella de lo que recibe un hilo al abrirse (instrucciones, modelo, herramientas…). */
+function paramsPrint(params: Record<string, unknown>): string {
+  return createHash("sha256").update(JSON.stringify(params)).digest("hex").slice(0, 24);
 }
 
 function clip(text: string, max: number): string {

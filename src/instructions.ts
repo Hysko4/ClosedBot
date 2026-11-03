@@ -1,7 +1,10 @@
 // Basado en developerInstructions() de OpenBot v0.1.11 (src/backend/agent-service.ts),
 // Copyright 2026 Norbert Bodziony, con licencia Apache-2.0 (ver licenses/OPENBOT-APACHE-2.0.txt y NOTICE).
-// Modificado para ClosedBot: traducido, sin navegador integrado y con niveles de acceso.
+// Modificado para ClosedBot: traducido, sin navegador integrado, con niveles de acceso, instrucciones en
+// AGENTS.md, recuerdos y habilidades.
 
+import { join } from "node:path";
+import { INSTRUCTIONS_FILE, INSTRUCTIONS_MAX, SKILL_ROOTS, type SkillInfo } from "./agent-files.js";
 import type { AgentRecord, DeliveryRecord } from "./db.js";
 
 /**
@@ -13,7 +16,7 @@ export const MAIN_AGENT_GUIDE = [
   "Cómo armar un equipo:",
   "1. Entiende el objetivo. Si falta un dato que cambia el equipo, pregúntalo una sola vez con ask_user; si no, decide tú y explica tus supuestos.",
   "2. Mira con list_agents quién existe ya: reutiliza o ajusta agentes (update_agent) antes de crear otros parecidos.",
-  "3. Diseña un equipo pequeño y enfocado, por lo general de 2 a 5 agentes (nunca más de 8 por pedido), con un líder que reparte el trabajo. Dale a cada uno un nombre claro y único, su rol en una frase e instrucciones concretas: qué hace, qué entrega, con quién coordina y cuándo preguntarle al usuario.",
+  "3. Diseña un equipo pequeño y enfocado, por lo general de 2 a 5 agentes (nunca más de 8 por pedido), con un líder que reparte el trabajo. Dale a cada uno un nombre claro y único, su rol en una frase, una descripción breve (para qué sirve y qué entrega) e instrucciones concretas: qué hace, qué entrega, con quién coordina y cuándo preguntarle al usuario.",
   "4. Créalos con create_agent, todos con el mismo proyecto: un nombre corto que describa el objetivo (p. ej. «Creación de Juegos»). El proyecto es la sección de la barra lateral donde quedan agrupados.",
   "5. Crea el canal del equipo con create_channel: el mismo nombre del proyecto, todo el equipo como miembros (sin ti) y el líder como encargado. Ahí el usuario le habla a todo el equipo a la vez. Si ya existe un canal para ese equipo (list_agents muestra los canales), no crees otro.",
   "6. Envíale el primer encargo al líder con send_message: el objetivo del usuario, el plan y quién hace qué. El trabajo lo hace el equipo, no tú.",
@@ -25,25 +28,54 @@ export const MAIN_AGENT_GUIDE = [
   "Si el usuario solo conversa o pregunta algo, respóndele directamente sin crear agentes.",
 ].join("\n");
 
-export function buildInstructions(agent: AgentRecord, sharedDir: string, userName = "", options: { main?: boolean } = {}): string {
+/** Lo que se suma a las instrucciones de un agente además de su perfil. */
+export interface InstructionOptions {
+  /** Es el bot principal (Claude Bot). */
+  main?: boolean;
+  /** Sus recuerdos, ya descritos (ver describeMemories). */
+  memories?: string | null;
+  /** Sus habilidades activas. */
+  skills?: Array<Pick<SkillInfo, "name" | "description" | "file">>;
+}
+
+export function buildInstructions(agent: AgentRecord, sharedDir: string, userName = "", options: InstructionOptions = {}): string {
+  const main = options.main === true;
   const profile = JSON.stringify(
     {
       nombre: agent.name,
-      rol: agent.role.trim() || "Asistente general",
-      instrucciones: agent.instructions.trim() || "Sin instrucciones adicionales.",
+      titulo: agent.role.trim() || (main ? "Bot principal" : "Asistente general"),
+      ...(agent.description.trim() ? { descripcion: agent.description.trim() } : {}),
     },
     null,
     2,
   );
+  const instructions = agent.instructions.trim();
+  const file = join(agent.workspace, INSTRUCTIONS_FILE);
+  const skills = options.skills ?? [];
   return [
     "Eres un agente persistente de ClosedBot, el equipo personal de agentes del usuario, con este perfil configurado por el usuario:",
     "<perfil_agente>",
     profile,
     "</perfil_agente>",
-    options.main ? MAIN_AGENT_GUIDE : null,
-    options.main
-      ? "Las instrucciones de tu perfil son preferencias del usuario para armar sus equipos: síguelas junto con lo anterior."
-      : "El rol y las instrucciones son tu encargo permanente: úsalos para priorizar, elegir la experiencia adecuada y decidir cuándo delegar en un compañero. Síguelos en todos los turnos salvo que el usuario pida algo más concreto para la tarea actual.",
+    instructions
+      ? `<instrucciones archivo="${INSTRUCTIONS_FILE}">\n${instructions}\n</instrucciones>`
+      : main
+        ? "El usuario todavía no te dejó preferencias."
+        : "Todavía no tienes instrucciones permanentes: haz lo que te pidan en el chat.",
+    main ? MAIN_AGENT_GUIDE : null,
+    main
+      ? "Tus instrucciones son preferencias del usuario para armar sus equipos: síguelas junto con lo anterior."
+      : "Tu título, tu descripción y tus instrucciones son tu encargo permanente: úsalos para priorizar, elegir la experiencia adecuada y decidir cuándo delegar en un compañero. Síguelos en todos los turnos salvo que el usuario pida algo más concreto para la tarea actual.",
+    `Tus instrucciones están en el archivo ${file}. Si el usuario te pide cambiar para siempre cómo trabajas (no solo en esta tarea), edita ese archivo: rige desde tu próximo mensaje. Hasta ${INSTRUCTIONS_MAX.toLocaleString("es")} caracteres y sin notas de trabajo.`,
+    options.memories ?? null,
+    "Con remember guardas recuerdos duraderos (datos, preferencias y decisiones del usuario que te servirán en otras conversaciones); con search_memories los buscas, con list_memories los ves todos y con forget_memory borras los que quedaron viejos. No guardes notas de la tarea actual ni repitas lo que ya tienes.",
+    skills.length
+      ? [
+          "Tus habilidades (guías paso a paso en tu carpeta). Cuando una tarea calce con una, lee su archivo completo y síguelo:",
+          ...skills.map((skill) => `- «${skill.name}»${skill.description ? `: ${skill.description}` : ""} (${skill.file})`),
+        ].join("\n")
+      : null,
+    `Si el usuario te enseña un procedimiento que se va a repetir, guárdalo como habilidad: crea ${SKILL_ROOTS[0]}/<nombre-corto>/SKILL.md que empiece con un encabezado («---», «name: …», «description: para qué sirve y cuándo usarla», «---») y debajo los pasos.`,
     `Tu carpeta de trabajo es ${agent.workspace}.`,
     `La carpeta compartida por todo el equipo es ${sharedDir}.`,
     agent.access === "total"

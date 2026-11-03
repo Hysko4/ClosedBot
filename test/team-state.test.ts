@@ -83,7 +83,7 @@ test("foto guardada: se lee lo válido y lo dañado cuenta como que no se le con
   for (const raw of [null, "", "no es json", "[]", '{"agents":[]}', '{"agents":{},"channels":null}']) assert.equal(parseTeamSnapshot(raw), null, String(raw));
   assert.deepEqual(parseTeamSnapshot('{"threadId":5,"agents":{"a":{"name":"Ana","paused":"sí"},"b":3},"channels":{"c":{"name":"C","members":["a",1]}}}'), {
     threadId: null,
-    agents: { a: { name: "Ana", role: "", instructions: "", project: "", provider: "", model: null, paused: false } },
+    agents: { a: { name: "Ana", role: "", description: "", instructions: "", project: "", provider: "", model: null, paused: false } },
     channels: { c: { name: "C", members: ["a"], lead: null, deleted: false } },
   });
 });

@@ -195,74 +195,6 @@
       </main>
     </div>
 
-    <dialog class="dialog" id="agent-dialog" aria-labelledby="agent-dialog-title">
-      <form id="agent-form" method="dialog" novalidate>
-        <header class="dialog-header">
-          <h2 id="agent-dialog-title">Nuevo agente</h2>
-        </header>
-        <div class="dialog-body">
-          <div class="field-row">
-            <label class="field">
-              <span>Nombre</span>
-              <input name="name" maxlength="60" required placeholder="Ej.: Director de Programación" />
-            </label>
-            <label class="field" id="project-field">
-              <span>Sección</span>
-              <input name="project" maxlength="60" list="project-options" placeholder="Ej.: Creación de Juegos" autocomplete="off" />
-            </label>
-          </div>
-          <datalist id="project-options"></datalist>
-          <label class="field">
-            <span>Rol</span>
-            <input name="role" maxlength="200" placeholder="Ej.: Investigadora, Programador, Revisora" />
-          </label>
-          <label class="field">
-            <span id="instructions-label">Instrucciones permanentes</span>
-            <textarea name="instructions" rows="4" maxlength="8000" placeholder="Cómo quieres que trabaje, qué debe priorizar, cuándo pedir ayuda…"></textarea>
-          </label>
-          <label class="field">
-            <span>Proveedor</span>
-            <select name="provider"></select>
-          </label>
-          <p class="hint" id="provider-hint"></p>
-          <div class="field-row">
-            <label class="field">
-              <span>Modelo</span>
-              <select name="model"></select>
-            </label>
-            <label class="field">
-              <span>Esfuerzo</span>
-              <select name="effort"></select>
-            </label>
-          </div>
-          <fieldset class="field access" id="access-field">
-            <legend>Acceso</legend>
-            <label class="choice">
-              <input type="radio" name="access" value="carpeta" checked />
-              <span><strong>Solo su carpeta</strong> (recomendado): escribe en su carpeta y en la compartida, con sandbox.</span>
-            </label>
-            <label class="choice">
-              <input type="radio" name="access" value="total" />
-              <span><strong>Acceso total</strong>: comandos y archivos de todo el equipo, sin pedir permiso.</span>
-            </label>
-            <p class="hint" id="access-hint" hidden>
-              En este equipo (Windows), los agentes de Claude en «Solo su carpeta» no tienen terminal: trabajan con archivos de su carpeta,
-              la web y sus compañeros.
-            </p>
-            <p class="warning" id="access-warning" hidden>
-              Con acceso total el agente puede borrar, instalar o leer cualquier cosa del equipo, incluidas credenciales. Úsalo solo en una
-              máquina dedicada a ClosedBot.
-            </p>
-          </fieldset>
-          <p class="form-error" id="agent-error" role="alert"></p>
-        </div>
-        <footer class="dialog-footer">
-          <button type="button" class="button ghost" id="agent-cancel">Cancelar</button>
-          <button type="submit" class="button primary" id="agent-save">Guardar</button>
-        </footer>
-      </form>
-    </dialog>
-
     <dialog class="dialog dialog-wide" id="routines-dialog" aria-labelledby="routines-title">
       <div>
         <header class="dialog-header">
@@ -468,35 +400,200 @@
 
     <dialog class="dialog details" id="details-dialog" aria-labelledby="details-name">
       <div class="details-panel">
-        <header class="details-header">
-          <button type="button" class="details-avatar" id="details-avatar" title="Cambiar figura y color" aria-label="Cambiar figura y color"></button>
-          <div class="details-titles">
-            <h2 id="details-name"></h2>
-            <p class="details-meta" id="details-meta"></p>
+        <section class="details-view" id="details-home">
+          <header class="details-header">
+            <button type="button" class="details-avatar" id="details-avatar" title="Cambiar figura y color" aria-label="Cambiar figura y color"></button>
+            <button type="button" class="details-titles" id="details-profile" title="Editar el perfil">
+              <span class="details-name" id="details-name"></span>
+              <span class="details-title" id="details-title"></span>
+              <span class="details-description" id="details-description"></span>
+            </button>
+            <button type="button" class="round-button details-close" aria-label="Cerrar">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>
+            </button>
+          </header>
+          <div class="details-body" id="details-groups">
+            <div class="settings-group">
+              <h3>Cerebro</h3>
+              <div class="settings-list">
+                <button type="button" class="settings-row" data-page="brain"><span class="row-icon" data-icon="cpu"></span><span class="row-label">Modelo</span><span class="row-value" id="row-brain"></span></button>
+              </div>
+            </div>
+            <div class="settings-group">
+              <h3>Sabe</h3>
+              <div class="settings-list">
+                <button type="button" class="settings-row" data-page="instructions"><span class="row-icon" data-icon="book"></span><span class="row-label">Instrucciones</span><span class="row-value" id="row-instructions"></span></button>
+                <button type="button" class="settings-row" data-page="memories"><span class="row-icon" data-icon="bookmark"></span><span class="row-label">Recuerdos</span><span class="row-value" id="row-memories"></span></button>
+                <button type="button" class="settings-row" data-page="skills"><span class="row-icon" data-icon="spark"></span><span class="row-label">Habilidades</span><span class="row-value" id="row-skills"></span></button>
+                <button type="button" class="settings-row" data-page="files"><span class="row-icon" data-icon="file"></span><span class="row-label">Archivos</span><span class="row-value"></span></button>
+              </div>
+            </div>
+            <div class="settings-group">
+              <h3>Hace</h3>
+              <div class="settings-list">
+                <button type="button" class="settings-row" data-page="routines"><span class="row-icon" data-icon="clock"></span><span class="row-label">Rutinas</span><span class="row-value" id="row-routines"></span></button>
+                <button type="button" class="settings-row" data-page="voice"><span class="row-icon" data-icon="speaker"></span><span class="row-label">Chat de voz</span><span class="row-value" id="row-voice"></span></button>
+              </div>
+            </div>
+            <div class="settings-group">
+              <h3>Reglas</h3>
+              <div class="settings-list">
+                <button type="button" class="settings-row" data-page="folders"><span class="row-icon" data-icon="folder"></span><span class="row-label">Carpetas</span><span class="row-value"></span></button>
+                <button type="button" class="settings-row" data-page="access" id="row-access-button"><span class="row-icon" data-icon="shield"></span><span class="row-label">Acceso</span><span class="row-value" id="row-access"></span></button>
+                <button type="button" class="settings-row" data-page="advanced"><span class="row-icon" data-icon="sliders"></span><span class="row-label">Avanzado</span><span class="row-value" id="row-advanced"></span></button>
+                <button type="button" class="settings-row" data-page="notify"><span class="row-icon" data-icon="bell"></span><span class="row-label">Avisarme</span><span class="row-value" id="row-notify"></span></button>
+              </div>
+            </div>
+            <button type="button" class="settings-delete" id="details-delete">Eliminar agente</button>
           </div>
-          <button type="button" class="round-button" id="details-close" aria-label="Cerrar">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>
-          </button>
-        </header>
-        <div class="tabs" role="tablist" aria-label="Ficha del agente">
-          <button type="button" role="tab" class="tab" id="tab-info" data-tab="info" aria-controls="panel-info" aria-selected="true">Detalles</button>
-          <button type="button" role="tab" class="tab" id="tab-library" data-tab="library" aria-controls="panel-library" aria-selected="false" tabindex="-1">Biblioteca</button>
-          <button type="button" role="tab" class="tab" id="tab-computer" data-tab="computer" aria-controls="panel-computer" aria-selected="false" tabindex="-1">Computadora</button>
-        </div>
-        <div class="details-body">
-          <section class="tab-panel" role="tabpanel" id="panel-info" aria-labelledby="tab-info">
-            <div class="details-block">
-              <div class="block-head">
-                <h3>Rutinas</h3>
+        </section>
+
+        <section class="details-view" id="details-sub" hidden>
+          <header class="page-header">
+            <button type="button" class="back-button" id="details-back">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 6l-6 6 6 6" /></svg>
+              <span>Volver a los ajustes</span>
+            </button>
+            <button type="button" class="round-button details-close" aria-label="Cerrar">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>
+            </button>
+          </header>
+          <div class="details-body page-body" id="page-body">
+            <h2 class="page-title" id="page-title" tabindex="-1"></h2>
+
+            <div class="page" data-page="profile" hidden>
+              <form id="profile-form" novalidate>
+                <label class="field">
+                  <span>Nombre</span>
+                  <input name="name" maxlength="60" required autocomplete="off" />
+                </label>
+                <label class="field">
+                  <span>Título</span>
+                  <input name="role" maxlength="200" autocomplete="off" placeholder="Ej.: Investigadora de mercado" />
+                </label>
+                <label class="field">
+                  <span class="field-label">Descripción <output class="counter" id="description-count"></output></span>
+                  <textarea name="description" rows="4" maxlength="2000" placeholder="Para qué sirve y qué entrega. La ven Claude Bot y los demás agentes."></textarea>
+                </label>
+                <label class="field" id="profile-project">
+                  <span>Sección</span>
+                  <input name="project" maxlength="60" list="project-options" autocomplete="off" placeholder="Sin sección" />
+                </label>
+                <datalist id="project-options"></datalist>
+                <p class="form-error" id="profile-error" role="alert"></p>
+                <div class="page-actions">
+                  <button type="submit" class="button primary" id="profile-save">Guardar</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="page" data-page="brain" hidden>
+              <form id="brain-form" novalidate>
+                <label class="field">
+                  <span>Proveedor</span>
+                  <select name="provider"></select>
+                </label>
+                <p class="hint" id="provider-hint"></p>
+                <label class="field">
+                  <span>Modelo</span>
+                  <select name="model"></select>
+                </label>
+                <label class="field">
+                  <span>Razonamiento</span>
+                  <select name="effort"></select>
+                </label>
+                <p class="form-error" id="brain-error" role="alert"></p>
+                <div class="page-actions">
+                  <button type="submit" class="button primary" id="brain-save">Guardar</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="page" data-page="instructions" hidden>
+              <p class="page-lead" id="instructions-lead"></p>
+              <textarea class="page-editor" id="instructions-text" rows="14" maxlength="32000" spellcheck="true"></textarea>
+              <p class="form-error" id="instructions-error" role="alert"></p>
+              <div class="page-actions spread">
+                <output class="counter" id="instructions-count"></output>
+                <button type="button" class="button primary" id="instructions-save">Guardar</button>
+              </div>
+            </div>
+
+            <div class="page" data-page="memories" hidden>
+              <form class="memory-form" id="memory-form" novalidate>
+                <textarea name="text" rows="2" maxlength="1000" placeholder="Algo que debe recordar. Ej.: Prefiero respuestas cortas."></textarea>
+                <div class="memory-form-row">
+                  <label class="check-inline"><input type="checkbox" name="always" /> Usar siempre</label>
+                  <button type="submit" class="button primary small" id="memory-save">Guardar</button>
+                </div>
+                <p class="form-error" id="memory-error" role="alert"></p>
+              </form>
+              <h3 class="list-title">Siempre se usan</h3>
+              <ul class="item-list" id="memories-always"></ul>
+              <p class="muted small list-empty" id="memories-always-empty">Ninguno. Van en sus instrucciones en cada mensaje.</p>
+              <h3 class="list-title">Se usan si hacen falta</h3>
+              <ul class="item-list" id="memories-relevant"></ul>
+              <p class="muted small list-empty" id="memories-relevant-empty">Ninguno. Los busca cuando el tema puede tenerlos.</p>
+              <p class="muted small" id="memories-count"></p>
+            </div>
+
+            <div class="page" data-page="skills" hidden>
+              <ul class="item-list" id="skills-list"></ul>
+              <p class="muted small list-empty" id="skills-empty">Sin habilidades. Crea una o enséñale un procedimiento y pídele que lo guarde como habilidad.</p>
+              <div class="page-actions start" id="skill-actions">
+                <button type="button" class="button ghost small" id="skill-new">Nueva habilidad</button>
+              </div>
+              <form class="skill-form" id="skill-form" novalidate hidden>
+                <h3 class="list-title" id="skill-form-title">Nueva habilidad</h3>
+                <div id="skill-fields">
+                  <label class="field">
+                    <span>Nombre</span>
+                    <input name="name" maxlength="64" autocomplete="off" placeholder="Ej.: Resumen de la mañana" />
+                  </label>
+                  <label class="field">
+                    <span>Para qué sirve</span>
+                    <input name="description" maxlength="300" autocomplete="off" placeholder="Cuándo usarla, en una frase." />
+                  </label>
+                  <label class="field">
+                    <span>Pasos</span>
+                    <textarea name="body" rows="7" placeholder="1. …&#10;2. …"></textarea>
+                  </label>
+                </div>
+                <label class="field" id="skill-raw" hidden>
+                  <span>SKILL.md</span>
+                  <textarea class="page-editor mono" name="text" rows="14"></textarea>
+                </label>
+                <p class="form-error" id="skill-error" role="alert"></p>
+                <div class="page-actions">
+                  <button type="button" class="button ghost" id="skill-cancel">Cancelar</button>
+                  <button type="submit" class="button primary" id="skill-save">Guardar</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="page" data-page="files" hidden>
+              <div class="library-bar">
+                <div class="segmented compact" role="radiogroup" aria-label="Carpeta">
+                  <label><input type="radio" name="library-root" value="agent" checked /><span>Su carpeta</span></label>
+                  <label><input type="radio" name="library-root" value="shared" /><span>Compartida</span></label>
+                </div>
+                <button type="button" class="button ghost small" id="library-upload">Subir archivo</button>
+                <input type="file" id="library-file" multiple hidden />
+              </div>
+              <nav class="crumbs" id="library-crumbs" aria-label="Ruta"></nav>
+              <ul class="library-list" id="library-list"></ul>
+              <p class="muted small library-note" id="library-note" hidden></p>
+            </div>
+
+            <div class="page" data-page="routines" hidden>
+              <ul class="item-list" id="details-routines"></ul>
+              <p class="muted small list-empty" id="details-routines-empty">Sin rutinas. Crea una aquí o pídesela al agente («cada mañana a las 9, revisa…»).</p>
+              <div class="page-actions start">
                 <button type="button" class="button ghost small" id="details-new-routine">Nueva rutina</button>
               </div>
-              <ul class="mini-routines" id="details-routines"></ul>
-              <p class="muted small" id="details-routines-empty" hidden>
-                Sin rutinas. Crea una aquí o pídesela al agente («cada mañana a las 9, revisa…»).
-              </p>
             </div>
-            <div class="details-block" id="voice-block">
-              <h3>Chat de voz</h3>
+
+            <div class="page" data-page="voice" hidden>
               <label class="setting">
                 <span>Voz</span>
                 <select id="voice-name"></select>
@@ -525,60 +622,84 @@
               </div>
               <p class="muted small" id="voice-unsupported" hidden>Este navegador no puede leer en voz alta. Usa ClosedBot en Edge o Chrome.</p>
             </div>
-            <div class="details-block">
-              <h3>Agente</h3>
-              <p class="details-role" id="details-role"></p>
-              <div class="details-actions">
-                <button type="button" class="button ghost small" id="details-edit">Instrucciones y modelo</button>
-                <button type="button" class="button ghost small" id="details-pause">Pausar la cola</button>
-                <button type="button" class="button ghost small" id="details-reset">Empezar de cero</button>
-                <button type="button" class="button danger-soft small" id="details-delete">Eliminar agente</button>
-              </div>
-            </div>
-          </section>
 
-          <section class="tab-panel" role="tabpanel" id="panel-library" aria-labelledby="tab-library" hidden>
-            <div class="library-bar">
-              <div class="segmented compact" role="radiogroup" aria-label="Carpeta">
-                <label><input type="radio" name="library-root" value="agent" checked /><span>Su carpeta</span></label>
-                <label><input type="radio" name="library-root" value="shared" /><span>Compartida</span></label>
+            <div class="page" data-page="folders" hidden>
+              <div class="details-block">
+                <h3>Su carpeta de trabajo</h3>
+                <p class="path-box" id="computer-workspace"></p>
+                <div class="details-actions">
+                  <button type="button" class="button ghost small" id="open-workspace" data-local-only>Abrir en el explorador</button>
+                  <button type="button" class="button ghost small" id="copy-workspace">Copiar ruta</button>
+                </div>
               </div>
-              <button type="button" class="button ghost small" id="library-upload">Subir archivo</button>
-              <input type="file" id="library-file" multiple hidden />
+              <div class="details-block">
+                <h3>Carpeta compartida</h3>
+                <p class="path-box" id="computer-shared"></p>
+                <div class="details-actions">
+                  <button type="button" class="button ghost small" id="open-shared" data-local-only>Abrir en el explorador</button>
+                  <button type="button" class="button ghost small" id="copy-shared">Copiar ruta</button>
+                </div>
+                <p class="hint setting-hint">La ven todos los agentes: sirve para pasarse archivos.</p>
+              </div>
+              <p class="muted small" id="computer-remote" hidden>Las carpetas se abren solo desde el equipo donde corre ClosedBot.</p>
             </div>
-            <nav class="crumbs" id="library-crumbs" aria-label="Ruta"></nav>
-            <ul class="library-list" id="library-list"></ul>
-            <p class="muted small library-note" id="library-note" hidden></p>
-          </section>
 
-          <section class="tab-panel" role="tabpanel" id="panel-computer" aria-labelledby="tab-computer" hidden>
-            <div class="details-block">
-              <h3>Su carpeta de trabajo</h3>
-              <p class="path-box" id="computer-workspace"></p>
-              <div class="details-actions">
-                <button type="button" class="button ghost small" id="open-workspace" data-local-only>Abrir en el explorador</button>
-                <button type="button" class="button ghost small" id="copy-workspace">Copiar ruta</button>
+            <div class="page" data-page="access" hidden>
+              <form id="access-form" novalidate>
+                <label class="choice">
+                  <input type="radio" name="access" value="carpeta" />
+                  <span><strong>Solo su carpeta</strong>: escribe en su carpeta y en la compartida, con sandbox.</span>
+                </label>
+                <label class="choice">
+                  <input type="radio" name="access" value="total" />
+                  <span><strong>Acceso total</strong>: comandos y archivos de todo el equipo, sin pedir permiso.</span>
+                </label>
+                <p class="hint" id="access-hint" hidden>
+                  En este equipo (Windows), los agentes de Claude en «Solo su carpeta» no tienen terminal: trabajan con archivos de su carpeta, la web y sus compañeros.
+                </p>
+                <p class="warning" id="access-warning" hidden>
+                  Con acceso total el agente puede borrar, instalar o leer cualquier cosa del equipo, incluidas credenciales.
+                </p>
+              </form>
+            </div>
+
+            <div class="page" data-page="advanced" hidden>
+              <div class="setting-row">
+                <span id="pause-label">Pausar la cola</span>
+                <button type="button" class="switch" role="switch" id="details-pause" aria-checked="false" aria-labelledby="pause-label"></button>
+              </div>
+              <p class="hint setting-hint">En pausa no empieza mensajes nuevos: esperan en su cola hasta que la reanudes.</p>
+              <div class="details-block">
+                <h3>Nuevo chat</h3>
+                <p class="hint setting-hint">Borra su historial y empieza una conversación nueva. Conserva su perfil, instrucciones, recuerdos, habilidades, rutinas y archivos.</p>
+                <div class="details-actions">
+                  <button type="button" class="button ghost small" id="details-reset">Empezar de cero</button>
+                </div>
               </div>
             </div>
-            <div class="details-block">
-              <h3>Carpeta compartida</h3>
-              <p class="path-box" id="computer-shared"></p>
-              <div class="details-actions">
-                <button type="button" class="button ghost small" id="open-shared" data-local-only>Abrir en el explorador</button>
-                <button type="button" class="button ghost small" id="copy-shared">Copiar ruta</button>
+
+            <div class="page" data-page="notify" hidden>
+              <form id="notify-form" novalidate>
+                <label class="choice">
+                  <input type="radio" name="notify" value="all" />
+                  <span><strong>Toda la actividad</strong>: cada vez que responde, pregunta o falla.</span>
+                </label>
+                <label class="choice">
+                  <input type="radio" name="notify" value="needs" />
+                  <span><strong>Solo cuando me necesite</strong>: cuando te pregunta algo o no pudo terminar.</span>
+                </label>
+                <label class="choice">
+                  <input type="radio" name="notify" value="none" />
+                  <span><strong>Nada</strong></span>
+                </label>
+              </form>
+              <div class="notify-device" id="notify-device">
+                <p class="hint setting-hint" id="notify-status"></p>
+                <button type="button" class="button ghost small" id="notify-enable" hidden>Permitir avisos</button>
               </div>
-              <p class="hint setting-hint">La ven todos los agentes: sirve para pasarse archivos.</p>
             </div>
-            <div class="details-block">
-              <h3>Acceso a este equipo</h3>
-              <p class="details-access" id="computer-access"></p>
-              <div class="details-actions">
-                <button type="button" class="button ghost small" id="computer-change">Cambiar el acceso</button>
-              </div>
-            </div>
-            <p class="muted small" id="computer-remote" hidden>Las carpetas se abren solo desde el equipo donde corre ClosedBot.</p>
-          </section>
-        </div>
+          </div>
+        </section>
       </div>
     </dialog>
 

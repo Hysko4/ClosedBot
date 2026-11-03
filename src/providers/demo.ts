@@ -10,6 +10,8 @@ import {
   TOOL_CREATE_ROUTINE,
   TOOL_LIST_AGENTS,
   TOOL_LIST_ROUTINES,
+  TOOL_REMEMBER,
+  TOOL_SEARCH_MEMORIES,
   TOOL_SEND_MESSAGE,
   TOOL_UPDATE_AGENT,
 } from "../team.js";
@@ -224,6 +226,17 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
           notes.push(`No pude crear el canal «${name}»: ${errorMessage(error)}`);
         }
       }
+      for (const match of body.matchAll(/^\/recuerda(\s+siempre)?\s+(.+)$/gm)) {
+        const text = (match[2] ?? "").trim();
+        try {
+          await this.#callTool(threadId, state.turnId, TOOL_REMEMBER, { text, always: Boolean(match[1]) });
+          notes.push(`Lo guardé en mis recuerdos${match[1] ? " (lo uso siempre)" : ""}: «${text}».`);
+        } catch (error) {
+          notes.push(`No pude guardarlo: ${errorMessage(error)}`);
+        }
+      }
+      const search = /^\/busca\s+(.+)$/m.exec(body);
+      if (search) notes.push(`Mis recuerdos sobre eso: ${await this.#callTool(threadId, state.turnId, TOOL_SEARCH_MEMORIES, { query: (search[1] ?? "").trim() })}`);
       if (/(^|\s)\/rutinas(\s|$)/.test(body)) {
         notes.push(`Rutinas: ${await this.#callTool(threadId, state.turnId, TOOL_LIST_ROUTINES, {})}`);
       }

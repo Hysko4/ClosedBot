@@ -6,7 +6,11 @@ import type { Schedule } from "./schedule.js";
 export interface AgentRecord {
   id: string;
   name: string;
+  /** Título: qué es, en una línea (en la interfaz, «Título»). */
   role: string;
+  /** Descripción más larga (hasta 2000 caracteres): la ven el agente y Claude Bot. */
+  description: string;
+  /** Copia de su archivo AGENTS.md (el archivo manda: el agente también lo edita). */
   instructions: string;
   provider: ProviderId;
   model: string | null;
@@ -29,12 +33,42 @@ export interface AgentRecord {
   hidden: boolean;
   /** Cómo lee en voz alta sus respuestas (voz, velocidad e idioma). */
   voice: VoiceSettings;
+  /** Cuándo avisarle al usuario («» = lo de siempre según el agente; ver NotifyLevel). */
+  notify: NotifyLevel | "";
+  /** Habilidades apagadas (ids como «.agents/skills/resumen»). */
+  skillsOff: string[];
   /** Última vez que el usuario abrió la conversación (para el aviso de no leído). */
   readAt: number;
   /** Último mensaje del agente (o para el usuario) en su conversación. */
   lastAt: number;
   createdAt: number;
   updatedAt: number;
+}
+
+/** Cuándo avisa un agente: todo lo que responde, solo cuando necesita al usuario (preguntas y errores) o nunca. */
+export type NotifyLevel = "all" | "needs" | "none";
+
+/** Un recuerdo de un agente: «siempre» va en sus instrucciones; los demás los busca cuando hacen falta. */
+export interface MemoryRecord {
+  id: string;
+  agentId: string;
+  text: string;
+  always: boolean;
+  createdBy: "user" | "agent";
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Una ejecución de una rutina, para su historial. */
+export interface RoutineRun {
+  messageId: string;
+  at: number;
+  manual: boolean;
+  status: DeliveryStatus | "missing";
+  finishedAt: number | null;
+  error: string | null;
+  /** Lo último que respondió el agente en esa ejecución. */
+  reply: string;
 }
 
 /** Ajustes de voz de un agente. `name` vacío = la mejor voz del equipo para el idioma; `lang` "auto" = detectar. */
@@ -152,6 +186,7 @@ CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
   instructions TEXT NOT NULL DEFAULT '',
   provider TEXT NOT NULL,
   model TEXT,
@@ -167,6 +202,8 @@ CREATE TABLE IF NOT EXISTS agents (
   pinned INTEGER NOT NULL DEFAULT 0,
   hidden INTEGER NOT NULL DEFAULT 0,
   voice TEXT,
+  notify TEXT NOT NULL DEFAULT '',
+  skills_off TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -237,6 +274,16 @@ CREATE TABLE IF NOT EXISTS channels (
   updated_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS channels_active_name ON channels(name COLLATE NOCASE) WHERE deleted_at IS NULL;
+CREATE TABLE IF NOT EXISTS memories (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  text TEXT NOT NULL,
+  always INTEGER NOT NULL DEFAULT 0,
+  created_by TEXT NOT NULL DEFAULT 'user',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS memories_agent ON memories(agent_id, created_at);
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL,
@@ -264,12 +311,15 @@ const ADDED_COLUMNS: Array<{ table: string; column: string; ddl: string; backfil
   { table: "agents", column: "voice", ddl: "ALTER TABLE agents ADD COLUMN voice TEXT" },
   { table: "messages", column: "channel_id", ddl: "ALTER TABLE messages ADD COLUMN channel_id TEXT" },
   { table: "deliveries", column: "channel_id", ddl: "ALTER TABLE deliveries ADD COLUMN channel_id TEXT" },
+  { table: "agents", column: "description", ddl: "ALTER TABLE agents ADD COLUMN description TEXT NOT NULL DEFAULT ''" },
+  { table: "agents", column: "notify", ddl: "ALTER TABLE agents ADD COLUMN notify TEXT NOT NULL DEFAULT ''" },
+  { table: "agents", column: "skills_off", ddl: "ALTER TABLE agents ADD COLUMN skills_off TEXT NOT NULL DEFAULT '[]'" },
 ];
 
 /** Índices sobre columnas añadidas: se crean después de añadirlas. */
 const ADDED_INDEXES = ["CREATE INDEX IF NOT EXISTS messages_channel ON messages(channel_id, seq)"];
 
-const SCHEMA_VERSION = "4";
+const SCHEMA_VERSION = "5";
 
 /** Roles cuyos mensajes cuentan como novedad para el aviso de no leído. */
 const UNREAD_ROLES = "('assistant', 'teammate', 'notice', 'decision', 'routine')";
@@ -357,8 +407,24 @@ export class Store {
   createAgent(
     input: Omit<
       AgentRecord,
-      "id" | "threadId" | "paused" | "preview" | "project" | "avatar" | "pinned" | "hidden" | "voice" | "readAt" | "lastAt" | "createdAt" | "updatedAt"
+      | "id"
+      | "description"
+      | "threadId"
+      | "paused"
+      | "preview"
+      | "project"
+      | "avatar"
+      | "pinned"
+      | "hidden"
+      | "voice"
+      | "notify"
+      | "skillsOff"
+      | "readAt"
+      | "lastAt"
+      | "createdAt"
+      | "updatedAt"
     > & {
+      description?: string;
       project?: string;
       /** Figura y color elegidos; si falta, el siguiente automático. */
       avatar?: number;
@@ -369,10 +435,26 @@ export class Store {
     const avatar = input.avatar ?? this.#nextAutoAvatar();
     this.#db
       .prepare(
-        `INSERT INTO agents (id, name, role, instructions, provider, model, effort, access, workspace, project, read_at, avatar, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO agents (id, name, role, description, instructions, provider, model, effort, access, workspace, project, read_at, avatar, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, input.name, input.role, input.instructions, input.provider, input.model, input.effort, input.access, input.workspace, input.project ?? "", now, avatar, now, now);
+      .run(
+        id,
+        input.name,
+        input.role,
+        input.description ?? "",
+        input.instructions,
+        input.provider,
+        input.model,
+        input.effort,
+        input.access,
+        input.workspace,
+        input.project ?? "",
+        now,
+        avatar,
+        now,
+        now,
+      );
     return this.getAgent(id) as AgentRecord;
   }
 
@@ -389,6 +471,7 @@ export class Store {
         AgentRecord,
         | "name"
         | "role"
+        | "description"
         | "instructions"
         | "provider"
         | "model"
@@ -403,12 +486,15 @@ export class Store {
         | "pinned"
         | "hidden"
         | "voice"
+        | "notify"
+        | "skillsOff"
       >
     >,
   ): AgentRecord {
     const columns: Record<string, string> = {
       name: "name",
       role: "role",
+      description: "description",
       instructions: "instructions",
       provider: "provider",
       model: "model",
@@ -423,6 +509,8 @@ export class Store {
       pinned: "pinned",
       hidden: "hidden",
       voice: "voice",
+      notify: "notify",
+      skillsOff: "skills_off",
     };
     const sets: string[] = [];
     const values: SQLInputValue[] = [];
@@ -430,7 +518,7 @@ export class Store {
       const column = columns[key];
       if (!column || value === undefined) continue;
       sets.push(`${column} = ?`);
-      if (key === "voice") values.push(JSON.stringify(value));
+      if (key === "voice" || key === "skillsOff") values.push(JSON.stringify(value));
       else values.push(typeof value === "boolean" ? (value ? 1 : 0) : (value as SQLInputValue));
     }
     if (sets.length) {
@@ -837,6 +925,77 @@ export class Store {
     this.#db.prepare("DELETE FROM routines WHERE id = ?").run(id);
   }
 
+  /** Últimas ejecuciones de una rutina (las más nuevas primero), con lo que respondió el agente en cada una. */
+  listRoutineRuns(routineId: string, limit = 10): RoutineRun[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT m.id, m.created_at, m.payload, d.id AS delivery_id, d.status, d.finished_at, d.error, (
+           SELECT r.text FROM messages r WHERE r.delivery_id = d.id AND r.role = 'assistant' AND r.text <> '' ORDER BY r.seq DESC LIMIT 1
+         ) AS reply
+         FROM messages m LEFT JOIN deliveries d ON d.id = m.delivery_id
+         WHERE m.role = 'routine' AND json_extract(m.payload, '$.routineId') = ?
+         ORDER BY m.seq DESC LIMIT ?`,
+      )
+      .all(routineId, limit) as Row[];
+    return rows.map((row) => ({
+      messageId: String(row.id),
+      at: Number(row.created_at),
+      manual: parseJsonRecord(row.payload)?.manual === true,
+      status: row.delivery_id === null || row.delivery_id === undefined ? "missing" : (String(row.status) as DeliveryStatus),
+      finishedAt: row.finished_at === null || row.finished_at === undefined ? null : Number(row.finished_at),
+      error: str(row.error),
+      reply: String(row.reply ?? ""),
+    }));
+  }
+
+  // ---------- recuerdos ----------
+
+  listMemories(agentId: string): MemoryRecord[] {
+    return (this.#db.prepare("SELECT * FROM memories WHERE agent_id = ? ORDER BY created_at, rowid").all(agentId) as Row[]).map(toMemory);
+  }
+
+  countMemories(agentId: string): number {
+    const row = this.#db.prepare("SELECT COUNT(*) AS total FROM memories WHERE agent_id = ?").get(agentId) as Row;
+    return Number(row.total ?? 0);
+  }
+
+  getMemory(id: string): MemoryRecord | null {
+    const row = this.#db.prepare("SELECT * FROM memories WHERE id = ?").get(id) as Row | undefined;
+    return row ? toMemory(row) : null;
+  }
+
+  insertMemory(input: { agentId: string; text: string; always: boolean; createdBy: "user" | "agent" }): MemoryRecord {
+    const now = Date.now();
+    const id = randomUUID();
+    this.#db
+      .prepare("INSERT INTO memories (id, agent_id, text, always, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(id, input.agentId, input.text, input.always ? 1 : 0, input.createdBy, now, now);
+    return this.getMemory(id) as MemoryRecord;
+  }
+
+  updateMemory(id: string, patch: Partial<Pick<MemoryRecord, "text" | "always">>): MemoryRecord | null {
+    const sets: string[] = [];
+    const values: SQLInputValue[] = [];
+    if (patch.text !== undefined) {
+      sets.push("text = ?");
+      values.push(patch.text);
+    }
+    if (patch.always !== undefined) {
+      sets.push("always = ?");
+      values.push(patch.always ? 1 : 0);
+    }
+    if (sets.length) {
+      sets.push("updated_at = ?");
+      values.push(Date.now(), id);
+      this.#db.prepare(`UPDATE memories SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    }
+    return this.getMemory(id);
+  }
+
+  deleteMemory(id: string): void {
+    this.#db.prepare("DELETE FROM memories WHERE id = ?").run(id);
+  }
+
   // ---------- sesiones ----------
 
   insertSession(tokenHash: string, expiresAt: number, userAgent: string | null): void {
@@ -923,6 +1082,22 @@ export function toVoice(value: SQLInputValue | undefined | Record<string, unknow
   };
 }
 
+export function toNotify(value: unknown): NotifyLevel | "" {
+  return value === "all" || value === "needs" || value === "none" ? value : "";
+}
+
+function toMemory(row: Row): MemoryRecord {
+  return {
+    id: String(row.id),
+    agentId: String(row.agent_id),
+    text: String(row.text ?? ""),
+    always: Number(row.always) === 1,
+    createdBy: String(row.created_by) === "agent" ? "agent" : "user",
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
+
 function toRoutine(row: Row): RoutineRecord {
   return {
     id: String(row.id),
@@ -944,6 +1119,7 @@ function toAgent(row: Row): AgentRecord {
     id: String(row.id),
     name: String(row.name),
     role: String(row.role ?? ""),
+    description: String(row.description ?? ""),
     instructions: String(row.instructions ?? ""),
     provider: String(row.provider) as ProviderId,
     model: str(row.model),
@@ -958,6 +1134,8 @@ function toAgent(row: Row): AgentRecord {
     pinned: Number(row.pinned ?? 0) === 1,
     hidden: Number(row.hidden ?? 0) === 1,
     voice: toVoice(row.voice),
+    notify: toNotify(row.notify),
+    skillsOff: parseIds(row.skills_off),
     readAt: Number(row.read_at ?? 0),
     lastAt: row.last_at === null || row.last_at === undefined ? 0 : Number(row.last_at),
     createdAt: Number(row.created_at),

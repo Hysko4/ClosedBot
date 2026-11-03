@@ -1,6 +1,6 @@
 // Service worker de ClosedBot: permite instalar la app y abrirla sin red.
 // Nunca guarda en caché la API (/api/): los mensajes siempre vienen del servidor.
-const CACHE = "closedbot-v16";
+const CACHE = "closedbot-v17";
 const SHELL = ["/", "/index.html", "/app.js", "/styles.css", "/pcm-capture.js", "/manifest.webmanifest", "/icons/icon.svg", "/icons/icon-192.png"];
 
 self.addEventListener("install", (event) => {
@@ -38,5 +38,21 @@ self.addEventListener("fetch", (event) => {
       .catch(() =>
         caches.match(request).then((cached) => cached ?? (request.mode === "navigate" ? caches.match("/index.html") : Response.error())),
       ),
+  );
+});
+
+// Avisos («Avisarme» de cada agente): al tocarlos se abre ClosedBot en esa conversación.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = new URL(event.notification.data?.url ?? "/", self.location.origin);
+  if (target.origin !== self.location.origin) return;
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (windows) => {
+      const open = windows.find((client) => new URL(client.url).origin === self.location.origin);
+      if (!open) return self.clients.openWindow(target.href);
+      await open.focus();
+      open.postMessage({ type: "open", hash: target.hash });
+      return undefined;
+    }),
   );
 });
