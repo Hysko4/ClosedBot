@@ -40,8 +40,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("ClosedBot")]
 [assembly: AssemblyProduct("ClosedBot")]
 [assembly: AssemblyDescription("Tu equipo personal de agentes de IA")]
-[assembly: AssemblyVersion("0.5.0.0")]
-[assembly: AssemblyFileVersion("0.5.0.0")]
+[assembly: AssemblyVersion("0.6.0.0")]
+[assembly: AssemblyFileVersion("0.6.0.0")]
 
 namespace ClosedBotEscritorio
 {

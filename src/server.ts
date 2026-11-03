@@ -5,6 +5,7 @@ import { createApp } from "./app.js";
 import { Auth } from "./auth.js";
 import { prepareConfig, setting } from "./config.js";
 import { Store } from "./db.js";
+import { ElevenLabs } from "./elevenlabs.js";
 import { AcpClient } from "./providers/acp.js";
 import { ClaudeAgentClient } from "./providers/claude.js";
 import { claudeEnv, claudeLoginCommand, claudeLogoutCommand, resolveClaudeCli } from "./providers/claude-cli.js";
@@ -162,6 +163,8 @@ async function main(): Promise<void> {
     controlToken,
     onShutdown: () => void shutdown("la orden de cierre del lanzador"),
     speech,
+    // Voces de ElevenLabs con la clave del usuario (opcional; la clave queda sólo en este PC).
+    elevenLabs: new ElevenLabs({ store }),
     log,
   });
 

@@ -345,6 +345,8 @@
           </p>
           <h3 class="section-title">Dictado por voz</h3>
           <ul class="provider-list" id="speech-settings"></ul>
+          <h3 class="section-title" id="tts-title">Voces para leer en voz alta</h3>
+          <ul class="provider-list" id="tts-settings"></ul>
           <h3 class="section-title">Carpetas</h3>
           <dl class="paths" id="paths"></dl>
           <h3 class="section-title">En el teléfono</h3>
@@ -451,6 +453,7 @@
             <span id="prompt-label"></span>
             <input id="prompt-input" maxlength="60" autocomplete="off" />
           </label>
+          <p class="muted small prompt-hint" id="prompt-hint" hidden></p>
           <p class="form-error" id="prompt-error" role="alert"></p>
         </div>
         <footer class="dialog-footer">
@@ -491,6 +494,17 @@
             </div>
             <div class="details-block" id="voice-block">
               <h3>Chat de voz</h3>
+              <label class="setting" id="voice-engine-row">
+                <span>Leer con</span>
+                <select id="voice-engine">
+                  <option value="system">Voces del sistema (gratis)</option>
+                  <option value="elevenlabs">ElevenLabs (tu cuenta)</option>
+                </select>
+              </label>
+              <p class="hint setting-hint" id="voice-engine-hint"></p>
+              <div class="details-actions" id="voice-eleven-actions" hidden>
+                <button type="button" class="button ghost small" id="voice-eleven-setup">Abrir Ajustes de voces</button>
+              </div>
               <label class="setting">
                 <span>Voz</span>
                 <select id="voice-name"></select>

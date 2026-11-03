@@ -44,9 +44,22 @@ export interface VoiceSettings {
   lang: string;
   /** Lee en voz alta todas sus respuestas, no solo las de mensajes enviados hablando. */
   autoRead: boolean;
+  /** Con qué se lee: las voces del sistema (gratis) o ElevenLabs (con la clave del usuario). */
+  engine: "system" | "elevenlabs";
+  /** Voz de ElevenLabs elegida (su id) y su nombre, para mostrarlo aunque la lista no haya cargado. */
+  elevenVoice: string;
+  elevenName: string;
 }
 
-export const DEFAULT_VOICE: VoiceSettings = { name: "", rate: 1, lang: "auto", autoRead: false };
+export const DEFAULT_VOICE: VoiceSettings = {
+  name: "",
+  rate: 1,
+  lang: "auto",
+  autoRead: false,
+  engine: "system",
+  elevenVoice: "",
+  elevenName: "",
+};
 
 /** Desde aquí, el número de avatar es una figura y un color elegidos: base + figura × 100 + color. */
 export const AVATAR_CUSTOM_BASE = 10_000;
@@ -915,6 +928,9 @@ export function toVoice(value: SQLInputValue | undefined | Record<string, unknow
     rate: Number.isFinite(rate) && rate >= 0.5 && rate <= 2 ? Math.round(rate * 100) / 100 : DEFAULT_VOICE.rate,
     lang: typeof raw.lang === "string" && /^(auto|[a-z]{2,3}(-[A-Za-z0-9]{2,8})*)$/.test(raw.lang) ? raw.lang : DEFAULT_VOICE.lang,
     autoRead: raw.autoRead === true,
+    engine: raw.engine === "elevenlabs" ? "elevenlabs" : "system",
+    elevenVoice: typeof raw.elevenVoice === "string" && /^[A-Za-z0-9]{1,64}$/.test(raw.elevenVoice) ? raw.elevenVoice : "",
+    elevenName: typeof raw.elevenName === "string" ? raw.elevenName.trim().slice(0, 80) : "",
   };
 }
 

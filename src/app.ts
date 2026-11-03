@@ -4,10 +4,14 @@ import { createReadStream, mkdirSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, resolve, sep } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { type Auth, clearSessionCookie, hashToken, type LoginResult, readCookie, SESSION_COOKIE, serializeSessionCookie } from "./auth.js";
 import { isProviderId } from "./providers/client.js";
 import { isRecord } from "./providers/protocol.js";
 import type { VoiceSettings } from "./db.js";
+import { type ElevenLabs, ElevenLabsError } from "./elevenlabs.js";
 import { type AgentInput, type AgentService, type LibraryRoot, MAX_UPLOAD_BYTES, ServiceError, type ServiceEvent, VERSION } from "./service.js";
 import { MAX_SPEECH_BYTES, type SpeechEngine, SpeechError, type SpeechStatus } from "./speech.js";
 
@@ -28,6 +32,8 @@ export interface AppOptions {
   onShutdown?: () => void;
   /** Dictado local (reconocimiento de voz en este equipo). Sin él, las rutas /api/speech responden 503. */
   speech?: SpeechEngine | null;
+  /** Voces de ElevenLabs con la clave del usuario (opcional). Sin ellas, /api/voices/elevenlabs y /api/tts responden 503. */
+  elevenLabs?: ElevenLabs | null;
   log?: (level: "info" | "warn" | "error", message: string) => void;
 }
 
@@ -100,6 +106,8 @@ const CSP = [
   "style-src 'self'",
   "img-src 'self' data: blob:",
   "connect-src 'self'",
+  // Audio de las voces de ElevenLabs (blob:) y el sonido mudo que habilita la lectura en el iPhone (data:).
+  "media-src 'self' blob: data:",
   "font-src 'self'",
   "manifest-src 'self'",
   "worker-src 'self'",
@@ -431,6 +439,48 @@ export function createApp(options: AppOptions): App {
 
   route("POST", "/api/usage/refresh", async () => ({ usage: await service.refreshUsage(false) }));
 
+  // ---------- voces de ElevenLabs (opcional, con la clave del usuario) ----------
+
+  const eleven = options.elevenLabs ?? null;
+  const requireEleven = (): ElevenLabs => {
+    if (!eleven) throw new HttpError(503, "Las voces de ElevenLabs no están disponibles en este servidor.");
+    return eleven;
+  };
+
+  // Estado y voces de la cuenta; la clave nunca vuelve a la interfaz.
+  route("GET", "/api/voices/elevenlabs", async (ctx) => ({
+    elevenlabs: await requireEleven().status({ refresh: ctx.url.searchParams.get("refresh") === "1" }),
+  }));
+
+  route("PUT", "/api/voices/elevenlabs", async (ctx) => {
+    const body = await readJson(ctx.req);
+    return { elevenlabs: await requireEleven().configure({ key: body.key, model: body.model }) };
+  });
+
+  // Lee un texto con una voz de ElevenLabs: el audio llega a la interfaz a medida que se genera.
+  route("POST", "/api/tts", async (ctx) => {
+    const body = await readJson(ctx.req);
+    const controller = new AbortController();
+    ctx.res.once("close", () => controller.abort());
+    const upstream = await requireEleven().synthesize(body.voiceId, body.text, controller.signal);
+    const res = ctx.res;
+    const type = upstream.headers.get("content-type") ?? "";
+    res.statusCode = 200;
+    res.setHeader("content-type", type.startsWith("audio/") ? type : "audio/mpeg");
+    res.setHeader("cache-control", "private, no-store");
+    if (!upstream.body) {
+      res.end();
+      return NO_CONTENT;
+    }
+    try {
+      await pipeline(Readable.fromWeb(upstream.body as unknown as WebReadableStream<Uint8Array>), res);
+    } catch {
+      // La interfaz dejó de escuchar (o se cortó la conexión): no queda nada por hacer.
+      res.destroy();
+    }
+    return NO_CONTENT;
+  });
+
   // ---------- dictado local ----------
 
   const speech = options.speech ?? null;
@@ -655,7 +705,7 @@ export function createApp(options: AppOptions): App {
     }
     const work = url.pathname.startsWith("/api/") ? handleApi(req, res, url) : serveStatic(req, res, url);
     work.catch((error: unknown) => {
-      const known = error instanceof HttpError || error instanceof ServiceError || error instanceof SpeechError;
+      const known = error instanceof HttpError || error instanceof ServiceError || error instanceof SpeechError || error instanceof ElevenLabsError;
       const status = known ? error.status : 500;
       if (status >= 500 && !known) {
         log("error", `${req.method} ${url.pathname}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);

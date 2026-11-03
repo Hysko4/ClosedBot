@@ -57,6 +57,8 @@ const state = {
   channels: [], // canales activos
   deletedChannels: [], // «Canales eliminados»
   currentChannelId: null, // canal abierto (entonces currentId es null)
+  eleven: null, // voces de ElevenLabs: { configured, model, voices, usage, error } (null mientras no se sabe)
+  elevenAvailable: true, // false si el servidor no las tiene
 };
 
 const elements = new Map(); // id de mensaje -> elemento del DOM (solo el agente abierto)
@@ -230,6 +232,7 @@ async function enterApp() {
   renderProviders();
   renderUsage();
   connectEvents();
+  void refreshEleven();
   await route();
 }
 
@@ -1408,7 +1411,9 @@ function buildMessage(message) {
     node.append(avatar);
   }
   node.append(bubble, meta);
-  if (message.role === "assistant" && message.status === "completed" && Synth && message.text.trim()) node.append(messageTools(message));
+  if (message.role === "assistant" && message.status === "completed" && (Synth || state.eleven?.configured) && message.text.trim()) {
+    node.append(messageTools(message));
+  }
   return node;
 }
 
@@ -2703,6 +2708,213 @@ function renderSpeechSettings() {
     item.append(field, hint);
   }
   list.append(item);
+}
+
+// ---------- voces para leer en voz alta (Ajustes) ----------
+
+const ELEVEN_KEYS_URL = "https://elevenlabs.io/app/settings/api-keys";
+const ELEVEN_MODELS = [
+  ["eleven_flash_v2_5", "Rápida y económica (Flash)"],
+  ["eleven_multilingual_v2", "Máxima calidad (Multilingual)"],
+];
+let elevenLoad = null;
+
+/** Estado de ElevenLabs: si hay clave, sus voces y el uso del mes. Se pide sin bloquear nada. */
+function refreshEleven({ refresh = false } = {}) {
+  if (!state.elevenAvailable) return Promise.resolve();
+  if (elevenLoad && !refresh) return elevenLoad;
+  const load = (async () => {
+    try {
+      const data = await api(`/api/voices/elevenlabs${refresh ? "?refresh=1" : ""}`);
+      state.eleven = data?.elevenlabs ?? null;
+    } catch (error) {
+      if (error.status === 404 || error.status === 503) state.elevenAvailable = false;
+      else if (error.status !== 401) {
+        state.eleven = { configured: false, model: ELEVEN_MODELS[0][0], voices: [], usage: null, ...(state.eleven ?? {}), error: error.message };
+      }
+    } finally {
+      if (elevenLoad === load) elevenLoad = null;
+    }
+    renderTtsSettings();
+    renderDetailsIfOpen();
+  })();
+  elevenLoad = load;
+  return load;
+}
+
+function applyEleven(status) {
+  state.eleven = status ?? null;
+  speech.elevenPausedUntil = 0;
+  renderTtsSettings();
+  renderDetailsIfOpen();
+}
+
+/** Ajustes → Voces para leer en voz alta: las del sistema (gratis) y ElevenLabs con tu clave. */
+function renderTtsSettings() {
+  const list = $("#tts-settings");
+  if (!list) return;
+  list.replaceChildren(systemVoicesItem(), ...(state.elevenAvailable ? [elevenItem()] : []));
+}
+
+function settingsCard(titleText, badgeText, tone) {
+  const item = document.createElement("li");
+  item.className = "provider";
+  const title = document.createElement("div");
+  title.className = "title";
+  const name = document.createElement("span");
+  name.textContent = titleText;
+  const badge = document.createElement("span");
+  badge.className = "state";
+  badge.textContent = badgeText;
+  badge.dataset.tone = tone;
+  title.append(name, badge);
+  const detail = document.createElement("div");
+  detail.className = "detail";
+  item.append(title, detail);
+  return { item, detail };
+}
+
+function systemVoicesItem() {
+  const natural = naturalVoices(speechLanguage()).length;
+  const { item, detail } = settingsCard("Voces del sistema", Synth ? "Gratis" : "No disponible", Synth ? "ok" : "bad");
+  detail.textContent = !Synth
+    ? "Este navegador no tiene voces para leer en voz alta."
+    : natural
+      ? `Hay ${natural} ${natural === 1 ? "voz «Natural»" : "voces «Naturales»"} en español: suenan casi humanas y usan internet. Se eligen en la ficha de cada agente, en «Chat de voz».`
+      : "Aquí no hay voces «Naturales» en español (Edge las tiene gratis). Las del sistema funcionan sin internet y se eligen en la ficha de cada agente.";
+  return item;
+}
+
+function elevenItem() {
+  const eleven = state.eleven;
+  const configured = Boolean(eleven?.configured);
+  const problem = configured && eleven.error ? eleven.error : "";
+  const { item, detail } = settingsCard(
+    "ElevenLabs (opcional)",
+    !eleven ? "Comprobando…" : !configured ? "Sin clave" : problem ? "Con problemas" : "Lista",
+    !eleven || !configured ? "warn" : problem ? "bad" : "ok",
+  );
+  if (!configured) {
+    detail.textContent =
+      "Voces muy realistas con tu propia cuenta de ElevenLabs (su plan gratis trae 10.000 caracteres al mes). Lo que se lee se envía a ElevenLabs y gasta caracteres de tu plan; la clave queda guardada sólo en este PC.";
+    const add = smallButton("Agregar clave", "primary");
+    add.addEventListener("click", () => void askElevenKey());
+    const actions = actionRow(add, linkButton("Crear la clave en ElevenLabs", ELEVEN_KEYS_URL));
+    actions.classList.add("tts-actions");
+    if (eleven?.error) item.append(noteLine(eleven.error, "bad"));
+    item.append(actions);
+    return item;
+  }
+  const parts = [];
+  if (eleven.voices.length) parts.push(`${eleven.voices.length} ${eleven.voices.length === 1 ? "voz" : "voces"}`);
+  if (eleven.usage) {
+    const tier = eleven.usage.tier === "free" ? "gratis" : eleven.usage.tier;
+    parts.push(
+      `usaste ${eleven.usage.used.toLocaleString("es-CL")} de ${eleven.usage.limit.toLocaleString("es-CL")} caracteres este mes${tier ? ` (plan ${tier})` : ""}`,
+    );
+  }
+  detail.textContent = problem || `${parts.join(" · ") || "Clave guardada"}. Elige ElevenLabs y la voz en la ficha de cada agente, en «Chat de voz».`;
+  const field = document.createElement("label");
+  field.className = "field speech-engine";
+  const label = document.createElement("span");
+  label.textContent = "Modelo";
+  const select = document.createElement("select");
+  select.id = "eleven-model";
+  for (const [value, text] of ELEVEN_MODELS) select.append(new Option(text, value));
+  select.value = eleven.model;
+  select.addEventListener("change", () => void saveElevenModel(select));
+  field.append(label, select);
+  const tip = noteLine(
+    "La rápida gasta la mitad de caracteres. Para un acento chileno o latino, agrega voces desde la «Voice Library» de ElevenLabs: aparecen en la ficha como «Tus voces».",
+  );
+  const change = smallButton("Cambiar clave", "ghost");
+  change.addEventListener("click", () => void askElevenKey());
+  const reload = smallButton("Actualizar", "ghost");
+  reload.addEventListener("click", () => {
+    reload.disabled = true;
+    void refreshEleven({ refresh: true });
+  });
+  const remove = smallButton("Quitar", "danger-soft");
+  remove.addEventListener("click", () => void removeElevenKey());
+  const actions = actionRow(change, reload, remove);
+  actions.classList.add("tts-actions");
+  item.append(field, tip, actions);
+  return item;
+}
+
+function noteLine(text, tone = "") {
+  const line = document.createElement("div");
+  line.className = "detail";
+  if (tone) line.dataset.tone = tone;
+  line.textContent = text;
+  return line;
+}
+
+function linkButton(label, href) {
+  const link = document.createElement("a");
+  link.className = "button ghost small";
+  link.href = href;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = label;
+  return link;
+}
+
+/** Pide la clave de ElevenLabs; el servidor la prueba antes de guardarla y nunca la devuelve. */
+async function askElevenKey() {
+  const hint = document.createDocumentFragment();
+  const link = document.createElement("a");
+  link.href = ELEVEN_KEYS_URL;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = "elevenlabs.io → API Keys";
+  hint.append(
+    "Créala en ",
+    link,
+    " con acceso a «Text to Speech» y lectura de «Voices» y «User». Queda guardada sólo en este PC y no se vuelve a mostrar.",
+  );
+  await promptText({
+    title: state.eleven?.configured ? "Cambiar la clave de ElevenLabs" : "Clave de ElevenLabs",
+    label: "Pega tu clave (API key)",
+    placeholder: "sk_…",
+    okLabel: "Guardar",
+    maxLength: 200,
+    secret: true,
+    emptyMessage: "Pega la clave.",
+    hint,
+    submit: async (key) => {
+      const data = await api("/api/voices/elevenlabs", { method: "PUT", body: { key } });
+      applyEleven(data?.elevenlabs);
+      showToast("Listo: ya puedes elegir voces de ElevenLabs en la ficha de cada agente.");
+    },
+  });
+}
+
+async function removeElevenKey() {
+  const ok = await confirmAction(
+    "¿Quitar la clave de ElevenLabs?",
+    "Los agentes que leían con ElevenLabs volverán a leer con la voz del sistema. Puedes agregarla de nuevo cuando quieras.",
+    "Quitar",
+  );
+  if (!ok) return;
+  try {
+    const data = await api("/api/voices/elevenlabs", { method: "PUT", body: { key: "" } });
+    applyEleven(data?.elevenlabs);
+    showToast("Se quitó la clave de ElevenLabs.");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function saveElevenModel(select) {
+  select.disabled = true;
+  try {
+    const data = await api("/api/voices/elevenlabs", { method: "PUT", body: { model: select.value } });
+    applyEleven(data?.elevenlabs);
+  } catch (error) {
+    showToast(error.message, "error");
+    renderTtsSettings();
+  }
 }
 
 function stopDictation({ cancel = false } = {}) {
@@ -4079,8 +4291,22 @@ async function saveCreate(event) {
 
 // ---------- pedir un nombre (renombrar, secciones) ----------
 
-/** Pide un texto corto. `submit` puede fallar: el error se muestra y el cuadro sigue abierto. */
-function promptText({ title, label, value = "", placeholder = "", okLabel = "Guardar", maxLength = 60, submit = null }) {
+/**
+ * Pide un texto corto. `submit` puede fallar: el error se muestra y el cuadro sigue abierto.
+ * Con `secret` (una clave), el texto se tapa, no se corrige ni se autocompleta y no queda en la página.
+ */
+function promptText({
+  title,
+  label,
+  value = "",
+  placeholder = "",
+  okLabel = "Guardar",
+  maxLength = 60,
+  submit = null,
+  secret = false,
+  emptyMessage = "Escribe un nombre.",
+  hint = null,
+}) {
   closeContextMenu();
   const dialog = $("#prompt-dialog");
   const form = $("#prompt-form");
@@ -4090,6 +4316,19 @@ function promptText({ title, label, value = "", placeholder = "", okLabel = "Gua
   const cancelButton = $("#prompt-cancel");
   $("#prompt-title").textContent = title;
   $("#prompt-label").textContent = label;
+  const hintBox = $("#prompt-hint");
+  hintBox.replaceChildren(...(hint === null ? [] : [hint]));
+  hintBox.hidden = hint === null;
+  input.classList.toggle("secret-input", secret);
+  for (const [name, on] of [
+    ["spellcheck", "false"],
+    ["autocapitalize", "off"],
+    ["data-1p-ignore", "true"],
+    ["data-lpignore", "true"],
+  ]) {
+    if (secret) input.setAttribute(name, on);
+    else input.removeAttribute(name);
+  }
   input.value = value;
   input.placeholder = placeholder;
   input.maxLength = maxLength;
@@ -4108,13 +4347,14 @@ function promptText({ title, label, value = "", placeholder = "", okLabel = "Gua
       cancelButton.removeEventListener("click", onCancel);
       dialog.removeEventListener("close", onCancel);
       closeDialog(dialog);
+      if (secret) input.value = "";
       resolve(result);
     };
     const onSubmit = async (event) => {
       event.preventDefault();
-      const text = input.value.trim().replace(/\s+/g, " ");
+      const text = secret ? input.value.trim() : input.value.trim().replace(/\s+/g, " ");
       if (!text) {
-        error.textContent = "Escribe un nombre.";
+        error.textContent = emptyMessage;
         input.focus();
         return;
       }
@@ -4327,7 +4567,7 @@ async function saveRoutine(event) {
 
 // ---------- ajustes ----------
 
-function openSettings({ focusName = false } = {}) {
+function openSettings({ focusName = false, focusVoices = false } = {}) {
   renderProviders();
   const names = $("#names-form");
   names.elements.userName.value = state.settings.userName ?? "";
@@ -4346,8 +4586,11 @@ function openSettings({ focusName = false } = {}) {
   $("#version").textContent = `ClosedBot ${state.version} · límite de ${state.maxHops} reenvíos seguidos entre agentes.`;
   renderPermissions();
   renderSpeechSettings();
+  renderTtsSettings();
+  void refreshEleven();
   openDialog($("#settings-dialog"));
   if (focusName) names.elements.userName.focus();
+  if (focusVoices) $("#tts-title").scrollIntoView({ block: "start" });
 }
 
 function renderPermissions() {
@@ -4693,7 +4936,7 @@ async function refreshProviders() {
 
 // ---------- ficha del agente: Detalles, Biblioteca y Computadora ----------
 
-const DEFAULT_VOICE = { name: "", rate: 1, lang: "auto", autoRead: false };
+const DEFAULT_VOICE = { name: "", rate: 1, lang: "auto", autoRead: false, engine: "system", elevenVoice: "", elevenName: "" };
 const VOICE_LANGS = [
   ["auto", "Automático (según el texto)"],
   ["es-CL", "Español (Chile)"],
@@ -4841,26 +5084,16 @@ function miniRoutine(routine) {
 
 function renderVoiceSettings(agent) {
   const voice = { ...DEFAULT_VOICE, ...(agent.voice ?? {}) };
-  $("#voice-unsupported").hidden = Boolean(Synth);
-  const lang = voice.lang === "auto" ? speechLanguage() : voice.lang;
+  const useEleven = voice.engine === "elevenlabs";
+  const canSpeak = Boolean(Synth) || (useEleven && Boolean(state.eleven?.configured));
+  $("#voice-unsupported").hidden = canSpeak;
+  $("#voice-engine-row").hidden = !state.elevenAvailable && !useEleven;
+  const engine = $("#voice-engine");
+  if (document.activeElement !== engine) engine.value = useEleven ? "elevenlabs" : "system";
+  renderEngineHint(voice);
   const select = $("#voice-name");
-  const key = `${agent.id}|${voices.length}|${lang}|${voice.name}`;
-  if (select.dataset.key !== key && document.activeElement !== select) {
-    const base = lang.split("-")[0].toLowerCase();
-    const list = sortVoices(
-      voices.filter((item) => normalizeLang(item.lang).split("-")[0] === base),
-      lang,
-    );
-    if (voice.name && !list.some((item) => item.name === voice.name)) {
-      list.unshift(voices.find((item) => item.name === voice.name) ?? { name: voice.name, lang: "" });
-    }
-    const options = [new Option(Synth ? "Automática (la mejor para el idioma)" : "No disponible en este navegador", "")];
-    for (const item of list) options.push(new Option(voiceLabel(item), item.name));
-    select.replaceChildren(...options);
-    select.value = voice.name;
-    select.dataset.key = key;
-  }
-  select.disabled = !Synth;
+  if (useEleven) renderElevenOptions(select, agent, voice);
+  else renderSystemOptions(select, agent, voice);
   const rate = $("#voice-rate");
   if (document.activeElement !== rate) rate.value = String(voice.rate);
   $("#voice-rate-value").textContent = formatRate(Number(rate.value));
@@ -4874,8 +5107,144 @@ function renderVoiceSettings(agent) {
   }
   const auto = $("#voice-auto");
   auto.setAttribute("aria-checked", String(voice.autoRead));
-  auto.disabled = !Synth;
-  $("#voice-test").disabled = !Synth;
+  auto.disabled = !canSpeak;
+  $("#voice-test").disabled = !canSpeak;
+}
+
+/** Voces del sistema del idioma: primero las «Naturales» (las que suenan más humanas). */
+function renderSystemOptions(select, agent, voice) {
+  const lang = voice.lang === "auto" ? speechLanguage() : voice.lang;
+  const key = `s|${agent.id}|${voices.length}|${lang}|${voice.name}`;
+  if (select.dataset.key !== key && document.activeElement !== select) {
+    const base = lang.split("-")[0].toLowerCase();
+    const list = sortVoices(
+      voices.filter((item) => normalizeLang(item.lang).split("-")[0] === base),
+      lang,
+    );
+    if (voice.name && !list.some((item) => item.name === voice.name)) {
+      list.unshift(voices.find((item) => item.name === voice.name) ?? { name: voice.name, lang: "" });
+    }
+    const natural = list.filter(isNaturalVoice);
+    const others = list.filter((item) => !isNaturalVoice(item));
+    const option = (item) => new Option(voiceLabel(item), item.name);
+    const children = [new Option(Synth ? "Automática (la mejor para el idioma)" : "No disponible en este navegador", "")];
+    if (natural.length) children.push(optionGroup("Naturales (suenan más humanas)", natural.map(option)));
+    if (others.length) children.push(optionGroup(natural.length ? "Otras voces del sistema" : "Voces del sistema", others.map(option)));
+    select.replaceChildren(...children);
+    select.value = voice.name;
+    select.dataset.key = key;
+  }
+  select.disabled = !Synth;
+}
+
+/** Voces de la cuenta de ElevenLabs: primero las tuyas (clonadas o agregadas de su biblioteca). */
+function renderElevenOptions(select, agent, voice) {
+  const eleven = state.eleven;
+  const list = eleven?.voices ?? [];
+  const key = `e|${agent.id}|${eleven ? (eleven.configured ? "1" : "0") : "-"}|${list.map((item) => item.id).join(",")}|${voice.elevenVoice}`;
+  if (select.dataset.key !== key && document.activeElement !== select) {
+    const children = [];
+    if (!eleven?.configured) {
+      children.push(new Option(eleven || !state.elevenAvailable ? "Agrega tu clave de ElevenLabs en Ajustes" : "Cargando voces…", ""));
+    } else {
+      if (voice.elevenVoice && !list.some((item) => item.id === voice.elevenVoice)) {
+        children.push(new Option(voice.elevenName || "Voz elegida", voice.elevenVoice));
+      }
+      const option = (item) => new Option(elevenLabel(item), item.id);
+      const own = list.filter((item) => item.category !== "premade");
+      const premade = list.filter((item) => item.category === "premade");
+      if (own.length) children.push(optionGroup("Tus voces", own.map(option)));
+      if (premade.length) children.push(optionGroup("Voces de ElevenLabs", premade.map(option)));
+      if (!children.length) children.push(new Option(eleven.error ? "No se pudieron cargar las voces" : "Tu cuenta no tiene voces", ""));
+    }
+    select.replaceChildren(...children);
+    select.value = voice.elevenVoice || list[0]?.id || "";
+    select.dataset.key = key;
+  }
+  select.disabled = !eleven?.configured || !(list.length || voice.elevenVoice);
+}
+
+/** Qué significa leer con cada motor y, si ElevenLabs no está listo, cómo arreglarlo. */
+function renderEngineHint(voice) {
+  const eleven = state.eleven;
+  let text = "";
+  let setup = false;
+  if (voice.engine === "elevenlabs") {
+    if (!state.elevenAvailable) {
+      text = "Las voces de ElevenLabs no están disponibles en este servidor: se lee con la voz del sistema.";
+    } else if (!eleven) {
+      text = "Comprobando tu cuenta de ElevenLabs…";
+    } else if (!eleven.configured) {
+      text = "Agrega tu clave de ElevenLabs en Ajustes para usar sus voces. Mientras tanto se lee con la voz del sistema.";
+      setup = true;
+    } else if (eleven.error && !eleven.voices.length) {
+      text = `${eleven.error} Mientras tanto se lee con la voz del sistema.`;
+      setup = true;
+    } else if (Date.now() < speech.elevenPausedUntil) {
+      text = "ElevenLabs no pudo leer hace un momento (mira el aviso): por unos minutos se lee con la voz del sistema.";
+      setup = true;
+    } else {
+      text = voice.autoRead
+        ? "Lo que se lee se envía a ElevenLabs y gasta caracteres de tu plan, también cada respuesta que se lee sola."
+        : "Lo que se lee se envía a ElevenLabs y gasta caracteres de tu plan.";
+    }
+  } else if (!Synth) {
+    text = "Este navegador no tiene voces del sistema: elige ElevenLabs para escuchar las respuestas.";
+  } else {
+    text = naturalVoices(voice.lang === "auto" ? speechLanguage() : voice.lang).length
+      ? "Gratis. Las voces «Naturales» son las que suenan más humanas (usan internet)."
+      : "Gratis. Aquí no hay voces «Naturales» para este idioma (Edge las tiene); para voces más humanas usa ElevenLabs.";
+  }
+  $("#voice-engine-hint").textContent = text;
+  $("#voice-eleven-actions").hidden = !setup;
+}
+
+function optionGroup(label, options) {
+  const group = document.createElement("optgroup");
+  group.label = label;
+  group.append(...options);
+  return group;
+}
+
+/** Las voces del sistema que suenan más humanas: «Natural» en Edge, «Mejorada» o «Premium» en Apple… */
+function isNaturalVoice(voice) {
+  return /natural|neural|online|premium|enhanced|mejorada/i.test(String(voice.name));
+}
+
+function naturalVoices(lang) {
+  const base = String(lang).split("-")[0].toLowerCase();
+  return voices.filter((item) => normalizeLang(item.lang).split("-")[0] === base && isNaturalVoice(item));
+}
+
+const ELEVEN_GENDER = { female: "mujer", male: "hombre", neutral: "neutra", "non-binary": "neutra" };
+const ELEVEN_ACCENT = {
+  american: "estadounidense",
+  british: "británico",
+  australian: "australiano",
+  irish: "irlandés",
+  swedish: "sueco",
+  transatlantic: "transatlántico",
+  latin: "latino",
+  latino: "latino",
+  "latin american": "latino",
+  mexican: "mexicano",
+  spanish: "español",
+  peninsular: "de España",
+  castilian: "de España",
+  argentine: "argentino",
+  argentinian: "argentino",
+  chilean: "chileno",
+  colombian: "colombiano",
+  peruvian: "peruano",
+  venezuelan: "venezolano",
+};
+
+function elevenLabel(voice) {
+  const gender = ELEVEN_GENDER[String(voice.gender).toLowerCase()] ?? "";
+  const accentKey = String(voice.accent).toLowerCase();
+  const accent = ELEVEN_ACCENT[accentKey] ?? voice.accent;
+  const traits = [gender, accent ? `acento ${accent}` : ""].filter(Boolean).join(", ");
+  return traits ? `${voice.name} · ${traits}` : voice.name;
 }
 
 function formatRate(value) {
@@ -4899,6 +5268,33 @@ async function saveVoice(patch) {
   await patchAgent(agent.id, { voice: patch });
 }
 
+/** La voz elegida en la lista: del sistema (por nombre) o de ElevenLabs (por su id). */
+function onVoiceNameChange(select) {
+  const agent = findAgent(details.agentId);
+  if (!agent) return;
+  if (agent.voice?.engine === "elevenlabs") {
+    const chosen = state.eleven?.voices?.find((item) => item.id === select.value);
+    void saveVoice({ elevenVoice: select.value, elevenName: chosen?.name ?? "" });
+  } else {
+    void saveVoice({ name: select.value });
+  }
+}
+
+/** Leer con las voces del sistema o con ElevenLabs. Al pasar a ElevenLabs se elige su primera voz. */
+function chooseVoiceEngine(value) {
+  const agent = findAgent(details.agentId);
+  if (!agent) return;
+  if (value !== "elevenlabs") {
+    void saveVoice({ engine: "system" });
+    return;
+  }
+  const patch = { engine: "elevenlabs" };
+  const first = state.eleven?.voices?.[0];
+  if (!agent.voice?.elevenVoice && first) Object.assign(patch, { elevenVoice: first.id, elevenName: first.name });
+  void saveVoice(patch);
+  if (!state.eleven) void refreshEleven();
+}
+
 function onVoiceLangChange(value) {
   const agent = findAgent(details.agentId);
   const current = agent?.voice?.name ? voices.find((item) => item.name === agent.voice.name) : null;
@@ -4910,7 +5306,7 @@ function onVoiceLangChange(value) {
 
 function testVoice() {
   const agent = findAgent(details.agentId);
-  if (!agent || !Synth) return;
+  if (!agent || !(Synth || elevenVoiceFor({ ...DEFAULT_VOICE, ...(agent.voice ?? {}) }))) return;
   primeSpeech();
   if (speech.current?.messageId === "voice-test") {
     stopSpeaking();
@@ -5143,8 +5539,25 @@ async function copyText(text) {
 // ---------- lectura en voz alta ----------
 
 let voices = [];
-/** Lo que se está leyendo: el mensaje, cuántos trozos faltan y un número que invalida lo que se canceló. */
-const speech = { current: null, pending: 0, token: 0, primed: false };
+/**
+ * Lo que se está leyendo (`current`) y lo que espera su turno (`queue`); `token` invalida lo que se canceló.
+ * `audio` reproduce las voces de ElevenLabs y `urls` guarda su audio mientras suena.
+ */
+const speech = {
+  current: null,
+  queue: [],
+  token: 0,
+  primed: false,
+  audio: null,
+  audioPrimed: false,
+  urls: new Set(),
+  abort: null,
+  stoppedAt: 0,
+  /** Tras un error que no se arregla solo (sin caracteres, clave rechazada) se usa la voz del sistema un rato. */
+  elevenPausedUntil: 0,
+};
+/** 50 ms de silencio (WAV de 8 bits): tocarlo durante un toque habilita el reproductor en el iPhone. */
+const SILENT_WAV = `data:audio/wav;base64,UklGRrQBAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YZABAACA${"gICA".repeat(133)}`;
 /** Respuestas a lo que dijiste con el botón de voz: se leen aunque «Leer sus respuestas» esté apagado. */
 let voiceReply = null;
 
@@ -5163,6 +5576,7 @@ function loadVoices() {
     voices = [];
   }
   renderDetailsIfOpen();
+  if ($("#settings-dialog").open) renderTtsSettings();
 }
 
 function normalizeLang(value) {
@@ -5266,6 +5680,7 @@ function chunkText(text, max = 220) {
 
 /** Algunos navegadores (Safari) solo dejan hablar después de un toque: se «despierta» la voz con el primero. */
 function primeSpeech() {
+  primeAudio();
   if (!Synth || speech.primed) return;
   speech.primed = true;
   try {
@@ -5277,62 +5692,259 @@ function primeSpeech() {
   }
 }
 
+/** Lo mismo con el reproductor de ElevenLabs: un sonido mudo durante un toque lo deja listo. */
+function primeAudio() {
+  if (speech.audioPrimed || !state.eleven?.configured || speech.current?.engine === "eleven") return;
+  const audio = speechAudio();
+  audio.onended = null;
+  audio.onerror = null;
+  audio.src = SILENT_WAV;
+  audio.play()?.then(
+    () => {
+      speech.audioPrimed = true;
+    },
+    () => undefined,
+  );
+}
+
+function speechAudio() {
+  if (!speech.audio) {
+    speech.audio = new Audio();
+    speech.audio.preload = "auto";
+  }
+  return speech.audio;
+}
+
 function stopSpeaking() {
-  if (!Synth) return;
-  const active = speech.current !== null || speech.pending > 0 || Synth.speaking || Synth.pending;
+  const synthBusy = Boolean(Synth && (Synth.speaking || Synth.pending));
+  const active = speech.current !== null || speech.queue.length > 0 || synthBusy;
   speech.token += 1;
-  speech.pending = 0;
+  speech.queue = [];
   speech.current = null;
-  if (active) Synth.cancel();
+  speech.abort?.abort();
+  speech.abort = null;
+  const audio = speech.audio;
+  if (audio) {
+    audio.onended = null;
+    audio.onerror = null;
+    if (!audio.paused) audio.pause();
+  }
+  for (const url of speech.urls) URL.revokeObjectURL(url);
+  speech.urls.clear();
+  if (Synth && active) {
+    Synth.cancel();
+    speech.stoppedAt = performance.now();
+  }
   updateSpeakButtons();
+}
+
+/** La voz de ElevenLabs con la que lee un agente, o null si lee con la del sistema. */
+function elevenVoiceFor(settings) {
+  if (settings.engine !== "elevenlabs" || !state.eleven?.configured || Date.now() < speech.elevenPausedUntil) return null;
+  return settings.elevenVoice || state.eleven.voices?.[0]?.id || null;
 }
 
 /** Lee un texto con la voz del agente. Con `queue`, espera a que termine lo que se está leyendo. */
 function speak(text, agent, { messageId = null, queue = false } = {}) {
-  if (!Synth) return false;
   const clean = speakableText(text);
   if (!clean) return false;
-  const busy = speech.pending > 0 || Synth.speaking || Synth.pending;
-  if (!queue && busy) stopSpeaking();
-  const token = speech.token;
   const settings = { ...DEFAULT_VOICE, ...(agent?.voice ?? {}) };
-  const lang = settings.lang !== "auto" ? settings.lang : detectLanguage(clean);
-  const voice = pickVoice(settings.name, lang);
-  const job = { messageId, agentId: agent?.id ?? null };
-  const utterances = chunkText(clean).map((chunk) => {
+  const voiceId = elevenVoiceFor(settings);
+  if (!voiceId && !Synth) return false;
+  const job = {
+    messageId,
+    agentId: agent?.id ?? null,
+    text: clean,
+    rate: settings.rate,
+    lang: settings.lang !== "auto" ? settings.lang : detectLanguage(clean),
+    voiceName: settings.name,
+    engine: voiceId ? "eleven" : "system",
+    voiceId,
+  };
+  if (!queue && (speech.current || speech.queue.length || (Synth && (Synth.speaking || Synth.pending)))) stopSpeaking();
+  speech.queue.push(job);
+  if (speech.current) updateSpeakButtons();
+  else nextSpeech();
+  return true;
+}
+
+/** Empieza lo siguiente de la cola (o nada, si se vació). */
+function nextSpeech() {
+  const job = speech.queue.shift() ?? null;
+  speech.current = job;
+  updateSpeakButtons();
+  if (!job) return;
+  const token = speech.token;
+  const finish = () => {
+    if (token === speech.token && speech.current === job) nextSpeech();
+  };
+  if (job.engine === "eleven") void playEleven(job, token, finish);
+  else playSystem(job, job.text, token, finish);
+}
+
+/** Lee con la voz del sistema, en trozos cortos (los navegadores cortan las lecturas largas). */
+function playSystem(job, text, token, finish) {
+  if (!Synth) {
+    finish();
+    return;
+  }
+  const voice = pickVoice(job.voiceName, job.lang);
+  const utterances = chunkText(text).map((chunk) => {
     const utterance = new SpeechSynthesisUtterance(chunk);
-    utterance.lang = voice?.lang || lang;
+    utterance.lang = voice?.lang || job.lang;
     if (voice) utterance.voice = voice;
-    utterance.rate = settings.rate;
-    utterance.onstart = () => {
-      if (token !== speech.token) return;
-      speech.current = job;
-      updateSpeakButtons();
-    };
-    const done = () => {
-      if (token !== speech.token) return;
-      speech.pending = Math.max(0, speech.pending - 1);
-      if (speech.pending === 0) {
-        speech.current = null;
-        updateSpeakButtons();
-      }
-    };
-    utterance.onend = done;
-    utterance.onerror = done;
+    utterance.rate = job.rate;
     return utterance;
   });
-  if (!utterances.length) return false;
-  speech.pending += utterances.length;
-  speech.current ??= job;
-  updateSpeakButtons();
-  const start = () => {
+  if (!utterances.length) {
+    finish();
+    return;
+  }
+  let left = utterances.length;
+  const done = () => {
     if (token !== speech.token) return;
+    left -= 1;
+    if (left === 0) finish();
+  };
+  for (const utterance of utterances) {
+    utterance.onend = done;
+    utterance.onerror = done;
+  }
+  const start = () => {
+    if (token !== speech.token || speech.current !== job) return;
     for (const utterance of utterances) Synth.speak(utterance);
   };
   // Chrome y Edge a veces no hablan si se pide justo después de cancelar.
-  if (!queue && busy) setTimeout(start, 80);
+  const wait = 80 - (performance.now() - speech.stoppedAt);
+  if (wait > 0) setTimeout(start, wait);
   else start();
-  return true;
+}
+
+/** Trozos para ElevenLabs: el primero corto (suena antes) y los demás más largos (suenan más naturales). */
+function elevenChunks(text) {
+  const chunks = [];
+  for (const piece of chunkText(text, 300)) {
+    const last = chunks.length - 1;
+    if (last >= 1 && chunks[last].length + piece.length + 1 <= 1_000) chunks[last] += ` ${piece}`;
+    else chunks.push(piece);
+  }
+  return chunks;
+}
+
+/** Lee con ElevenLabs: mientras suena un trozo se pide el siguiente. Si algo falla, sigue la voz del sistema. */
+async function playEleven(job, token, finish) {
+  const chunks = elevenChunks(job.text);
+  const controller = new AbortController();
+  speech.abort = controller;
+  const audio = speechAudio();
+  const load = (index) => {
+    const request = fetchSpeech(job.voiceId, chunks[index], controller.signal);
+    request.catch(() => undefined); // el error se atiende al esperarlo
+    return request;
+  };
+  let next = load(0);
+  for (let index = 0; index < chunks.length; index += 1) {
+    let url;
+    try {
+      url = await next;
+    } catch (error) {
+      if (token !== speech.token) return;
+      elevenFailed(error);
+      playSystem(job, chunks.slice(index).join(" "), token, finish);
+      return;
+    }
+    if (token !== speech.token) {
+      forgetAudio(url);
+      return;
+    }
+    next = index + 1 < chunks.length ? load(index + 1) : null;
+    const result = await playAudio(audio, url, job.rate, controller.signal);
+    forgetAudio(url);
+    if (token !== speech.token || result === false) return;
+    if (result !== true) {
+      controller.abort();
+      elevenFailed(result);
+      playSystem(job, chunks.slice(index).join(" "), token, finish);
+      return;
+    }
+  }
+  if (speech.abort === controller) speech.abort = null;
+  finish();
+}
+
+/** Pide a ClosedBot el audio de un trozo (ClosedBot se lo pide a ElevenLabs con tu clave). */
+async function fetchSpeech(voiceId, text, signal) {
+  let response;
+  try {
+    response = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "x-cuadrilla": "1", "content-type": "application/json" },
+      body: JSON.stringify({ voiceId, text }),
+      credentials: "same-origin",
+      signal,
+    });
+  } catch (error) {
+    if (signal.aborted) throw error;
+    throw new ApiError("No hay conexión con el servidor.", 0);
+  }
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 401) showLogin();
+    throw new ApiError(data.error || `Error ${response.status}`, response.status);
+  }
+  const blob = await response.blob();
+  if (signal.aborted) throw new DOMException("Lectura cancelada.", "AbortError");
+  if (!blob.size) throw new ApiError("ElevenLabs no devolvió audio.", 502);
+  const url = URL.createObjectURL(blob);
+  speech.urls.add(url);
+  return url;
+}
+
+/** Toca un audio: true si terminó, false si se canceló, o el error si no se pudo. */
+function playAudio(audio, url, rate, signal) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      audio.onended = null;
+      audio.onerror = null;
+      signal.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    const onAbort = () => settle(false);
+    if (signal.aborted) {
+      settle(false);
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    audio.onended = () => settle(true);
+    audio.onerror = () => settle(new Error("El navegador no pudo reproducir el audio de ElevenLabs."));
+    audio.src = url;
+    // Cargar otro audio vuelve a la velocidad normal: se fija después.
+    audio.defaultPlaybackRate = rate;
+    audio.playbackRate = rate;
+    const playing = audio.play();
+    playing?.catch((error) =>
+      settle(error?.name === "NotAllowedError" ? new Error("El navegador no dejó reproducir el audio: toca la pantalla y vuelve a intentarlo.") : error),
+    );
+  });
+}
+
+function forgetAudio(url) {
+  URL.revokeObjectURL(url);
+  speech.urls.delete(url);
+}
+
+/** Avisa por qué no se leyó con ElevenLabs; si no se arregla solo, la voz del sistema lee un rato. */
+function elevenFailed(error) {
+  const status = error?.status ?? 0;
+  if (status === 400 || status === 402 || status === 409) {
+    speech.elevenPausedUntil = Date.now() + 10 * 60_000;
+    void refreshEleven({ refresh: true });
+  }
+  const message = String(error?.message || "No se pudo leer con ElevenLabs.").trim();
+  showToast(Synth ? `${message.replace(/[.:]+$/, "")}. Mientras tanto se lee con la voz del sistema.` : message);
 }
 
 function updateSpeakButtons() {
@@ -5352,12 +5964,13 @@ function toggleSpeakMessage(key, messageId) {
   }
   const message = (state.messages.get(key) ?? []).find((item) => item.id === messageId);
   // En un canal, cada respuesta se lee con la voz de quien la escribió.
-  if (!message || !speak(message.text, findAgent(message.agentId), { messageId })) showToast("No hay nada que leer en ese mensaje.");
+  if (message && speak(message.text, findAgent(message.agentId), { messageId })) return;
+  showToast(message && speakableText(message.text) && !Synth ? "Este navegador no puede leer en voz alta: elige ElevenLabs en la ficha del agente." : "No hay nada que leer en ese mensaje.");
 }
 
 /** Lee sola una respuesta recién terminada si el agente lo tiene activado o si le hablaste con el botón de voz. */
 function maybeAutoRead(agentId, message) {
-  if (!Synth || agentId !== state.currentId || document.hidden || dictation || !message.text?.trim()) return;
+  if (!(Synth || state.eleven?.configured) || agentId !== state.currentId || document.hidden || dictation || !message.text?.trim()) return;
   const agent = findAgent(agentId);
   if (!agent) return;
   const replying =
@@ -5658,7 +6271,9 @@ function bindUi() {
   $("#details-pause").addEventListener("click", () => void agentAction("pause", details.agentId));
   $("#details-reset").addEventListener("click", () => void agentAction("reset", details.agentId));
   $("#details-delete").addEventListener("click", () => void agentAction("delete", details.agentId));
-  $("#voice-name").addEventListener("change", (event) => void saveVoice({ name: event.target.value }));
+  $("#voice-engine").addEventListener("change", (event) => chooseVoiceEngine(event.target.value));
+  $("#voice-eleven-setup").addEventListener("click", () => openSettings({ focusVoices: true }));
+  $("#voice-name").addEventListener("change", (event) => onVoiceNameChange(event.target));
   $("#voice-rate").addEventListener("input", (event) => {
     $("#voice-rate-value").textContent = formatRate(Number(event.target.value));
   });
