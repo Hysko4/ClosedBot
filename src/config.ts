@@ -13,6 +13,9 @@ export interface Config {
   publicDir: string;
   maxHops: number;
   codexBin: string;
+  /** Rutas elegidas a mano para Grok y Gemini CLI (si no, se buscan solas). */
+  grokBin: string | null;
+  geminiBin: string | null;
   claudeBin: string | null;
   /** Carpeta de la sesión de Claude Code de los agentes, aparte de la que la persona use por su cuenta. */
   claudeConfigDir: string;
@@ -56,6 +59,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, appRoot = defau
     publicDir: join(appRoot, "public"),
     maxHops: integer(setting(env, "MAX_HOPS"), 6, 1, 50, "CLOSEDBOT_MAX_HOPS"),
     codexBin: setting(env, "CODEX_BIN")?.trim() || "codex",
+    grokBin: setting(env, "GROK_BIN")?.trim() || null,
+    geminiBin: setting(env, "GEMINI_BIN")?.trim() || null,
     claudeBin: setting(env, "CLAUDE_BIN")?.trim() || null,
     claudeConfigDir: resolve(expandHome(setting(env, "CLAUDE_CONFIG_DIR")?.trim() || join(dataDir, "claude"), home)),
     playwright: flag(setting(env, "PLAYWRIGHT"), false),

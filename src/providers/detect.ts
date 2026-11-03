@@ -1,16 +1,25 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderStatus } from "../service.js";
 import { type ClaudeCli, describeClaudeAuth, readClaudeAuth } from "./claude-cli.js";
 import { redactDiagnostic } from "./codex.js";
+import { describeSource, type LocatedCli, locateCli } from "./locate.js";
 import { runCli } from "./spawn.js";
 
 export interface DetectOptions {
   enabled: boolean;
+  /** Ruta de Codex elegida a mano (CODEX_BIN); por defecto se busca. */
   codexBin: string;
+  grokBin?: string | null;
+  geminiBin?: string | null;
   env?: NodeJS.ProcessEnv;
   /** El Claude Code de la app (null si no está) y el entorno con la carpeta de su sesión. */
   claude?: { cli: ClaudeCli | null; env: NodeJS.ProcessEnv; configDir: string };
+  /** Para las pruebas: dónde buscar los programas (por defecto, locateCli). */
+  locate?: (name: "codex" | "grok" | "gemini") => LocatedCli | null;
+  /** Carpeta personal donde Grok y Gemini guardan su sesión (por defecto, la del usuario). */
+  home?: string;
 }
 
 const DEMO: ProviderStatus = {
@@ -27,17 +36,27 @@ export const CLAUDE_SIGNED_OUT = "Sin sesión. Pulsa «Iniciar sesión con Claud
 export async function detectProviders(options: DetectOptions): Promise<ProviderStatus[]> {
   const env = options.env ?? process.env;
   if (!options.enabled) {
-    const skipped = (id: "claude" | "codex", label: string): ProviderStatus => ({
+    const skipped = (id: "claude" | "codex" | "grok" | "gemini", label: string): ProviderStatus => ({
       id,
       label,
       available: true,
       loggedIn: null,
       detail: "Detección desactivada (CLOSEDBOT_DETECT=0).",
     });
-    return [skipped("claude", "Claude"), skipped("codex", "Codex"), DEMO];
+    return [skipped("claude", "Claude"), skipped("codex", "Codex"), skipped("grok", "Grok"), skipped("gemini", "Gemini"), DEMO];
   }
-  const [claude, codex] = await Promise.all([detectClaude(env, options.claude), detectCodex(options.codexBin, env)]);
-  return [claude, codex, DEMO];
+  const locate =
+    options.locate ??
+    ((name: "codex" | "grok" | "gemini") =>
+      locateCli(name, { env, configured: name === "codex" ? options.codexBin : name === "grok" ? options.grokBin : options.geminiBin }));
+  const home = options.home ?? (env.USERPROFILE || env.HOME || homedir());
+  const [claude, codex, grok, gemini] = await Promise.all([
+    detectClaude(env, options.claude),
+    detectCodex(locate("codex"), env),
+    detectGrok(locate("grok"), env, home),
+    detectGemini(locate("gemini"), env, home),
+  ]);
+  return [claude, codex, grok, gemini, DEMO];
 }
 
 async function detectClaude(env: NodeJS.ProcessEnv, claude: DetectOptions["claude"]): Promise<ProviderStatus> {
@@ -81,28 +100,87 @@ async function detectClaude(env: NodeJS.ProcessEnv, claude: DetectOptions["claud
   };
 }
 
-async function detectCodex(bin: string, env: NodeJS.ProcessEnv): Promise<ProviderStatus> {
-  const base = { id: "codex" as const, label: "Codex" };
-  const version = await run(bin, ["--version"], env);
-  if (!version.ok) {
-    return {
-      ...base,
-      available: false,
-      loggedIn: null,
-      canSignIn: false,
-      detail: `No encontré Codex (${bin}). Instálalo con «npm install -g @openai/codex».`,
-    };
-  }
-  const login = await run(bin, ["login", "status"], env);
-  const versionText = firstLine(version.output) || "Codex";
+async function detectCodex(found: LocatedCli | null, env: NodeJS.ProcessEnv): Promise<ProviderStatus> {
+  const base = { id: "codex" as const, label: "Codex", canInstall: true };
+  if (!found) return notInstalled(base, "Codex (de OpenAI, con tu cuenta de ChatGPT)");
+  const version = await run(found.path, ["--version"], env);
+  if (!version.ok) return broken(base, found, version.output);
+  const login = await run(found.path, ["login", "status"], env);
+  const versionText = `${firstLine(version.output) || "Codex"}${where(found)}`;
   if (!login.ok) {
-    return { ...base, available: true, loggedIn: false, canSignIn: true, detail: `${versionText} instalado, sin sesión: pulsa «Iniciar sesión con ChatGPT».` };
+    return { ...base, available: true, loggedIn: false, canSignIn: true, path: found.path, detail: `${versionText}, sin sesión: pulsa «Iniciar sesión con ChatGPT».` };
   }
-  return { ...base, available: true, loggedIn: true, canSignIn: true, detail: `${versionText} · ${firstLine(login.output) || "sesión iniciada"}` };
+  return { ...base, available: true, loggedIn: true, canSignIn: true, path: found.path, detail: `${versionText} · ${firstLine(login.output) || "sesión iniciada"}` };
 }
 
-async function run(bin: string, args: string[], env: NodeJS.ProcessEnv): Promise<{ ok: boolean; output: string }> {
-  const result = await runCli({ command: bin, args, env }, 8_000);
+/** Grok (xAI): la sesión que deja «grok login» queda en ~/.grok/auth.json; también sirve XAI_API_KEY. */
+async function detectGrok(found: LocatedCli | null, env: NodeJS.ProcessEnv, home: string): Promise<ProviderStatus> {
+  const base = { id: "grok" as const, label: "Grok", canInstall: true };
+  if (!found) return notInstalled(base, "Grok (de xAI, con tu cuenta de Grok o X)");
+  const version = await run(found.path, ["--no-auto-update", "--version"], env);
+  if (!version.ok) return broken(base, found, version.output);
+  const versionText = `${firstLine(version.output) || "Grok"}${where(found)}`;
+  if (env.XAI_API_KEY?.trim()) {
+    return { ...base, available: true, loggedIn: true, canSignIn: false, path: found.path, detail: `${versionText} · usa tu clave de API de xAI (XAI_API_KEY).` };
+  }
+  if (existsSync(join(home, ".grok", "auth.json"))) {
+    return { ...base, available: true, loggedIn: true, canSignIn: true, path: found.path, detail: `${versionText} · sesión iniciada.` };
+  }
+  return { ...base, available: true, loggedIn: false, canSignIn: true, path: found.path, detail: `${versionText}, sin sesión: pulsa «Iniciar sesión con Grok».` };
+}
+
+/**
+ * Gemini CLI (Google): la cuenta queda en el llavero del sistema, así que se mira el método elegido en
+ * ~/.gemini/settings.json (lo guarda al iniciar sesión bien). También sirven GEMINI_API_KEY o GOOGLE_API_KEY.
+ */
+async function detectGemini(found: LocatedCli | null, env: NodeJS.ProcessEnv, home: string): Promise<ProviderStatus> {
+  const base = { id: "gemini" as const, label: "Gemini", canInstall: true, canSignOut: false };
+  if (!found) return notInstalled(base, "Gemini CLI (de Google, con tu cuenta de Google)");
+  const version = await run(found.path, ["--version"], env, 20_000);
+  if (!version.ok) return broken(base, found, version.output);
+  const versionText = `Gemini CLI ${firstLine(version.output) || ""}`.trim() + where(found);
+  if (env.GEMINI_API_KEY?.trim() || env.GOOGLE_API_KEY?.trim()) {
+    return { ...base, available: true, loggedIn: true, canSignIn: false, path: found.path, detail: `${versionText} · usa tu clave de API de Gemini.` };
+  }
+  const method = geminiAuthMethod(home);
+  if (method === "oauth-personal") {
+    return { ...base, available: true, loggedIn: true, canSignIn: true, path: found.path, detail: `${versionText} · sesión iniciada con Google.` };
+  }
+  return { ...base, available: true, loggedIn: false, canSignIn: true, path: found.path, detail: `${versionText}, sin sesión: pulsa «Iniciar sesión con Google».` };
+}
+
+/** Método de inicio de sesión que Gemini CLI guardó en su configuración (o null). */
+export function geminiAuthMethod(home: string = homedir()): string | null {
+  try {
+    const text = readFileSync(join(home, ".gemini", "settings.json"), "utf8");
+    return /"selected(?:Auth)?Type"\s*:\s*"([^"]+)"/.exec(text)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function notInstalled(base: { id: "codex" | "grok" | "gemini"; label: string }, what: string): ProviderStatus {
+  return { ...base, available: false, loggedIn: null, canSignIn: false, canInstall: true, detail: `No está instalado en este equipo. Pulsa «Instalar» para agregar ${what}.` };
+}
+
+function broken(base: { id: "codex" | "grok" | "gemini"; label: string }, found: LocatedCli, output: string): ProviderStatus {
+  return {
+    ...base,
+    available: false,
+    loggedIn: null,
+    canSignIn: false,
+    canInstall: true,
+    path: found.path,
+    detail: `Encontré ${base.label} en ${found.path}, pero no respondió${output ? `: ${firstLine(output)}` : "."} Prueba con «Instalar».`,
+  };
+}
+
+function where(found: LocatedCli): string {
+  return found.source === "path" || found.source === "config" ? "" : ` (de ${describeSource(found.source)})`;
+}
+
+async function run(bin: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs = 10_000): Promise<{ ok: boolean; output: string }> {
+  const result = await runCli({ command: bin, args, env }, timeoutMs);
   return { ok: result.code === 0, output: redactDiagnostic(`${result.stdout}\n${result.stderr}`.trim()) };
 }
 

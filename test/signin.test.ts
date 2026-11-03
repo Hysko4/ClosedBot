@@ -35,7 +35,7 @@ async function signInHarness(mode: string, options: { timeoutMs?: number } = {})
   // CLAUDECODE simula que la app se abrió desde una sesión de Claude Code: no debe llegar al CLI.
   const env = claudeEnv(baseEnv({ FAKE_CLAUDE_LOGIN: mode, CLAUDECODE: "1" }), configDir);
   const detect = () =>
-    detectProviders({ enabled: true, codexBin: join(temp.path, "no-existe-codex"), env, claude: { cli: FAKE_CLI, env, configDir } });
+    detectProviders({ enabled: true, codexBin: join(temp.path, "no-existe-codex"), env, locate: () => null, claude: { cli: FAKE_CLI, env, configDir } });
   const h = await createHarness({
     dir: temp.path,
     detectProviders: detect,
@@ -111,7 +111,7 @@ test("detección de Claude: pregunta a Claude Code por la sesión de la carpeta 
   try {
     const configDir = join(temp.path, "claude");
     const env = claudeEnv(baseEnv(), configDir);
-    const options = { enabled: true, codexBin: join(temp.path, "no-existe-codex"), env, claude: { cli: FAKE_CLI, env, configDir } };
+    const options = { enabled: true, codexBin: join(temp.path, "no-existe-codex"), env, locate: () => null, claude: { cli: FAKE_CLI, env, configDir } };
 
     const out = await readClaudeAuth(FAKE_CLI, env);
     assert.deepEqual(out, { loggedIn: false, method: "none", email: null, plan: null, org: null });

@@ -5,6 +5,24 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const LETTERS = "ABCD";
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+const AudioCtx = window.AudioContext || window.webkitAudioContext || null;
+/** Grabar el micrófono para el dictado en este PC (el navegador solo lo permite en localhost o https). */
+const CanRecord = Boolean(window.isSecureContext && navigator.mediaDevices?.getUserMedia && AudioCtx);
+const DICTATION_KEY = "closedbot:dictado";
+const BROWSER_FAILED_KEY = "closedbot:dictado-navegador-falla";
+/** Dictado en este PC (segundos): cortes en las pausas para que el texto aparezca mientras hablas. */
+const LOCAL_DICTATION = {
+  calibrate: 0.4,
+  preroll: 0.4,
+  pause: 0.8,
+  softMax: 15,
+  hardMax: 28,
+  minVoiced: 0.3,
+  voiceEnd: 1.4,
+  voiceNoSpeech: 8,
+  dictateIdle: 45,
+  maxTotal: 300,
+};
 const Synth = "speechSynthesis" in window && typeof window.SpeechSynthesisUtterance === "function" ? window.speechSynthesis : null;
 /** Los avatares elegidos a mano se guardan como 10000 + figura × 100 + color (los automáticos son 0, 1, 2…). */
 const AVATAR_CUSTOM_BASE = 10_000;
@@ -31,6 +49,7 @@ const state = {
   search: "",
   sections: [], // secciones creadas a mano, en orden
   usage: [], // uso del plan por proveedor
+  speech: null, // dictado en este PC: { state, model, sizeMb, progress, error } o null si el servidor no lo tiene
   showHidden: false,
   keepUnread: new Set(), // «Marcar como no leído» en la conversación abierta: sigue así hasta que vuelvas a entrar
   collapsed: loadCollapsed(),
@@ -47,7 +66,7 @@ let readTimer = null;
 let editingAgentId = null;
 let routinesFilter = null;
 let recognition = null;
-let dictation = null; // { mode: "dictate" | "voice", base, final, agentId, cancelled }
+let dictation = null; // { engine: "browser" | "local", mode: "dictate" | "voice", agentId, cancelled, … }
 /** Código de inicio de sesión que se está escribiendo, por proveedor (sobrevive a los repintados). */
 const signInCodes = new Map();
 
@@ -271,6 +290,7 @@ function handleEvent(event) {
       if (event.settings) state.settings = event.settings;
       if (event.sections) state.sections = event.sections;
       if (event.usage) state.usage = event.usage;
+      applySpeechStatus(event.speech ?? null);
       renderIdentity();
       renderPermissions();
       renderSidebar();
@@ -300,10 +320,19 @@ function handleEvent(event) {
       state.usage = event.usage;
       renderUsage();
       break;
-    case "providers":
+    case "speech":
+      applySpeechStatus(event.speech);
+      break;
+    case "providers": {
+      // Si un proveedor se instaló o cambió de sesión, su lista de modelos se vuelve a pedir.
+      const before = new Map(state.providers.map((provider) => [provider.id, `${provider.available}:${provider.loggedIn}`]));
       state.providers = event.providers;
+      for (const provider of state.providers) {
+        if (before.get(provider.id) !== `${provider.available}:${provider.loggedIn}`) state.models.delete(provider.id);
+      }
       renderProviders();
       break;
+    }
     case "routines":
       state.routines = event.routines;
       renderRoutinesIfOpen();
@@ -894,7 +923,7 @@ function stateLabel(agent) {
 }
 
 function providerLabel(provider) {
-  return { claude: "Claude", codex: "Codex", demo: "Demo" }[provider] ?? provider;
+  return { claude: "Claude", codex: "Codex", grok: "Grok", gemini: "Gemini", demo: "Demo" }[provider] ?? provider;
 }
 
 function toggleSearch(force) {
@@ -1633,7 +1662,7 @@ function updateActionButton() {
   if (voiceActive) mode = "voice";
   else if (text || ready || uploading) mode = "send";
   else if (agent?.state === "working") mode = "stop";
-  else if (Recognition) mode = "voice";
+  else if (dictationAvailable()) mode = "voice";
   button.dataset.mode = mode;
   const label = {
     send: "Enviar",
@@ -1643,7 +1672,7 @@ function updateActionButton() {
   button.setAttribute("aria-label", label);
   button.title = label;
   button.setAttribute("aria-pressed", String(voiceActive));
-  button.disabled = !agent || (mode === "send" && (uploading || (!text && !ready)));
+  button.disabled = !agent || (mode === "send" && (uploading || (!text && !ready))) || (voiceActive && dictation.finishing);
 }
 
 function onComposerSubmit(event) {
@@ -1655,6 +1684,14 @@ function onComposerSubmit(event) {
 }
 
 async function sendMessage() {
+  // Enviar mientras dictas con este PC: primero se escribe lo último que dijiste.
+  const pendingDictation = dictation?.engine === "local" && !dictation.cancelled ? dictation : null;
+  if (pendingDictation) {
+    await finishLocalDictation(pendingDictation, { send: false });
+    if (pendingDictation.mode === "voice") {
+      voiceReply = { agentId: pendingDictation.agentId, startedAt: Date.now(), sawWorking: false, until: null };
+    }
+  }
   const input = $("#composer-input");
   const agentId = state.currentId;
   if (!agentId) return;
@@ -1779,15 +1816,78 @@ function dictationLanguage() {
 
 function toggleDictation(mode) {
   if (dictation) {
-    stopDictation();
+    // Mientras termina de transcribir lo último, un segundo toque no hace nada.
+    if (!dictation.finishing) stopDictation();
     return;
   }
-  startDictation(mode);
+  void startDictation(mode);
 }
 
 /** mode «dictate» escribe en el cuadro; «voice» además envía el mensaje al terminar de hablar. */
-function startDictation(mode) {
-  if (!Recognition || !state.currentId) return;
+async function startDictation(mode) {
+  if (!state.currentId) return;
+  if (useLocalDictation()) await startLocalDictation(mode);
+  else if (Recognition) startBrowserDictation(mode);
+}
+
+// ---------- dictado: motor elegido ----------
+
+function dictationChoice() {
+  try {
+    const value = localStorage.getItem(DICTATION_KEY);
+    return value === "local" || value === "navegador" ? value : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+function rememberDictation(key, value) {
+  try {
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+  } catch {
+    // Sin almacenamiento local: vale solo hasta recargar.
+  }
+}
+
+function browserDictationFailed() {
+  try {
+    return localStorage.getItem(BROWSER_FAILED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Edge de escritorio, como la ventana de ClosedBot: su servicio de voz en línea suele fallar con «network». */
+function isDesktopEdge() {
+  return /\bEdg\//.test(navigator.userAgent) && !coarsePointer;
+}
+
+/** El reconocimiento en este PC: hace falta grabar audio (contexto seguro) y que el servidor lo ofrezca. */
+function localDictationPossible() {
+  return CanRecord && Boolean(state.speech);
+}
+
+function useLocalDictation() {
+  if (!localDictationPossible()) return false;
+  if (!Recognition) return true;
+  const choice = dictationChoice();
+  if (choice !== "auto") return choice === "local";
+  return isDesktopEdge() || state.speech.state === "ready" || browserDictationFailed();
+}
+
+function dictationAvailable() {
+  return Boolean(Recognition) || localDictationPossible();
+}
+
+function updateDictateButton() {
+  $("#dictate").hidden = !dictationAvailable();
+  updateActionButton();
+}
+
+// ---------- dictado del navegador ----------
+
+function startBrowserDictation(mode) {
   // Si el agente está leyendo en voz alta, se calla: el micrófono no debe escucharlo.
   stopSpeaking();
   primeSpeech();
@@ -1798,7 +1898,7 @@ function startDictation(mode) {
   rec.continuous = mode === "dictate";
   rec.maxAlternatives = 1;
   const base = input.value && !/\s$/.test(input.value) ? `${input.value} ` : input.value;
-  const session = { mode, base, final: "", agentId: state.currentId, cancelled: false };
+  const session = { engine: "browser", mode, base, final: "", agentId: state.currentId, cancelled: false, failed: false };
   rec.onresult = (event) => {
     if (dictation !== session) return;
     let interim = "";
@@ -1813,14 +1913,20 @@ function startDictation(mode) {
     updateActionButton();
   };
   rec.onerror = (event) => {
+    if (event.error === "no-speech" || event.error === "aborted") return;
+    // El servicio de voz del navegador no funciona aquí: se pasa al reconocimiento de este PC.
+    if (["network", "service-not-allowed", "language-not-supported"].includes(event.error) && localDictationPossible()) {
+      session.failed = true;
+      rememberDictation(BROWSER_FAILED_KEY, "1");
+      return;
+    }
     const messages = {
       "not-allowed": "Permite el uso del micrófono para dictar.",
       "service-not-allowed": "El navegador no permite el dictado aquí.",
       "audio-capture": "No se encontró un micrófono.",
-      network: "El dictado necesita conexión a internet (lo procesa el servicio de voz del navegador).",
+      network: "El dictado del navegador necesita su servicio de voz en internet y no respondió.",
       "language-not-supported": "El dictado no está disponible en ese idioma en este navegador.",
     };
-    if (event.error === "no-speech" || event.error === "aborted") return;
     showToast(messages[event.error] ?? `El dictado falló (${event.error}).`, "error");
   };
   rec.onend = () => {
@@ -1829,6 +1935,11 @@ function startDictation(mode) {
     recognition = null;
     updateDictationUi();
     saveDraft();
+    if (session.failed && !session.cancelled && state.currentId === session.agentId) {
+      showToast("El dictado del navegador no funciona aquí: uso el de este PC.");
+      void startLocalDictation(session.mode);
+      return;
+    }
     if (session.mode === "voice" && !session.cancelled && state.currentId === session.agentId && input.value.trim()) {
       // Le hablaste: la respuesta se lee en voz alta aunque «Leer sus respuestas» esté apagado.
       voiceReply = { agentId: session.agentId, startedAt: Date.now(), sawWorking: false, until: null };
@@ -1846,9 +1957,540 @@ function startDictation(mode) {
   updateDictationUi();
 }
 
+// ---------- dictado en este PC ----------
+
+/**
+ * Graba el micrófono, corta el audio en las pausas y manda cada trozo al servidor, que lo reconoce
+ * en este mismo equipo. El texto se va agregando al cuadro en orden.
+ */
+async function startLocalDictation(mode) {
+  if (!state.speech || !state.currentId || dictation) return;
+  if (state.speech.state !== "ready") {
+    await ensureLocalModel();
+    return;
+  }
+  stopSpeaking();
+  primeSpeech();
+  const session = {
+    engine: "local",
+    mode,
+    agentId: state.currentId,
+    cancelled: false,
+    opening: true,
+    finishing: false,
+    sendAfter: false,
+    done: null,
+    stream: null,
+    context: null,
+    source: null,
+    node: null,
+    sink: null,
+    rate: 16_000,
+    elapsed: 0,
+    floor: null,
+    calibration: [],
+    preroll: [],
+    prerollSamples: 0,
+    segment: null,
+    heard: false,
+    quiet: 0,
+    level: 0,
+    pending: 0,
+    chain: Promise.resolve(),
+    errorShown: false,
+  };
+  dictation = session;
+  updateDictationUi();
+  // Mientras se abre el micrófono, el servidor carga el modelo: el primer trozo no espera.
+  void api("/api/speech/prepare", { method: "POST" }).catch(() => undefined);
+  try {
+    await openMicrophone(session);
+  } catch (error) {
+    releaseMicrophone(session);
+    if (dictation === session) {
+      dictation = null;
+      updateDictationUi();
+    }
+    if (!session.cancelled) showToast(microphoneError(error), "error");
+    return;
+  }
+  session.opening = false;
+  if (dictation !== session || session.cancelled) {
+    releaseMicrophone(session);
+    return;
+  }
+  updateDictationUi();
+}
+
+async function openMicrophone(session) {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  session.stream = stream;
+  if (session.cancelled) return;
+  // A 16 kHz, la frecuencia del modelo; si el navegador no deja, a la suya (el servidor la convierte).
+  let context = null;
+  let source = null;
+  try {
+    context = new AudioCtx({ sampleRate: 16_000 });
+    source = context.createMediaStreamSource(stream);
+  } catch {
+    if (context) void context.close().catch(() => undefined);
+    context = new AudioCtx();
+    source = context.createMediaStreamSource(stream);
+  }
+  session.context = context;
+  session.source = source;
+  session.rate = context.sampleRate;
+  // Silencio hacia los parlantes: el nodo tiene que estar conectado para recibir audio, pero no se oye.
+  const sink = context.createGain();
+  sink.gain.value = 0;
+  sink.connect(context.destination);
+  session.sink = sink;
+  let node = null;
+  if (context.audioWorklet && typeof AudioWorkletNode === "function") {
+    try {
+      await context.audioWorklet.addModule("/pcm-capture.js");
+      node = new AudioWorkletNode(context, "pcm-capture", { channelCount: 1, channelCountMode: "explicit" });
+      node.port.onmessage = (event) => onLocalAudio(session, event.data);
+    } catch {
+      node = null;
+    }
+  }
+  if (!node) {
+    node = context.createScriptProcessor(4096, 1, 1);
+    node.onaudioprocess = (event) => onLocalAudio(session, new Float32Array(event.inputBuffer.getChannelData(0)));
+  }
+  session.node = node;
+  source.connect(node);
+  node.connect(sink);
+  if (context.state === "suspended") await context.resume();
+}
+
+function releaseMicrophone(session) {
+  const node = session.node;
+  if (node) {
+    try {
+      node.port?.postMessage("stop");
+    } catch {
+      // Ya estaba cerrado.
+    }
+    if (node.port) node.port.onmessage = null;
+    node.onaudioprocess = null;
+  }
+  for (const part of [session.source, node, session.sink]) {
+    try {
+      part?.disconnect();
+    } catch {
+      // Ya estaba desconectado.
+    }
+  }
+  for (const track of session.stream?.getTracks() ?? []) track.stop();
+  if (session.context && session.context.state !== "closed") void session.context.close().catch(() => undefined);
+  session.stream = null;
+  session.context = null;
+  session.source = null;
+  session.node = null;
+  session.sink = null;
+}
+
+function microphoneError(error) {
+  const name = error?.name;
+  if (name === "NotAllowedError" || name === "SecurityError") return "Permite el uso del micrófono para dictar.";
+  if (name === "NotFoundError" || name === "OverconstrainedError") return "No se encontró un micrófono.";
+  if (name === "NotReadableError" || name === "AbortError") return "Otro programa está usando el micrófono.";
+  return `No se pudo abrir el micrófono: ${error?.message ?? error}`;
+}
+
+/** Cada ~100 ms de audio: detecta si hablas, junta el trozo y lo corta en la siguiente pausa. */
+function onLocalAudio(session, chunk) {
+  if (dictation !== session || session.finishing || session.cancelled || !chunk?.length) return;
+  const seconds = chunk.length / session.rate;
+  let sum = 0;
+  for (let index = 0; index < chunk.length; index += 1) sum += chunk[index] * chunk[index];
+  const rms = Math.sqrt(sum / chunk.length);
+  session.elapsed += seconds;
+  session.level = session.level * 0.6 + Math.min(1, rms / 0.12) * 0.4;
+  setDictationLevel(session.level);
+
+  // Los primeros instantes miden el ruido del lugar; lo grabado se guarda por si ya empezaste a hablar.
+  if (session.floor === null) {
+    session.calibration.push(rms);
+    keepPreroll(session, chunk);
+    if (session.elapsed < LOCAL_DICTATION.calibrate) return;
+    session.floor = Math.min(0.05, Math.max(0.0015, Math.min(...session.calibration)));
+  }
+  const threshold = Math.max(0.008, session.floor * 2.5);
+  const loud = rms > threshold;
+  // El ruido de fondo se sigue de cerca cuando baja y muy despacio cuando sube (más aún mientras hablas).
+  const rise = session.segment ? 0.003 : 0.03;
+  session.floor += (rms - session.floor) * (rms < session.floor ? 0.3 : rise);
+  session.floor = Math.min(0.05, Math.max(0.0015, session.floor));
+
+  const segment = session.segment;
+  if (segment) {
+    segment.chunks.push(chunk);
+    segment.samples += chunk.length;
+    if (loud) {
+      segment.voiced += seconds;
+      segment.silence = 0;
+    } else {
+      segment.silence += seconds;
+    }
+    const length = segment.samples / session.rate;
+    const pause = segment.silence >= LOCAL_DICTATION.pause;
+    if (pause || length >= LOCAL_DICTATION.hardMax || (length >= LOCAL_DICTATION.softMax && !loud)) flushLocalSegment(session);
+  } else if (loud) {
+    session.segment = {
+      chunks: [...session.preroll, chunk],
+      samples: session.prerollSamples + chunk.length,
+      voiced: seconds,
+      silence: 0,
+    };
+    session.preroll = [];
+    session.prerollSamples = 0;
+  } else {
+    keepPreroll(session, chunk);
+  }
+
+  if (loud) {
+    session.heard = true;
+    session.quiet = 0;
+  } else {
+    session.quiet += seconds;
+  }
+  if (session.mode === "voice") {
+    if (session.heard && session.quiet >= LOCAL_DICTATION.voiceEnd) {
+      void finishLocalDictation(session);
+    } else if (!session.heard && session.elapsed >= LOCAL_DICTATION.voiceNoSpeech) {
+      cancelLocalDictation(session);
+      showToast("No te escuché. Pulsa de nuevo y habla cerca del micrófono.");
+    }
+  } else if (session.quiet >= LOCAL_DICTATION.dictateIdle) {
+    void finishLocalDictation(session);
+    showToast("Dejé de dictar porque no te escuché un rato.");
+  }
+  if (dictation === session && !session.finishing && session.elapsed >= LOCAL_DICTATION.maxTotal) {
+    void finishLocalDictation(session);
+    showToast("Dictaste cinco minutos seguidos: lo corté aquí. Pulsa de nuevo para seguir.");
+  }
+}
+
+function keepPreroll(session, chunk) {
+  session.preroll.push(chunk);
+  session.prerollSamples += chunk.length;
+  while (session.preroll.length > 1 && session.prerollSamples - session.preroll[0].length >= LOCAL_DICTATION.preroll * session.rate) {
+    session.prerollSamples -= session.preroll.shift().length;
+  }
+}
+
+/** Manda el trozo grabado al servidor; los textos se agregan en el orden en que hablaste. */
+function flushLocalSegment(session) {
+  const segment = session.segment;
+  session.segment = null;
+  if (!segment || segment.voiced < LOCAL_DICTATION.minVoiced) return;
+  // El silencio del final no aporta nada: se deja un poco y se recorta el resto.
+  const trailing = Math.floor(Math.max(0, segment.silence - 0.3) * session.rate);
+  const wav = encodeWav(segment.chunks, segment.samples - trailing, session.rate);
+  session.pending += 1;
+  renderDictationStatus();
+  const job = transcribeAudio(wav).catch((error) => {
+    if (!session.cancelled) reportLocalDictationError(session, error);
+    return "";
+  });
+  session.chain = session.chain
+    .then(() => job)
+    .then((text) => {
+      session.pending -= 1;
+      if (!session.cancelled && text) appendDictation(session, text);
+      renderDictationStatus();
+    });
+}
+
+function appendDictation(session, text) {
+  if (state.currentId !== session.agentId) return;
+  const input = $("#composer-input");
+  const current = input.value;
+  input.value = current && !/\s$/.test(current) ? `${current} ${text}` : current + text;
+  autosize(input);
+  input.scrollTop = input.scrollHeight;
+  saveDraft();
+  updateActionButton();
+}
+
+function reportLocalDictationError(session, error) {
+  if (error.status === 409 && state.speech) {
+    // Alguien borró el modelo: se vuelve a ofrecer la descarga.
+    applySpeechStatus({ ...state.speech, state: "missing", progress: null, error: null });
+  }
+  if (session.errorShown) return;
+  session.errorShown = true;
+  showToast(error.message, "error");
+}
+
+/** Termina de grabar, espera los últimos textos y, en el modo de voz, envía el mensaje. */
+function finishLocalDictation(session, { send = session.mode === "voice" } = {}) {
+  if (session.done) {
+    if (!send) session.sendAfter = false;
+    return session.done;
+  }
+  session.sendAfter = send;
+  session.finishing = true;
+  flushLocalSegment(session);
+  releaseMicrophone(session);
+  updateDictationUi();
+  session.done = session.chain.then(() => {
+    if (dictation !== session) return;
+    dictation = null;
+    updateDictationUi();
+    saveDraft();
+    const input = $("#composer-input");
+    if (session.sendAfter && !session.cancelled && state.currentId === session.agentId && input.value.trim()) {
+      // Le hablaste: la respuesta se lee en voz alta aunque «Leer sus respuestas» esté apagado.
+      voiceReply = { agentId: session.agentId, startedAt: Date.now(), sawWorking: false, until: null };
+      void sendMessage();
+    }
+  });
+  return session.done;
+}
+
+function cancelLocalDictation(session) {
+  session.cancelled = true;
+  releaseMicrophone(session);
+  if (dictation === session) {
+    dictation = null;
+    updateDictationUi();
+  }
+}
+
+async function transcribeAudio(wav) {
+  let response;
+  try {
+    response = await fetch("/api/speech/transcribe", {
+      method: "POST",
+      headers: { "x-cuadrilla": "1", "content-type": "audio/wav" },
+      body: wav,
+      credentials: "same-origin",
+    });
+  } catch {
+    throw new ApiError("No hay conexión con el servidor.", 0);
+  }
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    showLogin();
+    throw new ApiError(data.error || "Inicia sesión.", 401);
+  }
+  if (!response.ok) throw new ApiError(data.error || `El dictado falló (${response.status}).`, response.status);
+  return typeof data.text === "string" ? data.text : "";
+}
+
+/** WAV PCM de 16 bits, mono, con los primeros «total» valores de los trozos. */
+function encodeWav(chunks, total, rate) {
+  const count = Math.max(0, total);
+  const buffer = new ArrayBuffer(44 + count * 2);
+  const view = new DataView(buffer);
+  const text = (offset, value) => {
+    for (let index = 0; index < value.length; index += 1) view.setUint8(offset + index, value.charCodeAt(index));
+  };
+  text(0, "RIFF");
+  view.setUint32(4, 36 + count * 2, true);
+  text(8, "WAVE");
+  text(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  text(36, "data");
+  view.setUint32(40, count * 2, true);
+  let offset = 44;
+  let written = 0;
+  for (const chunk of chunks) {
+    for (let index = 0; index < chunk.length && written < count; index += 1, written += 1) {
+      const value = Math.max(-1, Math.min(1, chunk[index]));
+      view.setInt16(offset, value < 0 ? value * 0x8000 : value * 0x7fff, true);
+      offset += 2;
+    }
+  }
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+// ---------- dictado: descarga del modelo y avisos ----------
+
+/** Pide permiso y descarga el reconocimiento de voz la primera vez. Devuelve true si ya está listo. */
+async function ensureLocalModel() {
+  const status = state.speech;
+  if (!status) return false;
+  if (status.state === "ready") return true;
+  if (status.state === "downloading" || status.state === "extracting") {
+    showToast(`${speechProgressText(status)}. Te aviso cuando esté listo.`);
+    return false;
+  }
+  const ok = await confirmAction(
+    "¿Descargar el dictado?",
+    `Para dictar, ClosedBot descarga una sola vez el reconocimiento de voz (${status.sizeMb} MB). Después funciona en este PC: gratis, sin internet y sin enviar tu voz a nadie.`,
+    "Descargar",
+    "primary",
+  );
+  if (!ok) return false;
+  await installLocalModel();
+  return false;
+}
+
+async function installLocalModel(button = null) {
+  if (button) button.disabled = true;
+  try {
+    const result = await api("/api/speech/install", { method: "POST" });
+    applySpeechStatus(result.speech);
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function speechProgressText(status) {
+  if (status.state === "extracting") return "Instalando el dictado";
+  return `Descargando el dictado: ${Math.floor((status.progress ?? 0) * 100)} % de ${status.sizeMb} MB`;
+}
+
+function applySpeechStatus(status) {
+  const previous = state.speech?.state ?? null;
+  state.speech = status ?? null;
+  const next = state.speech?.state ?? null;
+  if (previous && next && previous !== next) {
+    if (next === "ready" && (previous === "downloading" || previous === "extracting")) {
+      showToast("El dictado ya está listo: pulsa el micrófono para hablar.");
+    } else if (next === "error") {
+      showToast(state.speech.error ?? "No se pudo descargar el dictado.", "error");
+    }
+  }
+  renderDictationStatus();
+  renderSpeechSettings();
+  updateDictateButton();
+}
+
+function renderDictationStatus() {
+  const box = $("#dictation-status");
+  if (!box) return;
+  const session = dictation?.engine === "local" ? dictation : null;
+  const status = state.speech;
+  let message = "";
+  let progress = null;
+  let listening = false;
+  if (session) {
+    if (session.opening) message = "Abriendo el micrófono…";
+    else if (session.finishing) message = "Escribiendo lo que dijiste…";
+    else {
+      listening = true;
+      message = session.mode === "voice" ? "Te escucho. Cuando dejes de hablar, lo envío." : "Te escucho. Pulsa el micrófono para terminar.";
+    }
+  } else if (status?.state === "downloading" || status?.state === "extracting") {
+    message = `${speechProgressText(status)}…`;
+    if (status.state === "downloading") progress = status.progress ?? 0;
+  }
+  box.hidden = !message;
+  box.dataset.listening = String(listening);
+  $("#dictation-status-text").textContent = message;
+  const bar = $("#dictation-progress");
+  bar.hidden = progress === null;
+  if (progress !== null) bar.value = progress;
+  if (!listening) setDictationLevel(0);
+}
+
+function setDictationLevel(level) {
+  $("#dictation-status")?.style.setProperty("--level", level.toFixed(3));
+}
+
+/** Ajustes → Dictado por voz: estado del reconocimiento en este PC y qué motor usar. */
+function renderSpeechSettings() {
+  const list = $("#speech-settings");
+  if (!list) return;
+  list.replaceChildren();
+  const status = state.speech;
+  const item = document.createElement("li");
+  item.className = "provider";
+  const title = document.createElement("div");
+  title.className = "title";
+  const name = document.createElement("span");
+  name.textContent = "Reconocimiento en este PC";
+  const badge = document.createElement("span");
+  badge.className = "state";
+  const detail = document.createElement("div");
+  detail.className = "detail";
+  let action = null;
+  if (!status || !CanRecord) {
+    badge.textContent = "No disponible";
+    badge.dataset.tone = "bad";
+    detail.textContent = !status
+      ? "Este servidor no tiene el dictado local."
+      : "Esta ventana no puede grabar audio (hace falta abrir ClosedBot en este PC o con https).";
+  } else if (status.state === "ready") {
+    badge.textContent = "Listo";
+    badge.dataset.tone = "ok";
+    detail.textContent = `${status.model}. Funciona sin internet y tu voz no sale de este PC.`;
+  } else if (status.state === "downloading" || status.state === "extracting") {
+    badge.textContent = status.state === "downloading" ? `${Math.floor((status.progress ?? 0) * 100)} %` : "Instalando…";
+    badge.dataset.tone = "warn";
+    detail.textContent = `${speechProgressText(status)}. Puedes seguir usando ClosedBot mientras tanto.`;
+  } else {
+    badge.textContent = status.state === "error" ? "Falló" : "Sin descargar";
+    badge.dataset.tone = status.state === "error" ? "bad" : "warn";
+    detail.textContent =
+      status.state === "error" && status.error
+        ? status.error
+        : `${status.model}, ${status.sizeMb} MB. Se descarga una vez; después funciona sin internet y tu voz no sale de este PC.`;
+    action = smallButton(status.state === "error" ? "Reintentar" : "Descargar", "primary");
+    action.addEventListener("click", () => void installLocalModel(action));
+  }
+  title.append(name, badge);
+  item.append(title, detail);
+  if (action) item.append(actionRow(action));
+  if (Recognition && status && CanRecord) {
+    const field = document.createElement("label");
+    field.className = "field speech-engine";
+    const label = document.createElement("span");
+    label.textContent = "Para dictar, usar";
+    const select = document.createElement("select");
+    select.id = "dictation-engine";
+    for (const [value, text] of [
+      ["auto", "Automático"],
+      ["local", "Este PC (privado, sin internet)"],
+      ["navegador", "El servicio de voz del navegador"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      select.append(option);
+    }
+    select.value = dictationChoice();
+    select.addEventListener("change", () => {
+      rememberDictation(DICTATION_KEY, select.value === "auto" ? null : select.value);
+      // Elegir a mano el navegador le da otra oportunidad aunque antes fallara.
+      if (select.value === "navegador") rememberDictation(BROWSER_FAILED_KEY, null);
+      renderSpeechSettings();
+    });
+    field.append(label, select);
+    const hint = document.createElement("div");
+    hint.className = "detail";
+    hint.textContent = useLocalDictation() ? "Ahora dictas con este PC." : "Ahora dictas con el servicio de voz del navegador (manda tu voz a internet).";
+    item.append(field, hint);
+  }
+  list.append(item);
+}
+
 function stopDictation({ cancel = false } = {}) {
-  if (!dictation || !recognition) return;
-  if (cancel) dictation.cancelled = true;
+  const session = dictation;
+  if (!session) return;
+  if (session.engine === "local") {
+    if (cancel) cancelLocalDictation(session);
+    else void finishLocalDictation(session);
+    return;
+  }
+  if (!recognition) return;
+  if (cancel) session.cancelled = true;
   try {
     recognition.stop();
   } catch {
@@ -1858,9 +2500,10 @@ function stopDictation({ cancel = false } = {}) {
 
 function updateDictationUi() {
   const button = $("#dictate");
-  const active = dictation?.mode === "dictate";
+  const active = dictation?.mode === "dictate" && !dictation.finishing;
   button.setAttribute("aria-pressed", String(active));
   button.title = active ? "Dejar de dictar" : "Dictar";
+  renderDictationStatus();
   updateActionButton();
 }
 
@@ -2938,6 +3581,7 @@ function openSettings({ focusName = false } = {}) {
   }
   $("#version").textContent = `ClosedBot ${state.version} · límite de ${state.maxHops} reenvíos seguidos entre agentes.`;
   renderPermissions();
+  renderSpeechSettings();
   openDialog($("#settings-dialog"));
   if (focusName) names.elements.userName.focus();
 }
@@ -3012,11 +3656,14 @@ function renderProviders() {
     name.textContent = provider.label;
     const status = document.createElement("span");
     status.className = "state";
-    if (provider.signIn) {
+    if (provider.install) {
+      status.textContent = "Instalando…";
+      status.dataset.tone = "warn";
+    } else if (provider.signIn) {
       status.textContent = "Esperando al navegador…";
       status.dataset.tone = "warn";
     } else if (!provider.available) {
-      status.textContent = "No disponible";
+      status.textContent = provider.canInstall && !provider.path ? "No instalado" : "No disponible";
       status.dataset.tone = "bad";
     } else if (provider.loggedIn === false) {
       status.textContent = "Sin sesión";
@@ -3032,8 +3679,8 @@ function renderProviders() {
     const detail = document.createElement("div");
     detail.className = "detail";
     detail.textContent = provider.detail;
-    // Mientras se espera al navegador, las instrucciones del inicio de sesión reemplazan al «Sin sesión…».
-    if (provider.signIn) item.append(title);
+    // Mientras se espera al navegador o se instala, las instrucciones reemplazan al «Sin sesión…».
+    if (provider.signIn || provider.install) item.append(title);
     else item.append(title, detail);
     const signIn = renderSignIn(provider);
     if (signIn) item.append(signIn);
@@ -3042,13 +3689,29 @@ function renderProviders() {
   if (focusKey) list.querySelector(`[data-focus-key="${focusKey}"]`)?.focus();
 }
 
-/** Botones para iniciar o cerrar sesión con la cuenta del proveedor (lo hace su propio CLI, como en OpenBot). */
+/**
+ * Botones para instalar el proveedor o para iniciar y cerrar sesión con su cuenta (lo hace su propio
+ * programa, como en OpenBot).
+ */
 function renderSignIn(provider) {
-  if (!provider.canSignIn && !provider.signIn) return null;
+  const installable = Boolean(provider.canInstall) && !provider.available;
+  if (!provider.canSignIn && !provider.signIn && !provider.install && !installable) return null;
   const box = document.createElement("div");
   box.className = "signin";
   const pending = provider.signIn;
-  if (pending) {
+  if (provider.install) {
+    const text = document.createElement("p");
+    text.className = "signin-text";
+    text.textContent = `Instalando ${provider.label}. Puede tardar unos minutos; te aviso cuando termine.`;
+    const cancel = smallButton("Cancelar", "ghost");
+    cancel.addEventListener("click", () => void cancelInstall(provider.id, cancel));
+    box.append(text, actionRow(cancel));
+  } else if (installable && !pending) {
+    const install = smallButton(`Instalar ${provider.label}`, "primary");
+    install.dataset.focusKey = `install-${provider.id}`;
+    install.addEventListener("click", () => void startInstall(provider, install));
+    box.append(actionRow(install));
+  } else if (pending) {
     const text = document.createElement("p");
     text.className = "signin-text";
     text.textContent = isThisComputer()
@@ -3071,9 +3734,13 @@ function renderSignIn(provider) {
     cancel.addEventListener("click", () => void cancelSignIn(provider.id, cancel));
     box.append(actionRow(cancel));
   } else if (provider.loggedIn === true) {
+    // Gemini CLI no tiene cómo cerrar la sesión: no se ofrece.
+    if (provider.canSignOut === false || !provider.canSignIn) return null;
     const logout = smallButton(`Cerrar sesión de ${provider.label}`, "danger-soft");
     logout.addEventListener("click", () => void signOutProvider(provider, logout));
     box.append(actionRow(logout));
+  } else if (!provider.canSignIn) {
+    return null;
   } else {
     const login = smallButton(signInLabel(provider), "primary");
     login.dataset.focusKey = `login-${provider.id}`;
@@ -3122,7 +3789,42 @@ function actionRow(...buttons) {
 }
 
 function signInLabel(provider) {
-  return provider.id === "codex" ? "Iniciar sesión con ChatGPT" : `Iniciar sesión con ${provider.label}`;
+  if (provider.id === "codex") return "Iniciar sesión con ChatGPT";
+  if (provider.id === "gemini") return "Iniciar sesión con Google";
+  return `Iniciar sesión con ${provider.label}`;
+}
+
+/** Qué instala cada botón «Instalar», para contarlo antes de empezar. */
+const INSTALL_NOTES = {
+  codex: "Se instala Codex, el programa oficial de OpenAI (paquete @openai/codex de npm), solo para tu usuario. Después entras con tu cuenta de ChatGPT.",
+  grok: "Se instala Grok con el instalador oficial de xAI (x.ai/cli), solo para tu usuario. Después entras con tu cuenta de Grok o de X.",
+  gemini: "Se instala Gemini CLI, el programa oficial de Google (paquete @google/gemini-cli de npm), solo para tu usuario. Después entras con tu cuenta de Google.",
+};
+
+async function startInstall(provider, button) {
+  const note = `${INSTALL_NOTES[provider.id] ?? `Se instala ${provider.label} en este equipo.`} Tarda unos minutos y necesita internet.`;
+  if (!(await confirmAction(`¿Instalar ${provider.label}?`, note, "Instalar", "primary"))) return;
+  button.disabled = true;
+  try {
+    const data = await api(`/api/providers/${encodeURIComponent(provider.id)}/install`, { method: "POST" });
+    state.providers = data.providers;
+    renderProviders();
+  } catch (error) {
+    showToast(error.message, "error");
+    button.disabled = false;
+  }
+}
+
+async function cancelInstall(providerId, button) {
+  button.disabled = true;
+  try {
+    const data = await api(`/api/providers/${encodeURIComponent(providerId)}/install/cancel`, { method: "POST" });
+    state.providers = data.providers;
+    renderProviders();
+  } catch (error) {
+    showToast(error.message, "error");
+    button.disabled = false;
+  }
 }
 
 /** El navegador que abre el inicio de sesión es el del equipo donde corre la app. */
@@ -4070,11 +4772,12 @@ function closeDialog(dialog) {
   if (dialog.open) dialog.close();
 }
 
-function confirmAction(title, text, okLabel) {
+function confirmAction(title, text, okLabel, tone = "danger") {
   const dialog = $("#confirm-dialog");
   $("#confirm-title").textContent = title;
   $("#confirm-text").textContent = text;
   $("#confirm-ok").textContent = okLabel;
+  $("#confirm-ok").className = `button ${tone}`;
   dialog.returnValue = "";
   openDialog(dialog);
   return new Promise((resolve) => {
@@ -4264,10 +4967,8 @@ function bindUi() {
     event.preventDefault();
     void addFiles(event.dataTransfer.files);
   });
-  if (Recognition) {
-    $("#dictate").hidden = false;
-    $("#dictate").addEventListener("click", () => toggleDictation("dictate"));
-  }
+  $("#dictate").addEventListener("click", () => toggleDictation("dictate"));
+  updateDictateButton();
 
   const form = $("#agent-form");
   form.addEventListener("submit", saveAgent);

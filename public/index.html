@@ -146,6 +146,11 @@
               </button>
               <ol class="queue-list" id="queue-list" hidden></ol>
             </div>
+            <div class="dictation-status" id="dictation-status" role="status" hidden>
+              <span class="dictation-dot" aria-hidden="true"></span>
+              <span class="dictation-text" id="dictation-status-text"></span>
+              <progress id="dictation-progress" max="1" value="0" hidden></progress>
+            </div>
             <form class="composer" id="composer">
               <div class="attachments" id="attachments" hidden></div>
               <div class="composer-row">
@@ -331,6 +336,8 @@
             Activado: cualquier agente puede instalar, borrar o leer lo que sea en este equipo, sin preguntarte. Los conectores de tu cuenta
             de Claude (servidores, bancos, brókeres) siguen fuera de su alcance.
           </p>
+          <h3 class="section-title">Dictado por voz</h3>
+          <ul class="provider-list" id="speech-settings"></ul>
           <h3 class="section-title">Carpetas</h3>
           <dl class="paths" id="paths"></dl>
           <h3 class="section-title">En el teléfono</h3>

@@ -44,6 +44,7 @@ export async function createHarness(options: {
   detectProviders?: ServiceOptions["detectProviders"];
   signInCommands?: ServiceOptions["signInCommands"];
   signInTimeoutMs?: number;
+  installCommands?: ServiceOptions["installCommands"];
   /** Crea el bot principal (Claude Bot) como en la app; por defecto no, para que las cuentas de agentes sean simples. */
   mainAgent?: boolean;
 } = {}): Promise<Harness> {
@@ -59,6 +60,7 @@ export async function createHarness(options: {
     detectProviders: options.detectProviders ?? (async () => TEST_PROVIDERS),
     ...(options.signInCommands ? { signInCommands: options.signInCommands } : {}),
     ...(options.signInTimeoutMs ? { signInTimeoutMs: options.signInTimeoutMs } : {}),
+    ...(options.installCommands ? { installCommands: options.installCommands } : {}),
     ...(options.mainAgent ? { mainAgent: true } : {}),
   });
   service.on("event", (event) => events.push(event));

@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { type AddressInfo, connect } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { type AppOptions, createApp } from "../src/app.js";
 import { Auth, hashPassword, PASSWORD_META } from "../src/auth.js";
-import { createHarness, waitFor } from "./helpers.js";
+import { type SpeechModel, SpeechEngine } from "../src/speech.js";
+import { createHarness, tempDir, waitFor } from "./helpers.js";
+import { toneWav } from "./wav.js";
 
 const publicDir = fileURLToPath(new URL("../../public", import.meta.url));
 const PASSWORD = "contraseña-de-prueba";
@@ -36,7 +39,12 @@ async function startServer(extra: Partial<AppOptions> = {}, harness: Parameters<
     const response = await fetch(base + path, {
       method: init.method ?? "GET",
       headers,
-      body: init.body === undefined ? undefined : typeof init.body === "string" ? init.body : JSON.stringify(init.body),
+      body:
+        init.body === undefined
+          ? undefined
+          : typeof init.body === "string" || init.body instanceof Uint8Array
+            ? (init.body as string | Uint8Array<ArrayBuffer>)
+            : JSON.stringify(init.body),
     });
     const text = await response.text();
     return { response, status: response.status, json: text ? (JSON.parse(text) as Record<string, any>) : null };
@@ -435,6 +443,18 @@ test("HTTP: inicio de sesión de los proveedores, con sesión y cabecera CSRF", 
     assert.ok(Array.isArray(cancel.json?.providers));
     const logout = await s.call("/api/providers/codex/logout", { method: "POST" });
     assert.equal(logout.status, 409);
+    // «Instalar»: Claude viene con la app; el servicio de pruebas no sabe instalar los demás.
+    assert.equal((await s.call("/api/providers/claude/install", { method: "POST" })).status, 400);
+    const grok = await s.call("/api/providers/grok/install", { method: "POST" });
+    assert.equal(grok.status, 409);
+    assert.match(String(grok.json?.error), /no se puede instalar Grok/);
+    assert.equal((await s.call("/api/providers/gemini/install/cancel", { method: "POST" })).status, 200);
+    assert.equal((await s.call("/api/providers/grok/install", { method: "POST", headers: { "x-cuadrilla": "" } })).status, 403);
+    // Modelos: Grok y Gemini son proveedores válidos (sin instalar, la lista viene vacía).
+    const models = await s.call("/api/models?provider=gemini");
+    assert.equal(models.status, 200);
+    assert.deepEqual(models.json?.models, []);
+    assert.equal((await s.call("/api/models?provider=otro")).status, 400);
   } finally {
     await s.close();
   }
@@ -512,5 +532,125 @@ test("HTTP: agente simple con saludo, menú de la barra, secciones, biblioteca y
     assert.equal((await server.call("/api/usage/refresh", { method: "POST" })).status, 200);
   } finally {
     await server.close();
+  }
+});
+
+test("HTTP: dictado local (estado, descarga, transcripción y avisos por el flujo de eventos)", async () => {
+  // Sin motor de dictado: la ventana lo sabe (speech: null) y las acciones responden 503.
+  const without = await startServer();
+  try {
+    await without.login();
+    assert.deepEqual((await without.call("/api/speech")).json, { speech: null });
+    assert.equal((await without.call("/api/speech/install", { method: "POST" })).status, 503);
+    assert.equal((await without.call("/api/speech/prepare", { method: "POST" })).status, 503);
+    const none = await without.call("/api/speech/transcribe", { method: "POST", body: toneWav(1), headers: { "content-type": "audio/wav" } });
+    assert.equal(none.status, 503);
+  } finally {
+    await without.close();
+  }
+
+  const temp = tempDir();
+  const archive = Buffer.from("modelo de prueba");
+  const model: SpeechModel = {
+    id: "prueba",
+    label: "Modelo de prueba",
+    url: "https://example.invalid/modelo.tar.bz2",
+    bytes: archive.length,
+    sha256: createHash("sha256").update(archive).digest("hex"),
+    dir: "modelo",
+    files: { encoder: "e.onnx", decoder: "d.onnx", joiner: "j.onnx", tokens: "tokens.txt" },
+  };
+  let releaseDownload: () => void = () => undefined;
+  const downloadGate = new Promise<void>((resolve) => {
+    releaseDownload = resolve;
+  });
+  const heard: number[] = [];
+  const speech = new SpeechEngine({
+    dir: temp.path,
+    model,
+    fetch: (async () => {
+      await downloadGate;
+      return new Response(archive, { status: 200 });
+    }) as typeof fetch,
+    extract: async (_archive, destination) => {
+      mkdirSync(join(destination, model.dir), { recursive: true });
+      for (const name of Object.values(model.files)) writeFileSync(join(destination, model.dir, name), "x");
+    },
+    recognize: async (samples, rate) => {
+      heard.push(samples.length / rate);
+      return " Hola, ¿qué tal? ";
+    },
+  });
+  const s = await startServer({ speech });
+  const controller = new AbortController();
+  try {
+    // Sin sesión ni cabecera anti-CSRF, nada.
+    assert.equal((await s.call("/api/speech")).status, 401);
+    await s.login();
+    assert.equal((await s.call("/api/speech/install", { method: "POST", headers: { "x-cuadrilla": "" } })).status, 403);
+
+    const stream = await fetch(`${s.base}/api/events`, { headers: { cookie: s.cookie }, signal: controller.signal });
+    const events: Array<Record<string, any>> = [];
+    const reader = stream.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    void (async () => {
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) return;
+          buffer += decoder.decode(value, { stream: true });
+          let index = buffer.indexOf("\n\n");
+          while (index >= 0) {
+            for (const line of buffer.slice(0, index).split("\n")) if (line.startsWith("data: ")) events.push(JSON.parse(line.slice(6)));
+            buffer = buffer.slice(index + 2);
+            index = buffer.indexOf("\n\n");
+          }
+        }
+      } catch {
+        // abortado al final de la prueba
+      }
+    })();
+    const hello = await waitFor(() => events.find((event) => event.type === "hello"), 3_000, "hello");
+    assert.equal(hello.speech.state, "missing");
+    assert.equal(hello.speech.model, "Modelo de prueba");
+
+    const status = await s.call("/api/speech");
+    assert.equal(status.json?.speech.state, "missing");
+    assert.equal(status.json?.speech.sizeMb, 0);
+
+    // Sin el modelo, transcribir responde 409 para que la ventana ofrezca descargarlo.
+    const early = await s.call("/api/speech/transcribe", { method: "POST", body: toneWav(1), headers: { "content-type": "audio/wav" } });
+    assert.equal(early.status, 409);
+
+    // La descarga responde enseguida (202) y el avance llega por el flujo de eventos.
+    const install = await s.call("/api/speech/install", { method: "POST" });
+    assert.equal(install.status, 202);
+    assert.equal(install.json?.speech.state, "downloading");
+    releaseDownload();
+    await waitFor(() => events.some((event) => event.type === "speech" && event.speech.state === "ready"), 3_000, "dictado listo");
+    assert.ok(events.some((event) => event.type === "speech" && event.speech.state === "extracting"));
+    assert.equal((await s.call("/api/speech/prepare", { method: "POST" })).status, 204);
+
+    // Un trozo de audio de verdad (WAV binario) vuelve como texto limpio.
+    const wav = toneWav(1.5, 48_000);
+    const response = await fetch(`${s.base}/api/speech/transcribe`, {
+      method: "POST",
+      headers: { cookie: s.cookie, "x-cuadrilla": "1", "content-type": "audio/wav" },
+      body: wav,
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { text: "Hola, ¿qué tal?" });
+    assert.deepEqual(heard, [1.5]);
+
+    // Lo que no es WAV: 400.
+    const junk = await s.call("/api/speech/transcribe", { method: "POST", body: "no es audio", headers: { "content-type": "audio/wav" } });
+    assert.equal(junk.status, 400);
+    assert.match(String(junk.json?.error), /WAV/);
+  } finally {
+    controller.abort();
+    await s.close();
+    await speech.stop();
+    temp.cleanup();
   }
 });

@@ -1,6 +1,6 @@
 // Derivado de OpenBot v0.1.11 (src/backend/jsonl.ts), Copyright 2026 Norbert Bodziony,
 // con licencia Apache-2.0 (ver licenses/OPENBOT-APACHE-2.0.txt y NOTICE).
-// Modificado para ClosedBot: mensajes de error y límite de tamaño de línea.
+// Modificado para ClosedBot: mensajes de error, límite de tamaño de línea y modo tolerante (líneas sueltas).
 
 import { StringDecoder } from "node:string_decoder";
 import { isRpcMessage, type RpcMessage } from "./protocol.js";
@@ -8,9 +8,22 @@ import { isRpcMessage, type RpcMessage } from "./protocol.js";
 /** Tamaño máximo aceptado para una línea JSON (protege la memoria ante salidas anómalas). */
 const MAX_LINE_BYTES = 32 * 1024 * 1024;
 
+export interface JsonLineOptions {
+  /**
+   * Si se indica, una línea que no es JSON-RPC se pasa aquí y se sigue con las demás, en vez de lanzar
+   * un error (algunos agentes escriben avisos sueltos por stdout).
+   */
+  onInvalidLine?: (line: string, error: Error) => void;
+}
+
 export class JsonLineDecoder {
   readonly #decoder = new StringDecoder("utf8");
+  readonly #onInvalidLine: JsonLineOptions["onInvalidLine"];
   #buffer = "";
+
+  constructor(options: JsonLineOptions = {}) {
+    this.#onInvalidLine = options.onInvalidLine;
+  }
 
   push(chunk: Uint8Array | string): RpcMessage[] {
     this.#buffer += typeof chunk === "string" ? chunk : this.#decoder.write(Buffer.from(chunk));
@@ -29,7 +42,7 @@ export class JsonLineDecoder {
     const messages = this.#drainCompleteLines();
     const trailing = this.#buffer.trim();
     this.#buffer = "";
-    if (trailing) messages.push(this.#parseLine(trailing));
+    if (trailing) this.#collect(messages, trailing);
     return messages;
   }
 
@@ -39,10 +52,22 @@ export class JsonLineDecoder {
     while (newlineIndex >= 0) {
       const line = this.#buffer.slice(0, newlineIndex).trim();
       this.#buffer = this.#buffer.slice(newlineIndex + 1);
-      if (line) messages.push(this.#parseLine(line));
+      if (line) this.#collect(messages, line);
       newlineIndex = this.#buffer.indexOf("\n");
     }
     return messages;
+  }
+
+  #collect(messages: RpcMessage[], line: string): void {
+    if (!this.#onInvalidLine) {
+      messages.push(this.#parseLine(line));
+      return;
+    }
+    try {
+      messages.push(this.#parseLine(line));
+    } catch (error) {
+      this.#onInvalidLine(line, error instanceof Error ? error : new Error(String(error)));
+    }
   }
 
   #parseLine(line: string): RpcMessage {

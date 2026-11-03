@@ -12,7 +12,7 @@ import {
   type VoiceSettings,
 } from "./db.js";
 import { buildInstructions, composeDeliveryInput, composeGreeting, GREETING_MARKER } from "./instructions.js";
-import type { AccessLevel, AgentClient, ProviderId } from "./providers/client.js";
+import { type AccessLevel, type AgentClient, isProviderId, PROVIDER_IDS, type ProviderId } from "./providers/client.js";
 import {
   type AppServerNotification,
   type AppServerRequest,
@@ -54,7 +54,9 @@ import {
 import { VERSION } from "./version.js";
 
 export { VERSION };
-export const PROVIDERS: ProviderId[] = ["claude", "codex", "demo"];
+export const PROVIDERS: ProviderId[] = [...PROVIDER_IDS];
+/** Proveedores que se pueden instalar desde Ajustes (Claude viene con la app). */
+export type InstallProvider = "codex" | "grok" | "gemini";
 
 /** Rutinas: tope por agente y en total, y cuánto retraso se tolera antes de saltarse una ejecución. */
 export const MAX_ROUTINES_PER_AGENT = 20;
@@ -94,14 +96,23 @@ export interface ProviderStatus {
   account?: { email: string | null; plan: string | null } | null;
   /** Se puede iniciar y cerrar sesión desde la app. */
   canSignIn?: boolean;
+  /** Se puede cerrar la sesión desde la app (Gemini CLI no tiene un comando para salir). */
+  canSignOut?: boolean;
+  /** Se puede instalar (o reinstalar) desde la app. */
+  canInstall?: boolean;
+  /** Programa que usa la app para este proveedor. */
+  path?: string;
   /** Inicio de sesión en curso. */
   signIn?: SignInView | null;
+  /** Instalación en curso. */
+  install?: { startedAt: string } | null;
 }
 
 /** Comandos del CLI de un proveedor para iniciar y cerrar sesión con la cuenta de la persona. */
 export interface SignInCommands {
   login: CliCommand;
-  logout: CliCommand;
+  /** null: el programa no tiene cómo cerrar la sesión. */
+  logout: CliCommand | null;
   /** Claude Code acepta pegar el código que muestra la página si el navegador no vuelve solo. */
   acceptsCode: boolean;
 }
@@ -185,6 +196,10 @@ export interface ServiceOptions {
   signInCommands?: (provider: SignInProvider) => SignInCommands | null;
   /** Tiempo máximo para terminar un inicio de sesión (10 minutos por defecto). */
   signInTimeoutMs?: number;
+  /** Cómo instalar cada proveedor (npm o su instalador oficial); null si no se puede desde la app. */
+  installCommands?: (provider: InstallProvider) => CliCommand | null;
+  /** Tiempo máximo para una instalación (10 minutos por defecto). */
+  installTimeoutMs?: number;
   /** Crea el bot principal (Claude Bot) al arrancar si aún no existe. */
   mainAgent?: boolean;
   log?: (level: "info" | "warn" | "error", message: string) => void;
@@ -272,6 +287,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   #routineTimer: NodeJS.Timeout | null = null;
   #mainAgentId: string | null = null;
   readonly #signIns: SignInFlows;
+  readonly #installs: SignInFlows;
   readonly #usage = new Map<ProviderId, UsageView>();
   #usageTimer: NodeJS.Timeout | null = null;
   #usageSoon: NodeJS.Timeout | null = null;
@@ -285,6 +301,9 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#signIns = new SignInFlows(options.signInTimeoutMs ? { timeoutMs: options.signInTimeoutMs } : {});
     this.#signIns.on("change", () => this.#emit({ type: "providers", providers: this.providers() }));
     this.#signIns.on("settled", (provider, result) => void this.#afterSignIn(provider, result));
+    this.#installs = new SignInFlows({ action: "install", ...(options.installTimeoutMs ? { timeoutMs: options.installTimeoutMs } : {}) });
+    this.#installs.on("change", () => this.#emit({ type: "providers", providers: this.providers() }));
+    this.#installs.on("settled", (provider, result) => void this.#afterInstall(provider as InstallProvider, result));
   }
 
   // ---------- ciclo de vida ----------
@@ -304,6 +323,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   async stop(): Promise<void> {
     this.#stopping = true;
     this.#signIns.stopAll();
+    this.#installs.stopAll();
     if (this.#routineTimer) clearTimeout(this.#routineTimer);
     this.#routineTimer = null;
     if (this.#usageTimer) clearInterval(this.#usageTimer);
@@ -332,7 +352,9 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   providers(): ProviderStatus[] {
     return this.#providers.map((status) => {
       const signIn = status.id === "demo" ? null : this.#signIns.view(status.id);
-      return signIn ? { ...status, signIn } : status;
+      const installing = status.id === "demo" ? null : this.#installs.view(status.id);
+      if (!signIn && !installing) return status;
+      return { ...status, ...(signIn ? { signIn } : {}), ...(installing ? { install: { startedAt: installing.startedAt } } : {}) };
     });
   }
 
@@ -375,6 +397,10 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   async signOut(provider: unknown): Promise<ProviderStatus[]> {
     const id = signInProvider(provider);
     const commands = this.#signInCommands(id);
+    const status = this.#providers.find((item) => item.id === id);
+    if (!commands.logout || status?.canSignOut === false) {
+      throw new ServiceError(`${providerLabel(id)} no tiene un comando para cerrar la sesión desde la app.`, 409);
+    }
     if ([...this.#active.values()].some((state) => state.provider === id)) {
       throw new ServiceError(`Hay agentes de ${providerLabel(id)} trabajando: espera a que terminen o detenlos antes de cerrar la sesión.`, 409);
     }
@@ -414,6 +440,56 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#emit({ type: "notice", level: "info", message: `${label} quedó conectado${email ? ` como ${email}` : ""}.` });
   }
 
+  // ---------- instalación de los proveedores ----------
+
+  /** Instala el programa del proveedor con su instalador oficial (npm para Codex y Gemini CLI). */
+  startInstall(provider: unknown): ProviderStatus[] {
+    const id = installProvider(provider);
+    const command = this.#options.installCommands?.(id) ?? null;
+    if (!command) throw new ServiceError(`En este equipo no se puede instalar ${providerLabel(id)} desde la app.`, 409);
+    if (this.#installs.view(id)) return this.providers();
+    // Un programa en uso no se puede reemplazar (en Windows, el archivo está bloqueado).
+    if ([...this.#active.values()].some((state) => state.provider === id)) {
+      throw new ServiceError(`Hay agentes de ${providerLabel(id)} trabajando: espera a que terminen o detenlos antes de instalar.`, 409);
+    }
+    this.#signIns.cancel(id);
+    void this.#dropClient(id);
+    try {
+      this.#installs.start(id, command, { acceptsCode: false });
+    } catch (error) {
+      throw new ServiceError(`No pude abrir el instalador de ${providerLabel(id)}: ${errorText(error)}`, 502);
+    }
+    this.#log("info", `Instalando ${providerLabel(id)}…`);
+    return this.providers();
+  }
+
+  cancelInstall(provider: unknown): ProviderStatus[] {
+    this.#installs.cancel(installProvider(provider));
+    return this.providers();
+  }
+
+  async #afterInstall(provider: InstallProvider, result: SignInResult): Promise<void> {
+    if (this.#stopping) return;
+    const label = providerLabel(provider);
+    if (!result.ok) {
+      if (result.message) {
+        this.#log("warn", `La instalación de ${label} no terminó: ${result.message}`);
+        this.#emit({ type: "notice", level: "error", message: `${label}: ${result.message}` });
+      }
+      this.#emit({ type: "providers", providers: this.providers() });
+      return;
+    }
+    this.#log("info", `${label} quedó instalado.`);
+    await this.#dropClient(provider);
+    const providers = await this.refreshProviders();
+    const status = providers.find((item) => item.id === provider);
+    let message: string;
+    if (!status?.available) message = `Terminó la instalación de ${label}, pero todavía no lo encuentro. Cierra y abre ClosedBot, y vuelve a mirar en Ajustes.`;
+    else if (status.loggedIn === true) message = `${label} quedó instalado y listo.`;
+    else message = `${label} quedó instalado. Ahora pulsa «${signInButton(provider)}».`;
+    this.#emit({ type: "notice", level: status?.available ? "info" : "error", message });
+  }
+
   /** Cierra el cliente de un proveedor sin turnos activos: el próximo mensaje abre uno nuevo. */
   async #dropClient(provider: ProviderId): Promise<void> {
     if ([...this.#active.values()].some((state) => state.provider === provider)) return;
@@ -428,9 +504,10 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   }
 
   async listModels(provider: ProviderId): Promise<Array<{ model: string; displayName: string; isDefault?: boolean; efforts: string[] }>> {
-    if (provider === "codex") {
-      const status = this.#providers.find((item) => item.id === "codex");
-      if (!status?.available) return [];
+    // Codex, Grok y Gemini son programas aparte: si no están instalados (o no tienen sesión) no se arrancan.
+    if (provider === "codex" || provider === "grok" || provider === "gemini") {
+      const status = this.#providers.find((item) => item.id === provider);
+      if (!status?.available || (provider !== "codex" && status.loggedIn === false)) return [];
     }
     const client = await this.#getClient(provider);
     const response = await client.request<unknown>("model/list", {});
@@ -1187,7 +1264,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
             clientInfo: { name: "closedbot", title: "ClosedBot", version: VERSION },
             capabilities: { experimentalApi: true, requestAttestation: false },
           },
-          20_000,
+          // Gemini CLI y Grok tardan más en arrancar (cargan su configuración y sus extensiones).
+          provider === "grok" || provider === "gemini" ? 90_000 : 20_000,
         );
         client.notify("initialized", {});
       } catch (error) {
@@ -1600,7 +1678,11 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         ...(agent.main ? { botPrincipal: true } : {}),
         ...(forMain ? { modelo: agent.model ?? "predeterminado", instrucciones: clip(agent.instructions, 400) } : {}),
       }));
-      return toolResult({ agentes: agents });
+      // Al bot principal le sirve saber con qué proveedores puede crear agentes ahora mismo.
+      const ready = forMain
+        ? this.#providers.filter((status) => status.id !== "demo" && status.available && status.loggedIn !== false).map((status) => status.id)
+        : null;
+      return toolResult({ agentes: agents, ...(ready ? { proveedoresListos: ready } : {}) });
     }
     if (params.tool === TOOL_CREATE_AGENT || params.tool === TOOL_UPDATE_AGENT) {
       if (senderId !== this.#mainAgentId) {
@@ -1690,6 +1772,9 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const status = this.#providers.find((item) => item.id === provider);
     if (provider !== main.provider && status && !status.available) {
       throw new Error(`${providerLabel(provider)} no está disponible en este equipo: crea el agente con ${providerLabel(main.provider)}.`);
+    }
+    if (provider !== main.provider && status?.loggedIn === false) {
+      throw new Error(`${providerLabel(provider)} no tiene la sesión iniciada (el usuario puede entrar en Ajustes): crea el agente con ${providerLabel(main.provider)}.`);
     }
     let agent: AgentView;
     try {
@@ -1984,17 +2069,31 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 }
 
 function signInProvider(value: unknown): SignInProvider {
-  if (value === "claude" || value === "codex") return value;
+  if (value === "claude" || value === "codex" || value === "grok" || value === "gemini") return value;
   throw new ServiceError("Ese proveedor no tiene inicio de sesión.", 400);
 }
 
+function installProvider(value: unknown): InstallProvider {
+  if (value === "codex" || value === "grok" || value === "gemini") return value;
+  throw new ServiceError("Ese proveedor no se instala desde la app.", 400);
+}
+
+const PROVIDER_LABELS: Record<ProviderId, string> = { claude: "Claude", codex: "Codex", grok: "Grok", gemini: "Gemini", demo: "Demo" };
+
 export function providerLabel(provider: ProviderId): string {
-  return provider === "claude" ? "Claude" : provider === "codex" ? "Codex" : "Demo";
+  return PROVIDER_LABELS[provider] ?? provider;
+}
+
+/** Texto del botón para iniciar sesión, igual que en Ajustes. */
+function signInButton(provider: ProviderId): string {
+  if (provider === "codex") return "Iniciar sesión con ChatGPT";
+  if (provider === "gemini") return "Iniciar sesión con Google";
+  return `Iniciar sesión con ${providerLabel(provider)}`;
 }
 
 function validProvider(value: unknown): ProviderId {
-  if (value === "claude" || value === "codex" || value === "demo") return value;
-  throw new ServiceError("Proveedor inválido: usa claude, codex o demo.");
+  if (isProviderId(value)) return value;
+  throw new ServiceError("Proveedor inválido: usa claude, codex, grok, gemini o demo.");
 }
 
 function cleanName(value: unknown): string {

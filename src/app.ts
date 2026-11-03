@@ -5,9 +5,11 @@ import { stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, resolve, sep } from "node:path";
 import { type Auth, clearSessionCookie, hashToken, type LoginResult, readCookie, SESSION_COOKIE, serializeSessionCookie } from "./auth.js";
+import { isProviderId } from "./providers/client.js";
 import { isRecord } from "./providers/protocol.js";
 import type { VoiceSettings } from "./db.js";
 import { type AgentInput, type AgentService, type LibraryRoot, MAX_UPLOAD_BYTES, ServiceError, type ServiceEvent, VERSION } from "./service.js";
+import { MAX_SPEECH_BYTES, type SpeechEngine, SpeechError, type SpeechStatus } from "./speech.js";
 
 export interface AppOptions {
   service: AgentService;
@@ -24,6 +26,8 @@ export interface AppOptions {
   controlToken?: string | null;
   /** Se llama tras responder a /api/control/shutdown. */
   onShutdown?: () => void;
+  /** Dictado local (reconocimiento de voz en este equipo). Sin él, las rutas /api/speech responden 503. */
+  speech?: SpeechEngine | null;
   log?: (level: "info" | "warn" | "error", message: string) => void;
 }
 
@@ -239,9 +243,14 @@ export function createApp(options: AppOptions): App {
 
   route("POST", "/api/providers/:id/logout", async (ctx) => ({ providers: await service.signOut(param(ctx, 0)) }));
 
+  // «Instalar» en Ajustes: npm o el instalador oficial del proveedor, en este equipo y para este usuario.
+  route("POST", "/api/providers/:id/install", (ctx) => ({ providers: service.startInstall(param(ctx, 0)) }));
+
+  route("POST", "/api/providers/:id/install/cancel", (ctx) => ({ providers: service.cancelInstall(param(ctx, 0)) }));
+
   route("GET", "/api/models", async (ctx) => {
     const provider = ctx.url.searchParams.get("provider");
-    if (provider !== "claude" && provider !== "codex" && provider !== "demo") throw new HttpError(400, "Proveedor inválido.");
+    if (!isProviderId(provider)) throw new HttpError(400, "Proveedor inválido.");
     return { models: await service.listModels(provider) };
   });
 
@@ -370,6 +379,36 @@ export function createApp(options: AppOptions): App {
 
   route("POST", "/api/usage/refresh", async () => ({ usage: await service.refreshUsage(false) }));
 
+  // ---------- dictado local ----------
+
+  const speech = options.speech ?? null;
+  const requireSpeech = (): SpeechEngine => {
+    if (!speech) throw new HttpError(503, "El dictado local no está disponible en este servidor.");
+    return speech;
+  };
+
+  route("GET", "/api/speech", () => ({ speech: speech?.status() ?? null }));
+
+  // Descarga el modelo (una sola vez). El avance llega por el flujo de eventos («speech»).
+  route("POST", "/api/speech/install", (ctx) => {
+    const engine = requireSpeech();
+    engine.install().catch(() => undefined);
+    ctx.res.statusCode = 202;
+    return { speech: engine.status() };
+  });
+
+  // La persona empezó a hablar: se carga el modelo mientras tanto.
+  route("POST", "/api/speech/prepare", () => {
+    requireSpeech().prepare();
+    return NO_CONTENT;
+  });
+
+  route("POST", "/api/speech/transcribe", async (ctx) => {
+    const engine = requireSpeech();
+    const data = await readBody(ctx.req, MAX_SPEECH_BYTES, MAX_SPEECH_BYTES);
+    return { text: await engine.transcribe(data) };
+  });
+
   route("POST", "/api/agents/:id/decisions/:messageId", async (ctx) => {
     const body = await readJson(ctx.req);
     const { decision, message } = service.answerDecision(param(ctx, 0), param(ctx, 1), body.choice);
@@ -441,7 +480,7 @@ export function createApp(options: AppOptions): App {
       "x-accel-buffering": "no",
     });
     res.write("retry: 3000\n\n");
-    const send = (event: ServiceEvent | { type: "hello"; [key: string]: unknown }) => {
+    const send = (event: ServiceEvent | { type: "hello"; [key: string]: unknown } | { type: "speech"; speech: SpeechStatus }) => {
       if (res.writableEnded) return;
       if (res.writableLength > SSE_BUFFER_LIMIT) {
         // Cliente demasiado lento: se corta y, al reconectar, recarga el estado completo.
@@ -459,9 +498,12 @@ export function createApp(options: AppOptions): App {
       settings: service.getSettings(),
       sections: service.listSections(),
       usage: service.usage(),
+      speech: speech?.status() ?? null,
     });
     const listener = (event: ServiceEvent) => send(event);
     service.on("event", listener);
+    const speechListener = (status: SpeechStatus) => send({ type: "speech", speech: status });
+    speech?.on("status", speechListener);
     const heartbeat = setInterval(() => {
       if (!auth.validate(ctx.token)) {
         res.end();
@@ -473,6 +515,7 @@ export function createApp(options: AppOptions): App {
     const cleanup = () => {
       clearInterval(heartbeat);
       service.off("event", listener);
+      speech?.off("status", speechListener);
       streams.delete(res);
     };
     res.once("close", cleanup);
@@ -558,15 +601,16 @@ export function createApp(options: AppOptions): App {
     }
     const work = url.pathname.startsWith("/api/") ? handleApi(req, res, url) : serveStatic(req, res, url);
     work.catch((error: unknown) => {
-      const status = error instanceof HttpError || error instanceof ServiceError ? error.status : 500;
-      if (status >= 500 && !(error instanceof HttpError) && !(error instanceof ServiceError)) {
+      const known = error instanceof HttpError || error instanceof ServiceError || error instanceof SpeechError;
+      const status = known ? error.status : 500;
+      if (status >= 500 && !known) {
         log("error", `${req.method} ${url.pathname}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
       }
       if (res.headersSent) {
         res.end();
         return;
       }
-      const message = error instanceof HttpError || error instanceof ServiceError ? error.message : "Error interno del servidor.";
+      const message = known ? error.message : "Error interno del servidor.";
       if (status === 413 && !req.complete) res.setHeader("connection", "close");
       sendJson(res, status, { error: message });
     });

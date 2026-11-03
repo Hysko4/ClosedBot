@@ -3,7 +3,10 @@ import { EventEmitter } from "node:events";
 import { redactDiagnostic } from "./codex.js";
 import { type CliCommand, spawnTarget, stopProcessTree } from "./spawn.js";
 
-export type SignInProvider = "claude" | "codex";
+export type SignInProvider = "claude" | "codex" | "grok" | "gemini";
+
+/** Lo que hace el programa: iniciar sesión (abre el navegador) o instalar el proveedor. */
+export type FlowAction = "signIn" | "install";
 
 /** Inicio de sesión en curso, tal como lo ve la interfaz. */
 export interface SignInView {
@@ -42,22 +45,42 @@ type SignInEvents = {
 };
 
 export const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
+/** Textos de cada tipo de flujo. */
+const TEXTS: Record<FlowAction, { spawn: string; timeout: string; failed: string; cut: string; code: string }> = {
+  signIn: {
+    spawn: "No pude abrir el programa de inicio de sesión",
+    timeout: "Se acabó el tiempo para iniciar sesión",
+    failed: "No se pudo iniciar sesión",
+    cut: "El inicio de sesión se cortó",
+    code: "El inicio de sesión terminó con el código",
+  },
+  install: {
+    spawn: "No pude abrir el instalador",
+    timeout: "La instalación tardó demasiado",
+    failed: "No se pudo instalar",
+    cut: "La instalación se cortó",
+    code: "La instalación terminó con el código",
+  },
+};
 const OUTPUT_LIMIT = 64 * 1024;
 /** Lo que se tarda en llegar la última salida después de que el programa termina. */
 const EXIT_FLUSH_MS = 500;
 
 /**
  * Inicios de sesión de los proveedores, como los hace OpenBot: la app ejecuta el comando de inicio de
- * sesión del propio CLI (`claude auth login --claudeai`, `codex login`), que abre el navegador para
- * entrar con la cuenta y guarda la sesión al volver. Hay como mucho uno por proveedor.
+ * sesión del propio CLI (`claude auth login --claudeai`, `codex login`, `grok login`), que abre el
+ * navegador para entrar con la cuenta y guarda la sesión al volver. Hay como mucho uno por proveedor.
+ * Con `action: "install"` lleva igual las instalaciones (npm o el instalador oficial).
  */
 export class SignInFlows extends EventEmitter<SignInEvents> {
   readonly #pending = new Map<SignInProvider, Pending>();
   readonly #timeoutMs: number;
+  readonly #action: FlowAction;
 
-  constructor(options: { timeoutMs?: number } = {}) {
+  constructor(options: { timeoutMs?: number; action?: FlowAction } = {}) {
     super();
     this.#timeoutMs = options.timeoutMs ?? SIGN_IN_TIMEOUT_MS;
+    this.#action = options.action ?? "signIn";
   }
 
   view(provider: SignInProvider): SignInView | null {
@@ -88,7 +111,8 @@ export class SignInFlows extends EventEmitter<SignInEvents> {
 
     const onOutput = (stream: "stdout" | "stderr") => (chunk: Buffer) => {
       if (pending[stream].length < OUTPUT_LIMIT) pending[stream] += chunk.toString("utf8");
-      if (pending.view.url || pending.settled) return;
+      // Una instalación no tiene página para entrar (npm imprime enlaces que no vienen al caso).
+      if (pending.view.url || pending.settled || this.#action === "install") return;
       const url = findSignInUrl(pending[stream]);
       if (!url) return;
       pending.view = { ...pending.view, url };
@@ -100,7 +124,7 @@ export class SignInFlows extends EventEmitter<SignInEvents> {
     child.stdin?.on("error", () => undefined);
 
     child.once("error", (error) => {
-      this.#settle(provider, pending, { ok: false, cancelled: false, message: `No pude abrir el programa de inicio de sesión: ${error.message}` });
+      this.#settle(provider, pending, { ok: false, cancelled: false, message: `${TEXTS[this.#action].spawn}: ${error.message}` });
     });
     child.once("exit", (code, signal) => {
       let done = false;
@@ -112,7 +136,7 @@ export class SignInFlows extends EventEmitter<SignInEvents> {
         } else if (code === 0) {
           this.#settle(provider, pending, { ok: true, cancelled: false, message: null });
         } else {
-          this.#settle(provider, pending, { ok: false, cancelled: false, message: failureMessage(pending, code, signal) });
+          this.#settle(provider, pending, { ok: false, cancelled: false, message: failureMessage(pending, code, signal, this.#action) });
         }
       };
       // La salida puede llegar justo después; si el navegador heredó la salida, «close» no llega nunca.
@@ -127,7 +151,7 @@ export class SignInFlows extends EventEmitter<SignInEvents> {
       this.#settle(provider, pending, {
         ok: false,
         cancelled: false,
-        message: `Se acabó el tiempo para iniciar sesión (${Math.round(this.#timeoutMs / 60_000)} minutos). Vuelve a intentarlo.`,
+        message: `${TEXTS[this.#action].timeout} (${Math.round(this.#timeoutMs / 60_000)} minutos). Vuelve a intentarlo.`,
       });
     }, this.#timeoutMs);
     pending.timer.unref();
@@ -193,17 +217,31 @@ function plainText(output: string): string {
 }
 
 /** Por qué falló, en una línea: lo que el programa escribió en stderr (por ejemplo «Login failed: …»). */
-function failureMessage(output: { stdout: string; stderr: string }, code: number | null, signal: NodeJS.Signals | null): string {
+function failureMessage(
+  output: { stdout: string; stderr: string },
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  action: FlowAction = "signIn",
+): string {
   const lines = (text: string) =>
     plainText(text)
       .split(/\r?\n/)
       // El aviso «Paste code here if prompted >» no lleva salto de línea: lo que sigue va en la misma.
       .map((line) => line.replace(/Paste code here if prompted >\s*/gi, "").trim())
-      .filter((line) => line && !/^Opening browser|didn't open, visit:|did not open, navigate|^https?:\/\//i.test(line));
+      .filter((line) => line && !/^Opening browser|didn't open, visit:|did not open, navigate|^https?:\/\//i.test(line))
+      // De npm: el aviso del registro completo y las novedades no explican nada.
+      .filter((line) => !/complete log of this run|^npm (?:notice|warn)\b/i.test(line));
   const errors = lines(output.stderr);
   const candidates = errors.length ? errors : lines(output.stdout);
-  const failed = candidates.find((line) => /login failed/i.test(line)) ?? candidates.find((line) => /error|failed/i.test(line)) ?? candidates.at(-1);
-  const detail = failed ? redactDiagnostic(failed.replace(/^Login failed:\s*/i, "")).slice(0, 300) : null;
-  if (detail) return `No se pudo iniciar sesión: ${detail}`;
-  return signal ? `El inicio de sesión se cortó (${signal}).` : `El inicio de sesión terminó con el código ${code ?? "?"}.`;
+  const failed =
+    candidates.find((line) => /login failed/i.test(line)) ??
+    // npm escribe «npm error code EACCES» y más abajo el detalle, «npm error Error: EACCES: permission denied…».
+    candidates.find((line) => /^(?:npm (?:error|ERR!) )?Error: /i.test(line)) ??
+    candidates.find((line) => /error|failed|denied/i.test(line)) ??
+    candidates.at(-1);
+  const clean = failed?.replace(/^Login failed:\s*/i, "").replace(/^npm (?:error|ERR!)\s+/i, "");
+  const detail = clean ? redactDiagnostic(clean).slice(0, 300) : null;
+  const texts = TEXTS[action];
+  if (detail) return `${texts.failed}: ${detail}`;
+  return signal ? `${texts.cut} (${signal}).` : `${texts.code} ${code ?? "?"}.`;
 }

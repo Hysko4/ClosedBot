@@ -50,14 +50,14 @@ export const ROUTINE_LIMITS = { name: 80, prompt: 4_000, times: 12 } as const;
 export const QUESTION_LIMITS = { question: 300, label: 80, detail: 200, minOptions: 2, maxOptions: 4 } as const;
 export const AGENT_LIMITS = { name: 60, role: 200, instructions: 8_000, project: 60, model: 120 } as const;
 /** Proveedores que el bot principal puede elegir para un agente nuevo. */
-export const AGENT_PROVIDERS = ["claude", "codex"] as const;
+export const AGENT_PROVIDERS = ["claude", "codex", "grok", "gemini"] as const;
 
 export const AGENT_FIELD_HELP = {
   name: "Nombre corto, claro y único, p. ej. «Diseñador de Niveles».",
   role: "Su rol en una frase.",
   instructions: "Instrucciones permanentes: qué hace, qué entrega, con quién coordina y cuándo preguntarle al usuario.",
   project: "Proyecto (grupo de la barra lateral), p. ej. «Creación de Juegos». El mismo para todo el equipo.",
-  provider: "Proveedor del agente. Si no lo indicas, el tuyo.",
+  provider: "Proveedor del agente: uno de proveedoresListos (lo da list_agents). Si no lo indicas, el tuyo.",
   model:
     "Modelo opcional (p. ej. claude-sonnet-5-5 o claude-haiku-5-5 para tareas simples). Sin él usa el modelo por defecto del proveedor.",
 } as const;
@@ -356,8 +356,8 @@ export function parseUpdateAgentArgs(value: unknown): UpdateAgentArgs {
 
 function parseProvider(value: unknown): ProviderId | null {
   if (value === undefined || value === null || value === "") return null;
-  if (value === "claude" || value === "codex" || value === "demo") return value;
-  throw new Error("`provider` debe ser claude o codex.");
+  if (value === "claude" || value === "codex" || value === "grok" || value === "gemini" || value === "demo") return value;
+  throw new Error("`provider` debe ser claude, codex, grok o gemini.");
 }
 
 function argsRecord(value: unknown): Record<string, unknown> {

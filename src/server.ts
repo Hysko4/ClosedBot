@@ -5,13 +5,17 @@ import { createApp } from "./app.js";
 import { Auth } from "./auth.js";
 import { prepareConfig, setting } from "./config.js";
 import { Store } from "./db.js";
+import { AcpClient } from "./providers/acp.js";
 import { ClaudeAgentClient } from "./providers/claude.js";
 import { claudeEnv, claudeLoginCommand, claudeLogoutCommand, resolveClaudeCli } from "./providers/claude-cli.js";
 import type { AgentClient, ProviderId } from "./providers/client.js";
 import { CodexAppServerClient } from "./providers/codex.js";
 import { DemoAgentClient } from "./providers/demo.js";
 import { detectProviders } from "./providers/detect.js";
+import { type CliName, locateCli } from "./providers/locate.js";
+import { acpAuthMethods, GEMINI_AGENT_ARGS, GROK_AGENT_ARGS, installCommand, providerEnv, signInCommands } from "./providers/presets.js";
 import { AgentService, VERSION } from "./service.js";
+import { SpeechEngine } from "./speech.js";
 
 function log(level: "info" | "warn" | "error", message: string): void {
   const line = `[${new Date().toISOString()}] ${level.toUpperCase()} ${message}`;
@@ -58,9 +62,17 @@ async function main(): Promise<void> {
   // no toca el Claude Code que se use aparte en este equipo.
   mkdirSync(config.claudeConfigDir, { recursive: true, mode: 0o700 });
   const claudeCli = resolveClaudeCli(config.claudeBin);
-  const claudeEnvironment = claudeEnv(envWithout(["OPENAI_API_KEY", "CODEX_API_KEY"]), config.claudeConfigDir);
-  const codexEnvironment = envWithout(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]);
+  // Cada proveedor ve solo sus propias claves.
+  const claudeEnvironment = claudeEnv(providerEnv("claude"), config.claudeConfigDir);
+  const codexEnvironment = providerEnv("codex");
+  const grokEnvironment = providerEnv("grok");
+  const geminiEnvironment = providerEnv("gemini");
   if (!claudeCli) log("warn", "No encontré Claude Code (viene con @anthropic-ai/claude-agent-sdk); reinstala las dependencias con «npm ci».");
+
+  // Codex, Grok y Gemini CLI se buscan cada vez: si se instalan con la app abierta, se encuentran solos.
+  const configured: Record<CliName, string | null> = { codex: config.codexBin, grok: config.grokBin, gemini: config.geminiBin };
+  const locate = (name: CliName) => locateCli(name, { configured: configured[name] });
+  const program = (name: CliName) => locate(name)?.path ?? configured[name] ?? name;
 
   const createClient = (provider: ProviderId): AgentClient => {
     switch (provider) {
@@ -72,13 +84,32 @@ async function main(): Promise<void> {
         });
       case "codex":
         return new CodexAppServerClient({
-          executable: config.codexBin,
+          executable: program("codex"),
           env: codexEnvironment,
+        });
+      case "grok":
+        return new AcpClient({
+          provider,
+          label: "Grok",
+          command: program("grok"),
+          args: GROK_AGENT_ARGS,
+          env: grokEnvironment,
+          authMethods: acpAuthMethods("grok", grokEnvironment),
+        });
+      case "gemini":
+        return new AcpClient({
+          provider,
+          label: "Gemini",
+          command: program("gemini"),
+          args: GEMINI_AGENT_ARGS,
+          env: geminiEnvironment,
+          authMethods: acpAuthMethods("gemini", geminiEnvironment),
         });
       case "demo":
         return new DemoAgentClient();
     }
   };
+  const environments = { codex: codexEnvironment, grok: grokEnvironment, gemini: geminiEnvironment };
 
   const service = new AgentService({
     store,
@@ -92,6 +123,9 @@ async function main(): Promise<void> {
       detectProviders({
         enabled: config.detectProviders,
         codexBin: config.codexBin,
+        grokBin: config.grokBin,
+        geminiBin: config.geminiBin,
+        locate,
         claude: { cli: claudeCli, env: claudeEnvironment, configDir: config.claudeConfigDir },
       }),
     // Como en OpenBot: se inicia sesión con la cuenta mediante el propio CLI, que abre el navegador.
@@ -104,15 +138,18 @@ async function main(): Promise<void> {
           acceptsCode: true,
         };
       }
-      return {
-        login: { command: config.codexBin, args: ["login"], env: codexEnvironment },
-        logout: { command: config.codexBin, args: ["logout"], env: codexEnvironment },
-        acceptsCode: false,
-      };
+      const found = locate(provider);
+      if (!found) return null;
+      return signInCommands(provider, found.path, { env: environments[provider] });
     },
+    // «Instalar» en Ajustes: npm (Codex y Gemini CLI) o el instalador oficial de Grok, para este usuario.
+    installCommands: (provider) => installCommand(provider, { env: envWithout(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "XAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"]) }),
     log,
   });
   await service.start();
+
+  // Dictado local: el modelo se descarga en <datos>/voz la primera vez que alguien lo pide.
+  const speech = new SpeechEngine({ dir: join(config.dataDir, "voz"), log });
 
   const app = createApp({
     service,
@@ -124,6 +161,7 @@ async function main(): Promise<void> {
     secureCookies: config.secureCookies,
     controlToken,
     onShutdown: () => void shutdown("la orden de cierre del lanzador"),
+    speech,
     log,
   });
 
@@ -149,6 +187,7 @@ async function main(): Promise<void> {
     app.closeStreams();
     await new Promise<void>((resolve) => app.server.close(() => resolve()));
     await service.stop();
+    await speech.stop();
     store.close();
     clearTimeout(force);
     log("info", "ClosedBot se cerró.");

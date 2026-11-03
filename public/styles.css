@@ -1718,6 +1718,78 @@ svg {
   font-size: 13px;
 }
 
+/* Dictado en este PC: escuchando, transcribiendo o descargando el modelo */
+.dictation-status {
+  --level: 0;
+  max-width: 760px;
+  margin: 0 auto 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid #3a2d5c;
+  color: var(--accent-text);
+  font-size: 13.5px;
+  line-height: 1.35;
+}
+
+.dictation-status[hidden] {
+  display: none;
+}
+
+.dictation-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--accent-text);
+  opacity: 0.55;
+}
+
+.dictation-status[data-listening="true"] .dictation-dot {
+  background: #f28b82;
+  opacity: 1;
+  transform: scale(calc(0.8 + var(--level) * 0.9));
+  box-shadow: 0 0 0 calc(var(--level) * 7px) rgba(242, 139, 130, 0.25);
+  transition:
+    transform 0.08s linear,
+    box-shadow 0.08s linear;
+}
+
+.dictation-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.dictation-status progress {
+  flex: none;
+  width: 96px;
+  height: 6px;
+  border: 0;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #1a1426;
+  accent-color: var(--accent);
+}
+
+.dictation-status progress::-webkit-progress-bar {
+  background: #1a1426;
+}
+
+.dictation-status progress::-webkit-progress-value {
+  background: var(--accent);
+}
+
+.dictation-status progress::-moz-progress-bar {
+  background: var(--accent);
+}
+
+.speech-engine {
+  margin: 10px 0 4px;
+}
+
 .composer {
   background: var(--card);
   border: 1px solid #252525;
