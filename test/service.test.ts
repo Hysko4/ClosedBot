@@ -116,6 +116,30 @@ test("cancelar en cola, pausar y detener", async () => {
   }
 });
 
+test("eliminar a un agente que trabaja: sin «stop» se niega; con «stop» detiene su turno y no sigue su cola", async () => {
+  const h = await createHarness();
+  try {
+    const ana = h.service.createAgent({ name: "Ana", provider: "demo" });
+    const beto = h.service.createAgent({ name: "Beto", provider: "demo" });
+    const first = h.service.sendUserMessage(ana.id, "/lento uno dos tres cuatro cinco seis siete ocho");
+    h.service.sendUserMessage(ana.id, "segundo");
+    await waitFor(() => h.events.some((event) => event.type === "delta" && event.agentId === ana.id), 3_000, "primer delta");
+    await assert.rejects(h.service.deleteAgent(ana.id), /Detén el turno/);
+    await h.service.deleteAgent(ana.id, { stop: true });
+    assert.deepEqual(
+      h.service.listAgents().map((agent) => agent.id),
+      [beto.id],
+    );
+    assert.equal(h.store.getMessage(first.message.id), null);
+    // Nada de su cola arranca después: no hay turnos de un agente que ya no existe.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(h.service.getAgent(beto.id).state, "idle");
+    await assert.rejects(h.service.deleteAgent(ana.id, { stop: true }), /no encontrado|No existe/i);
+  } finally {
+    await h.close();
+  }
+});
+
 test("tras un reinicio, lo que quedó a medias se marca y la cola sigue", async () => {
   const temp = tempDir();
   try {

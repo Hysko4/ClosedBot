@@ -278,7 +278,8 @@ export function createApp(options: AppOptions): App {
   });
 
   route("DELETE", "/api/agents/:id", async (ctx) => {
-    await service.deleteAgent(param(ctx, 0));
+    // ?stop=1: si está trabajando, primero se detiene su turno.
+    await service.deleteAgent(param(ctx, 0), { stop: ctx.url.searchParams.get("stop") === "1" });
     return NO_CONTENT;
   });
 

@@ -14,7 +14,8 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
 - **Respuestas en vivo**, con el historial guardado en SQLite. Cada agente retoma su conversación aunque reinicies el servidor.
 - **Preguntas con opciones**: un agente puede preguntarte algo con una tarjeta de 2 a 4 opciones (con una recomendada). Tocas una y tu respuesta le llega como un mensaje nuevo.
 - **Rutinas**: tareas que se repiten solas, a horas fijas (por ejemplo, de lunes a viernes a las 08:30) o cada cierto tiempo (desde 15 minutos). Las creas tú o se las pides a un agente. Solo corren mientras ClosedBot está abierta; si una se atrasa más de 2 horas, se salta y queda el aviso.
-- **Lista de agentes como en una app de chat**: agrupados en secciones, con su último mensaje y un punto en los que tienen novedades. Clic derecho (o mantener presionado en el celular) en un agente: fijar, mover a otra sección, marcar como no leído, cambiar nombre, ocultar y eliminar. Clic derecho en el fondo de la lista: nuevo agente, nueva sección y marcar todo como leído.
+- **Lista de agentes como en una app de chat**: agrupados en secciones, con su último mensaje y un punto en los que tienen novedades. Clic derecho (o mantener presionado en el celular) en un agente: fijar, mover a otra sección, marcar como no leído, cambiar nombre, ocultar, seleccionar varios y eliminar. Clic derecho en el fondo de la lista: nuevo agente, nueva sección, marcar todo como leído y seleccionar agentes.
+- **Eliminar varios agentes a la vez**: «Seleccionar varios» (o Ctrl+clic y Mayús+clic) marca agentes; la casilla de cada sección marca a todos los suyos y «Todos», a toda la lista. «Eliminar» los borra con una sola confirmación: al que está trabajando se le detiene el turno, y un canal que se queda sin miembros pasa a «Canales eliminados». Esc o la X terminan la selección.
 - **Crear un agente en un paso**: el **+** pide solo el nombre, una figura y un color. El agente nuevo te saluda y te pregunta para qué lo quieres. Los que arma Claude Bot no saludan.
 - **Ficha de cada agente** (tocando su nombre arriba del chat): *Detalles* con sus rutinas y el chat de voz, *Biblioteca* con los archivos de su carpeta y de la compartida, y *Computadora* con sus carpetas y su nivel de acceso.
 - **Respuestas en voz alta**: cada agente tiene su voz, velocidad e idioma. Usa solo las 10 voces de OpenBot (Supertonic 3), que leen en el propio PC, gratis y sin internet. Lee solo sus respuestas si lo activas, o cuando le hablas con el botón morado.
@@ -179,7 +180,7 @@ ClosedBot los busca en el PATH, en las carpetas de npm, en la app de Codex, en l
 - **Carpetas**: cada agente trabaja en `~/.closedbot/agentes/<nombre>`, y todos comparten `~/.closedbot/compartida`.
 - **Preguntas**: cuando un agente necesita que elijas, verás una tarjeta con opciones (A, B, C…). La recomendada lleva una etiqueta. Al tocar una, el agente sigue con tu respuesta.
 - **Rutinas**: botón del reloj en la barra lateral, o pídeselo a un agente («todos los días a las 9, revisa…»). Puedes pausarlas, ejecutarlas al momento o borrarlas. Cada agente tiene hasta 20.
-- **Secciones**: agrupan a los agentes en la barra lateral. Créalas con clic derecho en el fondo de la lista y mueve agentes con «Mover a». Al eliminar una sección, sus agentes pasan a «Sin asignar». Claude Bot pone en la misma sección a los agentes de un equipo.
+- **Secciones**: agrupan a los agentes en la barra lateral. Créalas con clic derecho en el fondo de la lista y mueve agentes con «Mover a». Al eliminar una sección, sus agentes pasan a «Sin asignar»; para eliminarlos a ellos, usa «Seleccionar sus agentes» en el menú de la sección. Claude Bot pone en la misma sección a los agentes de un equipo.
 - **Ocultos y fijados**: los fijados van arriba; los ocultos, plegados al final de la lista («Ocultos») y en la búsqueda.
 - **Voz**: el micrófono dicta en el cuadro de texto. Con el cuadro vacío, el botón morado graba y envía al terminar, y la respuesta se lee en voz alta.
   - *Dictado*: siempre en automático. En el PC, ClosedBot reconoce la voz en el propio equipo con Parakeet v3 (sherpa-onnx): la primera vez que tocas el micrófono pide descargar el modelo (unos 490 MB, a `<datos>/voz`), y después funciona sin internet y tu voz no sale del equipo. Donde no se puede grabar el audio, usa el servicio de voz del navegador.
@@ -267,7 +268,7 @@ test/                  pruebas (node:test)
 
 ## Estado y límites conocidos
 
-- Versión 0.6.4. Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. Las voces de OpenBot se probaron con el modelo real en Windows. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
+- Versión 0.6.5. Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. Las voces de OpenBot se probaron con el modelo real en Windows. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
 - Un solo usuario y sin notificaciones push por ahora.
 - Claude Bot crea hasta 8 agentes por pedido y deja de crear cuando ya hay 60 agentes en total.
 - Las preguntas con opciones terminan el turno del agente: tu respuesta le llega como un mensaje nuevo.

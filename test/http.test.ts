@@ -308,6 +308,25 @@ test("HTTP: Claude Bot llega marcado como principal y no se puede eliminar", asy
   }
 });
 
+test("HTTP: eliminar a un agente que trabaja pide «?stop=1» y entonces detiene su turno", async () => {
+  const s = await startServer();
+  try {
+    await s.login();
+    const created = await s.call("/api/agents", { method: "POST", body: { name: "Ana", provider: "demo" } });
+    const id = created.json?.agent.id as string;
+    await s.call(`/api/agents/${id}/messages`, { method: "POST", body: { text: "/lento uno dos tres cuatro cinco seis siete ocho" } });
+    await waitFor(() => s.h.service.getAgent(id).state === "working", 3_000, "trabajando");
+    const refused = await s.call(`/api/agents/${id}`, { method: "DELETE" });
+    assert.equal(refused.status, 409);
+    assert.match(String(refused.json?.error), /Detén el turno/);
+    const removed = await s.call(`/api/agents/${id}?stop=1`, { method: "DELETE" });
+    assert.equal(removed.status, 204);
+    assert.equal((await s.call(`/api/agents/${id}`)).status, 404);
+  } finally {
+    await s.close();
+  }
+});
+
 test("HTTP: sin token de control no existen las rutas del lanzador", async () => {
   const s = await startServer();
   try {

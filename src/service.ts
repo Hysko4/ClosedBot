@@ -97,6 +97,8 @@ const USAGE_INTERVAL_MS = 10 * 60_000;
 const USAGE_MIN_GAP_MS = 60_000;
 const USAGE_AFTER_TURN_MS = 2 * 60_000;
 const USAGE_FIRST_MS = 20_000;
+/** Al eliminar un agente que está trabajando: cuánto se espera a que su turno se detenga. */
+const STOP_WAIT_MS = 10_000;
 
 /** Un modelo para elegir en el editor del agente. */
 export interface ModelOption {
@@ -318,6 +320,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   readonly #active = new Map<string, TurnState>();
   readonly #draining = new Set<string>();
   readonly #scheduled = new Set<string>();
+  /** Agentes que se están eliminando: su cola ya no arranca turnos nuevos. */
+  readonly #deleting = new Set<string>();
   #providers: ProviderStatus[] = PROVIDERS.map((id) => ({
     id,
     label: providerLabel(id),
@@ -673,21 +677,39 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     return this.#view(updated);
   }
 
-  async deleteAgent(id: string): Promise<void> {
+  /** Elimina un agente. Con `stop`, si está trabajando primero detiene su turno (así se eliminan varios de una vez). */
+  async deleteAgent(id: string, options: { stop?: boolean } = {}): Promise<void> {
     const agent = this.#requireAgent(id);
     if (this.#isMain(agent)) {
       throw new ServiceError(`${agent.name} es el bot principal y no se puede eliminar. Si quieres, empieza su conversación de cero.`, 409);
     }
-    if (this.#active.has(id)) throw new ServiceError("Detén el turno en curso antes de eliminar el agente.", 409);
-    this.#store.cancelQueuedForAgent(id);
-    await this.#closeThread(agent);
-    const touchedChannels = this.#leaveChannels(id);
-    this.#store.deleteAgent(id);
-    this.#emitAgents();
-    if (touchedChannels) this.#emitChannels();
-    // Sus rutinas se borran con él (ON DELETE CASCADE).
-    this.#emitRoutines();
-    this.#armRoutines();
+    if (this.#deleting.has(id)) throw new ServiceError(`${agent.name} ya se está eliminando.`, 409);
+    if (this.#active.has(id) && !options.stop) throw new ServiceError("Detén el turno en curso antes de eliminar el agente.", 409);
+    this.#deleting.add(id);
+    try {
+      this.#store.cancelQueuedForAgent(id);
+      if (this.#active.has(id)) await this.#stopTurn(id);
+      // Mientras trabajaba pudo estrenar su hilo: se cierra el que tiene ahora.
+      await this.#closeThread(this.#store.getAgent(id) ?? agent);
+      const touchedChannels = this.#leaveChannels(id);
+      this.#store.deleteAgent(id);
+      this.#emitAgents();
+      if (touchedChannels) this.#emitChannels();
+      // Sus rutinas se borran con él (ON DELETE CASCADE).
+      this.#emitRoutines();
+      this.#armRoutines();
+    } finally {
+      this.#deleting.delete(id);
+    }
+  }
+
+  /** Detiene el turno en curso y espera a que termine; si no termina a tiempo, lo da por interrumpido. */
+  async #stopTurn(agentId: string): Promise<void> {
+    await this.interrupt(agentId).catch(() => false);
+    const deadline = Date.now() + STOP_WAIT_MS;
+    while (this.#active.has(agentId) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    const state = this.#active.get(agentId);
+    if (state) this.#finishTurn(agentId, state.turnId, "interrupted");
   }
 
   async resetConversation(id: string): Promise<AgentView> {
@@ -1693,7 +1715,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   }
 
   async #drain(agentId: string): Promise<void> {
-    if (this.#stopping || this.#draining.has(agentId) || this.#active.has(agentId)) return;
+    if (this.#stopping || this.#draining.has(agentId) || this.#active.has(agentId) || this.#deleting.has(agentId)) return;
     const agent = this.#store.getAgent(agentId);
     if (!agent || agent.paused) return;
     const delivery = this.#store.nextQueued(agentId);

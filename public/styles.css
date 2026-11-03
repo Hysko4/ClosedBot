@@ -785,6 +785,134 @@ svg {
   padding: 8px 4px 0;
 }
 
+/* ---------- seleccionar varios agentes ---------- */
+
+.select-bar {
+  display: grid;
+  gap: 8px;
+  padding: 8px 4px 0;
+}
+
+.select-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.select-count {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.select-all {
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  background: #191919;
+  color: var(--text-2);
+  flex: none;
+}
+
+.select-all:hover:not(:disabled) {
+  background: #242424;
+}
+
+.select-delete svg {
+  width: 17px;
+  height: 17px;
+}
+
+.check-circle,
+.agent-row .mark[data-kind="check"] {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px solid #5b5b5b;
+  display: grid;
+  place-items: center;
+  color: #fff;
+}
+
+.check-circle svg,
+.agent-row .mark[data-kind="check"] svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 3;
+}
+
+.agent-item[data-selecting] .agent-row {
+  grid-template-columns: 40px minmax(0, 1fr) 22px;
+}
+
+.agent-item[data-selecting] .row-more {
+  display: none;
+}
+
+.agent-item[data-selecting]:hover .mark {
+  visibility: visible;
+}
+
+/* Seleccionando, lo que resalta es lo marcado (no la conversación abierta). */
+.agent-item[data-selecting]:not(:hover) .agent-row[aria-current="true"] {
+  background: none;
+}
+
+.agent-item[data-selecting] .agent-row[aria-pressed="true"] {
+  background: #221a33;
+}
+
+.agent-item[data-selecting]:hover .agent-row[aria-pressed="true"] {
+  background: #2a2040;
+}
+
+.agent-row[aria-pressed="true"] .mark[data-kind="check"],
+.group-check[data-state="all"] .check-circle {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.group-check[data-state="some"] .check-circle {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.group-title:has(.group-check) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 2px;
+}
+
+.group-title:has(.group-check) > .group-head,
+.group-title:has(.group-check) > .group-label {
+  min-width: 0;
+}
+
+.group-check {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin: -4px 1px -4px auto;
+  border-radius: 8px;
+  flex: none;
+}
+
+.group-check:hover .check-circle {
+  border-color: #8a8a8a;
+}
+
+.group-check[data-state="all"]:hover .check-circle {
+  border-color: var(--accent);
+}
+
 /* ---------- canales ---------- */
 
 .channel-glyph {

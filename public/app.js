@@ -54,6 +54,7 @@ const state = {
   channels: [], // canales activos
   deletedChannels: [], // «Canales eliminados»
   currentChannelId: null, // canal abierto (entonces currentId es null)
+  selection: null, // «Seleccionar varios»: ids de los agentes marcados, o null si no se está seleccionando
 };
 
 const elements = new Map(); // id de mensaje -> elemento del DOM (solo el agente abierto)
@@ -698,6 +699,8 @@ const ICONS = {
   details: ["M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16", "M12 11v5", "M12 8h.01"],
   hash: ["M10 4.5L8 19.5", "M16 4.5l-2 15", "M5 9h14.5", "M4.5 15H19"],
   restore: ["M5 12a7 7 0 1 0 2.1-5", "M5 4.5V9h4.5"],
+  select: ["M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16", "M8.6 12.3l2.3 2.3 4.6-4.9"],
+  dash: ["M7.5 12h9"],
 };
 
 function icon(name, className = "") {
@@ -821,12 +824,14 @@ function renderSidebar() {
   const scroll = container.scrollTop;
   container.replaceChildren();
   renderBotCard();
+  pruneSelection();
+  renderSelectBar();
   // Claude Bot va en la tarjeta de arriba; la lista muestra los equipos.
   const team = state.agents.filter((agent) => !agent.main);
   const query = fold(state.search.trim());
   if (query) {
     // Buscando: todos los que coinciden, también los ocultos.
-    const found = team.filter((agent) => fold(`${agent.name} ${agent.role} ${agent.project}`).includes(query));
+    const found = team.filter((agent) => matchesSearch(agent, query));
     const channels = sortedChannels().filter((channel) => fold(`${channel.name} ${channel.topic}`).includes(query));
     if (channels.length) container.append(sidebarGroup({ title: "Canales", agents: [], rows: channels.map(channelRow) }));
     if (found.length) container.append(sidebarGroup({ title: channels.length ? "Agentes" : "Resultados", agents: found }));
@@ -858,6 +863,10 @@ function renderSidebar() {
   if (hidden.length) container.append(sidebarGroup({ key: "\0hidden", title: `Ocultos (${hidden.length})`, agents: hidden }));
   container.scrollTop = scroll;
   updateTitle();
+}
+
+function matchesSearch(agent, query) {
+  return fold(`${agent.name} ${agent.role} ${agent.project}`).includes(query);
 }
 
 function isCollapsed(key) {
@@ -893,8 +902,13 @@ function sidebarGroup({ key = null, title, agents, section = null, empty = "", r
     head.addEventListener("click", () => toggleGroup(key));
     heading.append(head);
   } else {
-    heading.textContent = title;
+    const label = document.createElement("span");
+    label.className = "group-label";
+    label.textContent = title;
+    heading.append(label);
   }
+  // Seleccionando: una casilla marca (o desmarca) a todos los del grupo, también si está plegado.
+  if (state.selection && agents.length) heading.append(groupCheck(title, agents));
   group.append(heading);
   if (collapsed) return group;
   const items = rows ?? agents.map(agentRow);
@@ -940,7 +954,17 @@ function agentRow(agent) {
   button.type = "button";
   button.className = "agent-row";
   button.setAttribute("aria-current", String(agent.id === state.currentId));
-  button.addEventListener("click", () => navigate(agent.id));
+  const selecting = Boolean(state.selection);
+  const selected = selecting && state.selection.has(agent.id);
+  if (selecting) {
+    item.dataset.selecting = "true";
+    button.setAttribute("aria-pressed", String(selected));
+  }
+  button.addEventListener("click", (event) => {
+    // Seleccionando, el clic marca o desmarca. Ctrl+clic y Mayús+clic empiezan a seleccionar, como en el explorador.
+    if (state.selection || event.ctrlKey || event.metaKey || event.shiftKey) selectFromClick(agent.id, event);
+    else navigate(agent.id);
+  });
 
   const texts = document.createElement("span");
   texts.className = "texts";
@@ -962,10 +986,13 @@ function agentRow(agent) {
 
   const mark = document.createElement("span");
   mark.className = "mark";
-  if (isUnread(agent)) {
+  if (isUnread(agent)) button.classList.add("unread");
+  if (selecting) {
+    mark.dataset.kind = "check";
+    if (selected) mark.append(icon("check"));
+  } else if (isUnread(agent)) {
     mark.dataset.kind = "unread";
     mark.title = "Mensajes nuevos";
-    button.classList.add("unread");
   } else if (agent.state === "working") {
     mark.dataset.kind = "working";
     mark.title = "Trabajando";
@@ -2827,20 +2854,7 @@ async function agentAction(action, agentId = state.currentId) {
     } else if (action === "delete") {
       // Claude Bot no se elimina: se puede empezar de cero.
       if (agent.main) return;
-      const ok = await confirmAction(
-        `¿Eliminar a ${agent.name}?`,
-        "Se borran el agente, su historial, su cola y sus rutinas. Su carpeta de trabajo queda en el equipo por si la necesitas.",
-        "Eliminar",
-      );
-      if (!ok) return;
-      await api(path, { method: "DELETE" });
-      state.messages.delete(agent.id);
-      state.attachments.delete(agent.id);
-      state.keepUnread.delete(agent.id);
-      state.agents = state.agents.filter((item) => item.id !== agent.id);
-      if (details.agentId === agent.id) closeDialog($("#details-dialog"));
-      if (agent.id === state.currentId) await navigate(null);
-      else renderSidebar();
+      await deleteAgents([agent.id]);
     }
   } catch (error) {
     showToast(error.message, "error");
@@ -2988,6 +3002,219 @@ async function deleteSection(name) {
   } catch (error) {
     showToast(error.message, "error");
   }
+}
+
+// ---------- seleccionar varios agentes y eliminarlos juntos ----------
+
+let selectionAnchor = null; // desde dónde marca Mayús+clic
+let selectionBusy = false; // eliminando los marcados
+
+/** Se puede marcar a cualquier agente menos Claude Bot. */
+function selectableAgent(id) {
+  const agent = id ? findAgent(id) : null;
+  return agent && !agent.main ? agent : null;
+}
+
+/** Entra al modo de selección (o suma a lo ya marcado) con esos agentes marcados. */
+function startSelection(ids = []) {
+  closeContextMenu();
+  closeUsage();
+  state.selection ??= new Set();
+  for (const id of ids) if (selectableAgent(id)) state.selection.add(id);
+  if (ids.length === 1) selectionAnchor = ids[0];
+  renderSidebar();
+}
+
+function endSelection() {
+  if (!state.selection || selectionBusy) return;
+  state.selection = null;
+  selectionAnchor = null;
+  renderSidebar();
+}
+
+function toggleSelected(id) {
+  if (!selectableAgent(id)) return;
+  state.selection ??= new Set();
+  if (state.selection.has(id)) state.selection.delete(id);
+  else state.selection.add(id);
+  selectionAnchor = id;
+  renderSidebar();
+}
+
+/** Los agentes que se ven en la lista, en orden. */
+function shownAgentIds() {
+  return [...$("#agent-groups").querySelectorAll(".agent-item[data-id]")].map((item) => item.dataset.id);
+}
+
+function selectFromClick(id, event) {
+  if (selectionBusy || !selectableAgent(id)) return;
+  if (!state.selection) {
+    // Ctrl+clic o Mayús+clic sin estar seleccionando: el agente abierto cuenta como marcado.
+    const current = selectableAgent(state.currentId) && shownAgentIds().includes(state.currentId) ? state.currentId : null;
+    state.selection = new Set(current ? [current] : []);
+    selectionAnchor = current;
+  }
+  const order = shownAgentIds();
+  const from = event.shiftKey && selectionAnchor ? order.indexOf(selectionAnchor) : -1;
+  const to = order.indexOf(id);
+  if (from >= 0 && to >= 0) {
+    // Mayús+clic: marca todos los que hay entre el último marcado y este.
+    for (const other of order.slice(Math.min(from, to), Math.max(from, to) + 1)) state.selection.add(other);
+    renderSidebar();
+    return;
+  }
+  toggleSelected(id);
+}
+
+/** Lo que marca «Todos»: los agentes de la lista (buscando, los que coinciden). */
+function listedAgents() {
+  const team = state.agents.filter((agent) => !agent.main);
+  const query = fold(state.search.trim());
+  return query ? team.filter((agent) => matchesSearch(agent, query)) : team;
+}
+
+function toggleSelectAll() {
+  if (!state.selection || selectionBusy) return;
+  const listed = listedAgents();
+  const all = listed.every((agent) => state.selection.has(agent.id));
+  for (const agent of listed) {
+    if (all) state.selection.delete(agent.id);
+    else state.selection.add(agent.id);
+  }
+  renderSidebar();
+}
+
+/** Quita de lo marcado a los agentes que ya no están (los eliminaron desde otro lado). */
+function pruneSelection() {
+  if (!state.selection) return;
+  for (const id of state.selection) if (!selectableAgent(id)) state.selection.delete(id);
+}
+
+function renderSelectBar() {
+  const selecting = Boolean(state.selection);
+  $("#select-bar").hidden = !selecting;
+  $(".sidebar-footer").hidden = selecting;
+  if (!selecting) return;
+  const count = state.selection.size;
+  $("#select-count").textContent = selectionBusy ? "Eliminando…" : count ? `${count} ${count === 1 ? "seleccionado" : "seleccionados"}` : "Elige agentes";
+  const listed = listedAgents();
+  $("#select-all").textContent = listed.length && listed.every((agent) => state.selection.has(agent.id)) ? "Ninguno" : "Todos";
+  $("#select-all").disabled = selectionBusy || !listed.length;
+  $("#select-delete").disabled = selectionBusy || !count;
+  $("#select-cancel").disabled = selectionBusy;
+}
+
+/** Casilla del título de un grupo: marca a todos los del grupo, o los desmarca si ya estaban todos. */
+function groupCheck(title, agents) {
+  const ids = agents.map((agent) => agent.id);
+  const marked = ids.filter((id) => state.selection.has(id)).length;
+  const all = marked === ids.length;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "group-check";
+  button.dataset.state = all ? "all" : marked ? "some" : "none";
+  const label = `${all ? "Desmarcar" : "Marcar"} a todos los de «${title}»`;
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  const circle = document.createElement("span");
+  circle.className = "check-circle";
+  if (all) circle.append(icon("check"));
+  else if (marked) circle.append(icon("dash"));
+  button.append(circle);
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (selectionBusy) return;
+    for (const id of ids) {
+      if (all) state.selection.delete(id);
+      else state.selection.add(id);
+    }
+    renderSidebar();
+  });
+  return button;
+}
+
+/** «Ana, Beto y Carla»; con muchos, «Ana, Beto, … y 3 más». */
+function joinNames(names, max = 6) {
+  const shown = names.length > max ? [...names.slice(0, max - 1), `${names.length - max + 1} más`] : names;
+  return shown.length > 1 ? `${shown.slice(0, -1).join(", ")} y ${shown[shown.length - 1]}` : (shown[0] ?? "");
+}
+
+/** Lo que queda en este navegador de un agente eliminado. */
+function forgetAgent(id) {
+  state.messages.delete(id);
+  state.attachments.delete(id);
+  state.keepUnread.delete(id);
+  state.agents = state.agents.filter((item) => item.id !== id);
+  state.selection?.delete(id);
+  if (details.agentId === id) closeDialog($("#details-dialog"));
+}
+
+/**
+ * Elimina uno o varios agentes con una sola confirmación. Al que está trabajando se le detiene
+ * el turno, y un canal que se queda sin miembros pasa a «Canales eliminados».
+ */
+async function deleteAgents(ids) {
+  closeContextMenu();
+  if (selectionBusy) return;
+  const agents = [...new Set(ids)].map((id) => selectableAgent(id)).filter(Boolean);
+  if (!agents.length) return;
+  const one = agents.length === 1 ? agents[0] : null;
+  const doomed = new Set(agents.map((agent) => agent.id));
+  const working = agents.filter((agent) => agent.state === "working");
+  const emptied = state.channels.filter((channel) => channel.memberIds.length && channel.memberIds.every((id) => doomed.has(id)));
+  const text = [
+    one ? "Se borran el agente, su historial, su cola y sus rutinas." : `${joinNames(agents.map((agent) => agent.name))}, con su historial y sus rutinas.`,
+  ];
+  if (working.length) {
+    const names = joinNames(working.map((agent) => agent.name));
+    text.push(one ? "Está trabajando: se detiene." : working.length === 1 ? `${names} está trabajando: se detiene.` : `${names} están trabajando: se detienen.`);
+  }
+  // Un canal cuyos miembros se eliminan todos queda vacío: pasa a «Canales eliminados».
+  if (emptied.length === 1) text.push(`El canal «${emptied[0].name}» pasa a «Canales eliminados».`);
+  else if (emptied.length) text.push(`Los canales ${joinNames(emptied.map((channel) => `«${channel.name}»`))} pasan a «Canales eliminados».`);
+  text.push(one ? "Su carpeta de trabajo queda en el equipo por si la necesitas." : "Sus archivos se quedan en sus carpetas.");
+  if (!(await confirmAction(one ? `¿Eliminar a ${one.name}?` : `¿Eliminar ${agents.length} agentes?`, text.join(" "), "Eliminar"))) return;
+
+  selectionBusy = true;
+  renderSelectBar();
+  if (working.length) showToast(one || working.length === 1 ? `Deteniendo a ${working[0].name}…` : "Deteniendo a los que están trabajando…");
+  const gone = new Set();
+  const failures = [];
+  const closedChannels = new Set();
+  try {
+    for (const agent of agents) {
+      try {
+        await api(`/api/agents/${encodeURIComponent(agent.id)}?stop=1`, { method: "DELETE" });
+        gone.add(agent.id);
+      } catch (error) {
+        // Si ya no existe (lo eliminaron desde otro lado), también está listo.
+        if (error.status === 404) gone.add(agent.id);
+        else failures.push(`${agent.name}: ${error.message}`);
+      }
+      if (gone.has(agent.id)) forgetAgent(agent.id);
+    }
+    for (const channel of emptied) {
+      if (!channel.memberIds.every((id) => gone.has(id))) continue;
+      try {
+        const result = await api(`/api/channels/${encodeURIComponent(channel.id)}`, { method: "DELETE" });
+        replaceChannel(result.channel);
+        closedChannels.add(channel.id);
+      } catch (error) {
+        failures.push(`«${channel.name}»: ${error.message}`);
+      }
+    }
+  } finally {
+    selectionBusy = false;
+  }
+  // Con todo eliminado se termina la selección; si algo falló, queda marcado para reintentar.
+  if (state.selection && !failures.length) {
+    state.selection = null;
+    selectionAnchor = null;
+  }
+  if (gone.has(state.currentId) || closedChannels.has(state.currentChannelId)) await navigate(null);
+  else renderSidebar();
+  if (failures.length) showToast(`No se pudo eliminar ${failures.join(" · ")}`, "error");
+  else if (!one) showToast(`Se eliminaron ${gone.size} agentes.`);
 }
 
 // ---------- canales ----------
@@ -3509,6 +3736,9 @@ function agentMenuItems(agentId) {
       ? { label: "Mostrar en la barra lateral", icon: "eye", run: () => toggleHidden(agent.id) }
       : { label: "Ocultar de la barra lateral", icon: "eyeOff", run: () => toggleHidden(agent.id) },
     "-",
+    state.selection
+      ? { label: state.selection.has(agent.id) ? "Desmarcar" : "Marcar", icon: "select", run: () => toggleSelected(agent.id) }
+      : { label: "Seleccionar varios", icon: "select", run: () => startSelection([agent.id]) },
     { label: "Eliminar", icon: "trash", danger: true, run: () => agentAction("delete", agent.id) },
   ];
 }
@@ -3540,6 +3770,9 @@ function sidebarMenuItems() {
       disabled: !state.agents.some((agent) => agent.unread) && !state.channels.some((channel) => channel.unread),
       run: () => markAllRead(),
     },
+    state.selection
+      ? { label: "Terminar de seleccionar", icon: "close", run: () => endSelection() }
+      : { label: "Seleccionar agentes", icon: "select", disabled: !state.agents.some((agent) => !agent.main), run: () => startSelection() },
   ];
 }
 
@@ -3569,18 +3802,26 @@ function channelMenuItems(channelId) {
 }
 
 function sectionMenuItems(name) {
+  const agents = sectionAgents(name);
   return [
     { label: "Nuevo agente aquí", icon: "plus", run: () => openCreateDialog({ project: name }) },
     { label: "Cambiar nombre de la sección", icon: "pencil", run: () => renameSection(name) },
     "-",
+    ...(agents.length ? [{ label: "Seleccionar sus agentes", icon: "select", run: () => startSelection(agents.map((agent) => agent.id)) }] : []),
     { label: "Eliminar sección", icon: "trash", danger: true, run: () => deleteSection(name) },
   ];
+}
+
+/** Los agentes que se ven bajo la sección (los fijados y los ocultos van en su propio grupo). */
+function sectionAgents(name) {
+  const key = name.toLowerCase();
+  return state.agents.filter((agent) => !agent.main && !agent.hidden && !agent.pinned && agent.project.toLowerCase() === key);
 }
 
 /** Qué menú corresponde a lo que se tocó en la barra lateral (o nada, si es un campo o un botón de arriba). */
 function sidebarMenuFor(target) {
   if (!(target instanceof Element)) return null;
-  if (target.closest("input, textarea, select, .sidebar-footer, .search-box, .sidebar-tools")) return null;
+  if (target.closest("input, textarea, select, .sidebar-footer, .search-box, .sidebar-tools, .select-bar")) return null;
   const channelItem = target.closest(".channel-item");
   if (channelItem) {
     const id = channelItem.dataset.channel;
@@ -5715,6 +5956,9 @@ function bindUi() {
   $("#empty-talk").addEventListener("click", openMainAgent);
   $("#bot-card").addEventListener("click", openMainAgent);
   $("#search-toggle").addEventListener("click", () => toggleSearch());
+  $("#select-cancel").addEventListener("click", () => endSelection());
+  $("#select-all").addEventListener("click", () => toggleSelectAll());
+  $("#select-delete").addEventListener("click", () => void deleteAgents([...(state.selection ?? [])]));
   $("#search-input").addEventListener("input", (event) => {
     state.search = event.target.value;
     renderSidebar();
@@ -5765,7 +6009,11 @@ function bindUi() {
     if (!$("#usage-popover").hidden) {
       closeUsage();
       $("#usage-button").focus();
+      return;
     }
+    // Esc termina la selección, salvo que se esté escribiendo o haya un diálogo abierto.
+    const target = event.target instanceof Element ? event.target : null;
+    if (state.selection && !document.querySelector("dialog[open]") && !target?.closest("input, textarea, select, [contenteditable]")) endSelection();
   });
   window.addEventListener("resize", () => closeContextMenu());
   window.addEventListener("blur", () => closeContextMenu());
