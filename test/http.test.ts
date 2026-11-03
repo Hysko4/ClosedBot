@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { type AppOptions, createApp } from "../src/app.js";
 import { Auth, hashPassword, PASSWORD_META } from "../src/auth.js";
 import { type SpeechModel, SpeechEngine } from "../src/speech.js";
+import { type LocalVoiceModel, LocalVoices, type SynthesisRequest } from "../src/voices.js";
 import { createHarness, type Harness, tempDir, waitFor } from "./helpers.js";
 import { toneWav } from "./wav.js";
 
@@ -716,5 +717,102 @@ test("HTTP: canales (crear, escribir, leer, eliminar, restaurar y borrar para si
     assert.equal(noCsrf.status, 403);
   } finally {
     await s.close();
+  }
+});
+
+test("HTTP: voces de este PC (estado, lectura en WAV y avisos por el flujo de eventos)", async () => {
+  // Sin voces locales: la ventana lo sabe (voices: null) y las acciones responden 503.
+  const without = await startServer();
+  try {
+    await without.login();
+    assert.deepEqual((await without.call("/api/voices")).json, { voices: null });
+    assert.equal((await without.call("/api/voices/install", { method: "POST" })).status, 503);
+    assert.equal((await without.call("/api/voices/speak", { method: "POST", body: { text: "hola" } })).status, 503);
+  } finally {
+    await without.close();
+  }
+
+  const temp = tempDir();
+  const content = Buffer.from("x");
+  const entry = (name: string) => ({ name, bytes: 1, sha256: createHash("sha256").update(content).digest("hex") });
+  const model: LocalVoiceModel = {
+    id: "prueba",
+    label: "Voces de prueba",
+    baseUrl: "https://example.invalid/voces/",
+    dir: "voces",
+    files: {
+      durationPredictor: entry("a"),
+      textEncoder: entry("b"),
+      vectorEstimator: entry("c"),
+      vocoder: entry("d"),
+      ttsJson: entry("e"),
+      unicodeIndexer: entry("f"),
+      voiceStyle: entry("g"),
+    },
+    extra: [],
+    voices: [{ id: "F1", sid: 0, label: "Voz femenina 1" }],
+    languages: ["es"],
+    numSteps: 8,
+  };
+  // La copia de OpenBot ya está: no hace falta descargar nada.
+  const openbot = join(temp.path, "openbot");
+  mkdirSync(openbot, { recursive: true });
+  for (const name of "abcdefg") writeFileSync(join(openbot, name), content);
+  const heard: SynthesisRequest[] = [];
+  const voices = new LocalVoices({
+    dir: join(temp.path, "voz"),
+    model,
+    shared: [openbot],
+    synthesize: async (request) => {
+      heard.push(request);
+      return { samples: new Float32Array(4_410), sampleRate: 44_100 };
+    },
+  });
+  const s = await startServer({ voices });
+  const controller = new AbortController();
+  try {
+    assert.equal((await s.call("/api/voices")).status, 401);
+    await s.login();
+    const status = await s.call("/api/voices");
+    assert.equal(status.json?.voices.state, "ready");
+    assert.equal(status.json?.voices.source, "openbot");
+    assert.deepEqual(status.json?.voices.voices, [{ id: "F1", label: "Voz femenina 1" }]);
+
+    const stream = await fetch(`${s.base}/api/events`, { headers: { cookie: s.cookie }, signal: controller.signal });
+    const reader = stream.body!.getReader();
+    let text = "";
+    while (!text.includes("\n\n", text.indexOf("data: "))) text += new TextDecoder().decode((await reader.read()).value);
+    const hello = JSON.parse(text.slice(text.indexOf("data: ") + 6, text.indexOf("\n\n", text.indexOf("data: "))));
+    assert.equal(hello.type, "hello");
+    assert.equal(hello.voices.state, "ready");
+
+    // Una frase vuelve como WAV.
+    const response = await fetch(`${s.base}/api/voices/speak`, {
+      method: "POST",
+      headers: { cookie: s.cookie, "x-cuadrilla": "1", "content-type": "application/json" },
+      body: JSON.stringify({ text: "Hola, ¿qué tal?", voice: "F1", speed: 1.2, lang: "es-CL" }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "audio/wav");
+    const wav = Buffer.from(await response.arrayBuffer());
+    assert.equal(wav.toString("ascii", 0, 4), "RIFF");
+    assert.equal(wav.length, 44 + 4_410 * 2);
+    assert.deepEqual(heard, [{ text: "Hola, ¿qué tal?", sid: 0, speed: 1.2, lang: "es", numSteps: 8 }]);
+
+    // Sin la cabecera anti-CSRF, nada; sin texto, 400 con el motivo.
+    assert.equal((await s.call("/api/voices/speak", { method: "POST", body: { text: "hola" }, headers: { "x-cuadrilla": "" } })).status, 403);
+    const empty = await s.call("/api/voices/speak", { method: "POST", body: { text: "  " } });
+    assert.equal(empty.status, 400);
+    assert.match(String(empty.json?.error), /nada que leer/);
+
+    // Ya están: «Descargar» no baja nada.
+    const install = await s.call("/api/voices/install", { method: "POST" });
+    assert.equal(install.status, 202);
+    assert.equal(install.json?.voices.state, "ready");
+  } finally {
+    controller.abort();
+    await s.close();
+    await voices.stop();
+    temp.cleanup();
   }
 });

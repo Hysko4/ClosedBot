@@ -43,17 +43,49 @@ record({ method: "_arranque", temp: process.env.TEMP ?? null, tmp: process.env.T
 process.stdout.write("Iniciando el agente falso…\n");
 process.stderr.write("aviso: agente falso en modo de prueba\n");
 
-const MODELS = {
-  availableModels: [
-    { modelId: "fake-pro", name: "Fake Pro", _meta: { reasoningEfforts: [{ value: "high" }, { value: "low" }] } },
-    { modelId: "fake-mini", name: "Fake Mini" },
-  ],
-  currentModelId: "fake-pro",
-};
-const CONFIG = [
-  { id: "model", name: "Modelo", category: "model", type: "select", currentValue: "fake-pro", options: [] },
-  { id: "reasoning_effort", name: "Razonamiento", category: "thought_level", type: "select", currentValue: "high", options: [] },
-];
+// FAKE_ACP_MODELS=antigravity: como Antigravity 1.4.5 (visto en el PC del usuario). En la lista vieja cada nivel es
+// otro modelo; en las opciones de la sesión vienen los modelos y los niveles por separado.
+const antigravity = process.env.FAKE_ACP_MODELS === "antigravity";
+const level = (name) => ({ value: name.toLowerCase(), name });
+const MODELS = antigravity
+  ? {
+      availableModels: [
+        ["gemini-4-argon-medium", "Gemini 4 Argon (Medium)"],
+        ["gemini-4-argon-high", "Gemini 4 Argon (High)"],
+        ["gemini-4-argon-low", "Gemini 4 Argon (Low)"],
+        ["gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"],
+        ["gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"],
+        ["gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)"],
+      ].map(([modelId, name]) => ({ modelId, name, description: modelId })),
+      currentModelId: "gemini-3.8-flash-high",
+    }
+  : {
+      availableModels: [
+        { modelId: "fake-pro", name: "Fake Pro", _meta: { reasoningEfforts: [{ value: "high" }, { value: "low" }] } },
+        { modelId: "fake-mini", name: "Fake Mini" },
+      ],
+      currentModelId: "fake-pro",
+    };
+const CONFIG = antigravity
+  ? [
+      {
+        id: "model",
+        name: "Model",
+        category: "model",
+        type: "select",
+        currentValue: "gemini-3.8-flash",
+        options: [
+          { value: "gemini-4-argon", name: "Gemini 4 Argon" },
+          { value: "gemini-3.8-flash", name: "Gemini 3.8 Flash" },
+        ],
+      },
+      { id: "thinking_level", name: "Thinking", category: "thought_level", type: "select", currentValue: "high", options: ["Low", "Medium", "High"].map(level) },
+      { id: "mode", name: "Mode", category: "mode", type: "select", currentValue: "default", options: ["default", "auto_edit", "yolo"].map((value) => ({ value, name: value })) },
+    ]
+  : [
+      { id: "model", name: "Modelo", category: "model", type: "select", currentValue: "fake-pro", options: [] },
+      { id: "reasoning_effort", name: "Razonamiento", category: "thought_level", type: "select", currentValue: "high", options: [] },
+    ];
 const PERMISSION_OPTIONS = [
   { optionId: "si", name: "Permitir", kind: "allow_once" },
   { optionId: "siempre", name: "Permitir siempre", kind: "allow_always" },

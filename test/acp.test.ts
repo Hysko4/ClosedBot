@@ -4,6 +4,7 @@ import { chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { effortVariant, groupModelVariants, mergeSessionModels, modelChoices, NO_MODELS, resolveModel } from "../src/providers/acp-models.js";
 import { AcpClient, type AcpClientOptions, isInside } from "../src/providers/acp.js";
 import { DemoAgentClient } from "../src/providers/demo.js";
 import type { ProviderStatus } from "../src/service.js";
@@ -294,6 +295,116 @@ test("ACP: lista los modelos sin gastar mensajes y retoma la conversación tras 
       await second.close();
     }
   }
+});
+
+test("ACP: Gemini por Antigravity, con «Modelo» y «Esfuerzo» por separado (como OpenBot)", async () => {
+  const { h, log, close } = await acpHarness({ env: { FAKE_ACP_MODELS: "antigravity" } });
+  try {
+    // Los modelos de las opciones de la sesión, con los niveles de «thinking_level»; nada de «Gemini 4 Argon (Medium)».
+    const models = await h.service.listModels("grok");
+    const levels = ["low", "medium", "high"];
+    assert.deepEqual(models, [
+      {
+        model: "gemini-4-argon",
+        displayName: "Gemini 4 Argon",
+        isDefault: false,
+        efforts: levels,
+        variants: { low: "gemini-4-argon-low", medium: "gemini-4-argon-medium", high: "gemini-4-argon-high" },
+      },
+      {
+        model: "gemini-3.8-flash",
+        displayName: "Gemini 3.8 Flash",
+        isDefault: true,
+        efforts: levels,
+        variants: { low: "gemini-3.8-flash-low", medium: "gemini-3.8-flash-medium", high: "gemini-3.8-flash-high" },
+      },
+    ]);
+
+    const turn = async (input: Parameters<typeof h.service.createAgent>[0]) => {
+      const agent = h.service.createAgent(input);
+      const { message } = h.service.sendUserMessage(agent.id, "hola");
+      await waitFor(() => h.store.getMessage(message.id)?.status === "completed", 15_000, `turno de ${input.name}`);
+    };
+    await turn({ name: "Argon", provider: "grok", model: "gemini-4-argon", effort: "high" });
+    // Solo el esfuerzo: el modelo predeterminado con ese nivel.
+    await turn({ name: "Rápido", provider: "grok", effort: "low" });
+    // Lo guardado con la 0.6.1 (la variante «(Low)» como modelo) se traduce a modelo + nivel.
+    await turn({ name: "Antiguo", provider: "grok", model: "gemini-4-argon-low" });
+
+    const chosen = readLog(log)
+      .filter((item) => item.method === "session/set_config_option")
+      .map((item) => [item.params?.configId, item.params?.value]);
+    assert.deepEqual(chosen, [
+      ["model", "gemini-4-argon"],
+      ["thinking_level", "high"],
+      ["thinking_level", "low"],
+      ["model", "gemini-4-argon"],
+      ["thinking_level", "low"],
+    ]);
+    assert.ok(!readLog(log).some((item) => item.method === "session/set_model"));
+  } finally {
+    await close();
+  }
+});
+
+test("ACP: modelos de la lista vieja, de las opciones de la sesión (agrupadas) y variantes por nivel", () => {
+  assert.deepEqual(effortVariant("Gemini 3 Pro (High)"), { base: "Gemini 3 Pro", effort: "high" });
+  assert.deepEqual(effortVariant("GPT-OSS 120B (Extra-High)"), { base: "GPT-OSS 120B", effort: "xhigh" });
+  assert.equal(effortVariant("Claude Sonnet 4.5 (Thinking)"), null);
+  assert.equal(effortVariant("Gemini 3 Flash"), null);
+
+  // Opciones en grupos; una sesión retomada no cambia el modelo predeterminado.
+  const grouped = {
+    configOptions: [
+      {
+        id: "modelo",
+        category: "model",
+        currentValue: "b",
+        options: [
+          { group: "g1", name: "Gemini", options: [{ value: "a", name: "Modelo A" }] },
+          { group: "g2", name: "Otros", options: [{ value: "b", name: "Modelo B" }] },
+        ],
+      },
+      { id: "esfuerzo", category: "thought_level", options: [{ value: "low", name: "Low" }, { value: "high", name: "High" }] },
+    ],
+  };
+  const merged = mergeSessionModels(NO_MODELS, grouped);
+  assert.deepEqual(merged.options.map((entry) => entry.modelId), ["a", "b"]);
+  assert.deepEqual(merged.levels, ["low", "high"]);
+  assert.equal(merged.optionCurrent, "b");
+  const resumed = mergeSessionModels(merged, { configOptions: [{ ...grouped.configOptions[0], currentValue: "a" }] }, { current: false });
+  assert.equal(resumed.optionCurrent, "b");
+  assert.deepEqual(resumed.levels, ["low", "high"], "lo que no trae la respuesta queda como estaba");
+  const options = modelChoices(resumed);
+  assert.equal(options.current, "b");
+  assert.deepEqual(options.choices.map((choice) => [choice.modelId, choice.efforts]), [
+    ["a", ["low", "high"]],
+    ["b", ["low", "high"]],
+  ]);
+  assert.deepEqual(resolveModel(options.choices, options.current, "a", "high"), { model: "a", effort: "high" });
+  assert.deepEqual(resolveModel(options.choices, options.current, "", "low"), { model: null, effort: "low" });
+
+  // Como Grok: la lista vieja trae los niveles de cada modelo, así que manda ella aunque haya opciones.
+  const grok = mergeSessionModels(merged, {
+    models: { availableModels: [{ modelId: "g", name: "Grok", _meta: { reasoningEfforts: ["low"] } }], currentModelId: "g" },
+  });
+  assert.deepEqual(modelChoices(grok), { choices: [{ modelId: "g", name: "Grok", efforts: ["low"], variants: {}, levelsAsModels: false }], current: "g" });
+  assert.deepEqual(resolveModel(modelChoices(grok).choices, "g", "g", "low"), { model: "g", effort: "low" });
+
+  // Sin opciones de sesión, las variantes por nivel se juntan; el modelo sin nivel es el predeterminado del grupo.
+  const choices = groupModelVariants([
+    { modelId: "pro", name: "Gemini 3 Pro", efforts: [] },
+    { modelId: "pro-high", name: "Gemini 3 Pro (High)", efforts: [] },
+    { modelId: "pro-high-2", name: "Gemini 3 Pro (High)", efforts: [] },
+  ]);
+  assert.deepEqual(choices, [
+    { modelId: "pro", name: "Gemini 3 Pro", efforts: ["high"], variants: { high: "pro-high" }, levelsAsModels: true },
+    { modelId: "pro-high-2", name: "Gemini 3 Pro (High)", efforts: [], variants: {}, levelsAsModels: false },
+  ]);
+  assert.deepEqual(resolveModel(choices, null, "pro", "high"), { model: "pro-high", effort: null });
+  assert.deepEqual(resolveModel(choices, null, "pro", ""), { model: "pro", effort: null });
+  assert.deepEqual(resolveModel(choices, "pro", "", "high"), { model: "pro-high", effort: null });
+  assert.deepEqual(resolveModel(choices, "pro", "", ""), { model: null, effort: null });
 });
 
 test("ACP: rutas dentro de las carpetas del agente", () => {

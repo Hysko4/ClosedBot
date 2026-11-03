@@ -3039,6 +3039,23 @@ svg {
   margin: 0 0 10px;
 }
 
+/* Ficha del agente: «¿Más voces?» con su botón para descargar las de este PC. */
+.voice-local {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 10px;
+}
+
+.voice-local .setting-hint {
+  flex: 1;
+  margin: 0;
+}
+
+.voice-local .button {
+  flex: none;
+}
+
 .details-actions {
   display: flex;
   flex-wrap: wrap;

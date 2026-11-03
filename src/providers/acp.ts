@@ -14,6 +14,16 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TEAM_NAMESPACE, TEAM_TOOLS } from "../team.js";
 import { VERSION } from "../version.js";
+import {
+  type AcpModelChoice,
+  type AgentModels,
+  choiceFor,
+  findOption,
+  mergeSessionModels,
+  modelChoices,
+  NO_MODELS,
+  resolveModel,
+} from "./acp-models.js";
 import { makePrivateTemp, removePrivateTemp, withTemp } from "./antigravity.js";
 import type { AgentClient, ProviderId } from "./client.js";
 import { AppServerError, redactDiagnostic } from "./codex.js";
@@ -74,12 +84,7 @@ class SignInRequiredError extends AppServerError {
   override name = "SignInRequiredError";
 }
 
-export interface AcpModel {
-  modelId: string;
-  name: string;
-  /** Niveles de razonamiento que acepta (Grok los informa por modelo). */
-  efforts: string[];
-}
+export type { AcpModel, AcpModelChoice } from "./acp-models.js";
 
 interface Pending {
   resolve: (value: unknown) => void;
@@ -166,8 +171,7 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
   #capabilities: Record<string, unknown> = {};
   #authMethods: string[] = [];
   #authenticated = false;
-  #models: AcpModel[] = [];
-  #currentModel: string | null = null;
+  #models: AgentModels = NO_MODELS;
   #modelsProbe: Promise<void> | null = null;
   #bridge: { server: Server; path: string; token: string; sockets: Set<Socket> } | null = null;
   #bridgeStarting: Promise<{ path: string; token: string }> | null = null;
@@ -318,8 +322,8 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
   }
 
   /** Modelos que ofreció el agente en la última sesión. */
-  get models(): AcpModel[] {
-    return [...this.#models];
+  get models(): AcpModelChoice[] {
+    return modelChoices(this.#models).choices;
   }
 
   // ---------- métodos del orquestador ----------
@@ -372,19 +376,23 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
 
   async #listModels(): Promise<unknown> {
     // Los modelos llegan al abrir una sesión: si todavía no hay ninguna, se abre una vacía para verlos.
-    if (!this.#models.length) {
+    if (!modelChoices(this.#models).choices.length) {
       this.#modelsProbe ??= this.#probeModels().finally(() => {
         this.#modelsProbe = null;
       });
       await this.#modelsProbe;
     }
+    // Un modelo por familia, con sus niveles aparte (Antigravity da cada nivel también como otro modelo).
+    const { choices, current: currentId } = modelChoices(this.#models);
+    const current = currentId ? choiceFor(choices, currentId) : undefined;
     return {
-      data: this.#models.map((model) => ({
+      data: choices.map((model) => ({
         id: model.modelId,
         model: model.modelId,
         displayName: model.name,
-        isDefault: model.modelId === this.#currentModel,
+        isDefault: model === current,
         supportedReasoningEfforts: model.efforts,
+        ...(Object.keys(model.variants).length ? { variants: model.variants } : {}),
       })),
     };
   }
@@ -463,7 +471,7 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
     const method = getRecord(getRecord(this.#capabilities, "sessionCapabilities"), "resume") ? "session/resume" : "session/load";
     try {
       const response = await this.#withAuth(() => this.#call(method, { sessionId: threadId, cwd: config.cwd, mcpServers: servers }, SESSION_TIMEOUT_MS));
-      this.#rememberModels(response);
+      this.#rememberModels(response, { current: false });
       thread.configOptions = configOptionsOf(response);
     } catch (error) {
       this.#threads.delete(threadId);
@@ -578,44 +586,35 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
 
   /** Modelo y nivel de razonamiento del agente, si cambiaron desde el último turno. */
   async #applySettings(thread: AcpThread): Promise<void> {
-    if (thread.model && thread.model !== thread.appliedModel) {
+    const { choices, current } = modelChoices(this.#models);
+    const { model, effort } = resolveModel(choices, current, thread.model, thread.effort);
+    if (model && model !== thread.appliedModel) {
       const option = findConfigOption(thread.configOptions, "model");
       try {
-        if (option) await this.#call("session/set_config_option", { sessionId: thread.id, configId: option, value: thread.model }, 30_000);
-        else await this.#call("session/set_model", { sessionId: thread.id, modelId: thread.model }, 30_000);
+        if (option) await this.#call("session/set_config_option", { sessionId: thread.id, configId: option, value: model }, 30_000);
+        else await this.#call("session/set_model", { sessionId: thread.id, modelId: model }, 30_000);
       } catch (error) {
-        this.#diagnostic(`No pude elegir el modelo ${thread.model}: ${error instanceof Error ? error.message : String(error)}`);
+        this.#diagnostic(`No pude elegir el modelo ${model}: ${error instanceof Error ? error.message : String(error)}`);
       }
-      thread.appliedModel = thread.model;
+      thread.appliedModel = model;
+      // Al cambiar de modelo, el agente puede volver al nivel de ese modelo: se fija otra vez.
+      thread.appliedEffort = null;
     }
-    if (thread.effort && thread.effort !== thread.appliedEffort) {
+    if (effort && effort !== thread.appliedEffort) {
       const option = findConfigOption(thread.configOptions, "thought_level");
       if (option) {
         try {
-          await this.#call("session/set_config_option", { sessionId: thread.id, configId: option, value: thread.effort }, 30_000);
+          await this.#call("session/set_config_option", { sessionId: thread.id, configId: option, value: effort }, 30_000);
         } catch (error) {
-          this.#diagnostic(`No pude cambiar el razonamiento a ${thread.effort}: ${error instanceof Error ? error.message : String(error)}`);
+          this.#diagnostic(`No pude cambiar el razonamiento a ${effort}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
-      thread.appliedEffort = thread.effort;
+      thread.appliedEffort = effort;
     }
   }
 
-  #rememberModels(response: unknown): void {
-    const models = getRecord(response, "models");
-    if (!models) return;
-    const list = getArray(models, "availableModels")
-      .filter(isRecord)
-      .map((model) => ({
-        modelId: getString(model, "modelId") ?? "",
-        name: getString(model, "name") ?? getString(model, "modelId") ?? "",
-        efforts: getArray(getRecord(model, "_meta"), "reasoningEfforts")
-          .map((entry) => (isRecord(entry) ? (getString(entry, "value") ?? getString(entry, "id") ?? "") : typeof entry === "string" ? entry : ""))
-          .filter(Boolean),
-      }))
-      .filter((model) => model.modelId);
-    if (list.length) this.#models = list;
-    this.#currentModel = getString(models, "currentModelId") ?? this.#currentModel;
+  #rememberModels(response: unknown, options: { current?: boolean } = {}): void {
+    this.#models = mergeSessionModels(this.#models, response, options);
   }
 
   #canClose(): boolean {
@@ -1061,11 +1060,8 @@ function configOptionsOf(response: unknown): Record<string, unknown>[] {
 }
 
 /** Id de la opción de la sesión para esa categoría («model», «thought_level»), si el agente la tiene. */
-function findConfigOption(options: Record<string, unknown>[], category: string): string | null {
-  const match =
-    options.find((option) => getString(option, "category") === category) ??
-    (category === "model" ? options.find((option) => getString(option, "id") === "model") : undefined) ??
-    (category === "thought_level" ? options.find((option) => /effort|reasoning|thought/i.test(getString(option, "id") ?? "")) : undefined);
+function findConfigOption(options: Record<string, unknown>[], category: "model" | "thought_level"): string | null {
+  const match = findOption(options, category);
   return match ? getString(match, "id") : null;
 }
 

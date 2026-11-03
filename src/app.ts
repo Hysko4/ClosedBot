@@ -10,6 +10,7 @@ import { isRecord } from "./providers/protocol.js";
 import type { VoiceSettings } from "./db.js";
 import { type AgentInput, type AgentService, type LibraryRoot, MAX_UPLOAD_BYTES, ServiceError, type ServiceEvent, VERSION } from "./service.js";
 import { MAX_SPEECH_BYTES, type SpeechEngine, SpeechError, type SpeechStatus } from "./speech.js";
+import { type LocalVoices, LocalVoicesError, type LocalVoicesStatus } from "./voices.js";
 
 export interface AppOptions {
   service: AgentService;
@@ -28,6 +29,8 @@ export interface AppOptions {
   onShutdown?: () => void;
   /** Dictado local (reconocimiento de voz en este equipo). Sin él, las rutas /api/speech responden 503. */
   speech?: SpeechEngine | null;
+  /** Voces locales para leer en voz alta (Supertonic). Sin ellas, las rutas /api/voices responden 503. */
+  voices?: LocalVoices | null;
   log?: (level: "info" | "warn" | "error", message: string) => void;
 }
 
@@ -461,6 +464,38 @@ export function createApp(options: AppOptions): App {
     return { text: await engine.transcribe(data) };
   });
 
+  // ---------- voces locales para leer en voz alta ----------
+
+  const localVoices = options.voices ?? null;
+  const requireVoices = (): LocalVoices => {
+    if (!localVoices) throw new HttpError(503, "Las voces de este PC no están disponibles en este servidor.");
+    return localVoices;
+  };
+
+  route("GET", "/api/voices", () => ({ voices: localVoices?.status() ?? null }));
+
+  // Descarga el modelo (una sola vez). El avance llega por el flujo de eventos («voices»).
+  route("POST", "/api/voices/install", (ctx) => {
+    const engine = requireVoices();
+    engine.install().catch(() => undefined);
+    ctx.res.statusCode = 202;
+    return { voices: engine.status() };
+  });
+
+  // Lee una frase: responde un WAV.
+  route("POST", "/api/voices/speak", async (ctx) => {
+    const engine = requireVoices();
+    const body = await readJson(ctx.req);
+    const wav = await engine.speak({ text: body.text, voice: body.voice, speed: body.speed, lang: body.lang });
+    const res = ctx.res;
+    res.statusCode = 200;
+    res.setHeader("content-type", "audio/wav");
+    res.setHeader("content-length", String(wav.length));
+    res.setHeader("cache-control", "private, no-store");
+    res.end(wav);
+    return NO_CONTENT;
+  });
+
   route("POST", "/api/agents/:id/decisions/:messageId", async (ctx) => {
     const body = await readJson(ctx.req);
     const { decision, message } = service.answerDecision(param(ctx, 0), param(ctx, 1), body.choice);
@@ -532,7 +567,13 @@ export function createApp(options: AppOptions): App {
       "x-accel-buffering": "no",
     });
     res.write("retry: 3000\n\n");
-    const send = (event: ServiceEvent | { type: "hello"; [key: string]: unknown } | { type: "speech"; speech: SpeechStatus }) => {
+    const send = (
+      event:
+        | ServiceEvent
+        | { type: "hello"; [key: string]: unknown }
+        | { type: "speech"; speech: SpeechStatus }
+        | { type: "voices"; voices: LocalVoicesStatus },
+    ) => {
       if (res.writableEnded) return;
       if (res.writableLength > SSE_BUFFER_LIMIT) {
         // Cliente demasiado lento: se corta y, al reconectar, recarga el estado completo.
@@ -553,11 +594,14 @@ export function createApp(options: AppOptions): App {
       deletedChannels: service.listDeletedChannels(),
       usage: service.usage(),
       speech: speech?.status() ?? null,
+      voices: localVoices?.status() ?? null,
     });
     const listener = (event: ServiceEvent) => send(event);
     service.on("event", listener);
     const speechListener = (status: SpeechStatus) => send({ type: "speech", speech: status });
     speech?.on("status", speechListener);
+    const voicesListener = (status: LocalVoicesStatus) => send({ type: "voices", voices: status });
+    localVoices?.on("status", voicesListener);
     const heartbeat = setInterval(() => {
       if (!auth.validate(ctx.token)) {
         res.end();
@@ -570,6 +614,7 @@ export function createApp(options: AppOptions): App {
       clearInterval(heartbeat);
       service.off("event", listener);
       speech?.off("status", speechListener);
+      localVoices?.off("status", voicesListener);
       streams.delete(res);
     };
     res.once("close", cleanup);
@@ -655,7 +700,7 @@ export function createApp(options: AppOptions): App {
     }
     const work = url.pathname.startsWith("/api/") ? handleApi(req, res, url) : serveStatic(req, res, url);
     work.catch((error: unknown) => {
-      const known = error instanceof HttpError || error instanceof ServiceError || error instanceof SpeechError;
+      const known = error instanceof HttpError || error instanceof ServiceError || error instanceof SpeechError || error instanceof LocalVoicesError;
       const status = known ? error.status : 500;
       if (status >= 500 && !known) {
         log("error", `${req.method} ${url.pathname}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);

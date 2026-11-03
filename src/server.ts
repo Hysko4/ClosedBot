@@ -17,6 +17,7 @@ import { type CliName, locateCli } from "./providers/locate.js";
 import { acpAuthMethods, GROK_AGENT_ARGS, installCommand, providerEnv, signInCommands } from "./providers/presets.js";
 import { AgentService, VERSION } from "./service.js";
 import { SpeechEngine } from "./speech.js";
+import { LocalVoices, openBotVoiceDirs } from "./voices.js";
 
 function log(level: "info" | "warn" | "error", message: string): void {
   const line = `[${new Date().toISOString()}] ${level.toUpperCase()} ${message}`;
@@ -161,6 +162,8 @@ async function main(): Promise<void> {
 
   // Dictado local: el modelo se descarga en <datos>/voz la primera vez que alguien lo pide.
   const speech = new SpeechEngine({ dir: join(config.dataDir, "voz"), log });
+  // Voces locales (Supertonic 3): la copia de OpenBot si ya la bajó; si no, se descargan en <datos>/voz/voces.
+  const voices = new LocalVoices({ dir: join(config.dataDir, "voz"), shared: openBotVoiceDirs(), log });
 
   const app = createApp({
     service,
@@ -173,6 +176,7 @@ async function main(): Promise<void> {
     controlToken,
     onShutdown: () => void shutdown("la orden de cierre del lanzador"),
     speech,
+    voices,
     log,
   });
 
@@ -199,6 +203,7 @@ async function main(): Promise<void> {
     await new Promise<void>((resolve) => app.server.close(() => resolve()));
     await service.stop();
     await speech.stop();
+    await voices.stop();
     store.close();
     clearTimeout(force);
     log("info", "ClosedBot se cerró.");

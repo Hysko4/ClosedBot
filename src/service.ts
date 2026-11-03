@@ -95,6 +95,16 @@ const USAGE_MIN_GAP_MS = 60_000;
 const USAGE_AFTER_TURN_MS = 2 * 60_000;
 const USAGE_FIRST_MS = 20_000;
 
+/** Un modelo para elegir en el editor del agente. */
+export interface ModelOption {
+  model: string;
+  displayName: string;
+  isDefault?: boolean;
+  efforts: string[];
+  /** Nivel → id real, cuando el proveedor ofrece cada nivel como otro modelo (Gemini por Antigravity). */
+  variants?: Record<string, string>;
+}
+
 export interface ProviderStatus {
   id: ProviderId;
   label: string;
@@ -555,7 +565,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     await client.stop().catch(() => undefined);
   }
 
-  async listModels(provider: ProviderId): Promise<Array<{ model: string; displayName: string; isDefault?: boolean; efforts: string[] }>> {
+  async listModels(provider: ProviderId): Promise<ModelOption[]> {
     // Codex, Grok y Gemini son programas aparte: si no están instalados (o no tienen sesión) no se arrancan.
     if (provider === "codex" || provider === "grok" || provider === "gemini") {
       const status = this.#providers.find((item) => item.id === provider);
@@ -573,6 +583,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         efforts: getArray(model, "supportedReasoningEfforts")
           .map((entry) => (isRecord(entry) ? String(entry.reasoningEffort ?? "") : String(entry)))
           .filter(Boolean),
+        ...variantsOf(model),
       }))
       .filter((model) => model.model);
   }
@@ -2424,6 +2435,13 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   #log(level: "info" | "warn" | "error", message: string): void {
     this.#options.log?.(level, message);
   }
+}
+
+function variantsOf(model: Record<string, unknown>): { variants?: Record<string, string> } {
+  const variants = Object.entries(getRecord(model, "variants") ?? {}).filter(
+    (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1] !== "",
+  );
+  return variants.length ? { variants: Object.fromEntries(variants) } : {};
 }
 
 function signInProvider(value: unknown): SignInProvider {

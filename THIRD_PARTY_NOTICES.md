@@ -28,4 +28,5 @@
 - Para Gemini, el servidor ACP de **Google Antigravity** (`agy_acp_server`, licencia propietaria de Google LLC, términos en https://antigravity.google/terms). ClosedBot no lo incluye: usa la copia que descargó OpenBot o, al pulsar «Instalar» en Ajustes, descarga el `.zip` oficial de `dl.google.com` indicado en el registro de ACP y comprueba su SHA-256.
 - Grok CLI se instala con el instalador oficial de xAI (`https://x.ai/cli`) al pulsar «Instalar» en Ajustes; lo rigen los términos de xAI.
 - Modelo de dictado **Parakeet TDT 0.6B v3** (NVIDIA, CC-BY-4.0), en la versión convertida por el proyecto sherpa-onnx. Se descarga solo si lo pides en Ajustes, a `<datos>/voz`.
+- Voces **Supertonic 3** (Supertone Inc.: pesos con licencia OpenRAIL-M y código MIT), en la versión int8 convertida para sherpa-onnx (`csukuangfj2/sherpa-onnx-supertonic-3-tts-int8-2026-05-11` en Hugging Face, con su archivo `LICENSE`). ClosedBot no las incluye: usa la copia que descargó OpenBot o, si la pides, las descarga a `<datos>/voz/voces` y comprueba el SHA-256 de cada archivo.
 - `@playwright/mcp` se descarga con `npx` solo si activas `CLOSEDBOT_PLAYWRIGHT=1`.
