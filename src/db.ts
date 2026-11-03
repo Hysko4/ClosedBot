@@ -18,8 +18,17 @@ export interface AgentRecord {
   preview: string;
   /** Grupo en la barra lateral (como los proyectos de la app de referencia); vacío = sin grupo. */
   project: string;
-  /** Número de avatar (figura y color en la interfaz), distinto para cada agente nuevo. */
+  /**
+   * Número de avatar (figura y color en la interfaz). Los automáticos van de 0 en adelante, distintos
+   * para cada agente nuevo; desde AVATAR_CUSTOM_BASE son una figura y un color elegidos por el usuario.
+   */
   avatar: number;
+  /** Fijado arriba de la barra lateral. */
+  pinned: boolean;
+  /** Oculto de la barra lateral (sigue apareciendo al buscar). */
+  hidden: boolean;
+  /** Cómo lee en voz alta sus respuestas (voz, velocidad e idioma). */
+  voice: VoiceSettings;
   /** Última vez que el usuario abrió la conversación (para el aviso de no leído). */
   readAt: number;
   /** Último mensaje del agente (o para el usuario) en su conversación. */
@@ -27,6 +36,21 @@ export interface AgentRecord {
   createdAt: number;
   updatedAt: number;
 }
+
+/** Ajustes de voz de un agente. `name` vacío = la mejor voz del equipo para el idioma; `lang` "auto" = detectar. */
+export interface VoiceSettings {
+  name: string;
+  rate: number;
+  lang: string;
+  /** Lee en voz alta todas sus respuestas, no solo las de mensajes enviados hablando. */
+  autoRead: boolean;
+}
+
+export const DEFAULT_VOICE: VoiceSettings = { name: "", rate: 1, lang: "auto", autoRead: false };
+
+/** Desde aquí, el número de avatar es una figura y un color elegidos: base + figura × 100 + color. */
+export const AVATAR_CUSTOM_BASE = 10_000;
+export const AVATAR_MAX = 100_000;
 
 /** decision = pregunta de opción múltiple al usuario; routine = aviso de que corrió una rutina. */
 export type MessageRole = "user" | "assistant" | "teammate" | "activity" | "notice" | "decision" | "routine";
@@ -113,6 +137,9 @@ CREATE TABLE IF NOT EXISTS agents (
   project TEXT NOT NULL DEFAULT '',
   read_at INTEGER NOT NULL DEFAULT 0,
   avatar INTEGER NOT NULL DEFAULT 0,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  hidden INTEGER NOT NULL DEFAULT 0,
+  voice TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -190,9 +217,12 @@ const ADDED_COLUMNS: Array<{ table: string; column: string; ddl: string; backfil
     )`,
   },
   { table: "messages", column: "payload", ddl: "ALTER TABLE messages ADD COLUMN payload TEXT" },
+  { table: "agents", column: "pinned", ddl: "ALTER TABLE agents ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0" },
+  { table: "agents", column: "hidden", ddl: "ALTER TABLE agents ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0" },
+  { table: "agents", column: "voice", ddl: "ALTER TABLE agents ADD COLUMN voice TEXT" },
 ];
 
-const SCHEMA_VERSION = "2";
+const SCHEMA_VERSION = "3";
 
 /** Roles cuyos mensajes cuentan como novedad para el aviso de no leído. */
 const UNREAD_ROLES = "('assistant', 'teammate', 'notice', 'decision', 'routine')";
@@ -275,25 +305,55 @@ export class Store {
   }
 
   createAgent(
-    input: Omit<AgentRecord, "id" | "threadId" | "paused" | "preview" | "project" | "avatar" | "readAt" | "lastAt" | "createdAt" | "updatedAt"> & {
+    input: Omit<
+      AgentRecord,
+      "id" | "threadId" | "paused" | "preview" | "project" | "avatar" | "pinned" | "hidden" | "voice" | "readAt" | "lastAt" | "createdAt" | "updatedAt"
+    > & {
       project?: string;
+      /** Figura y color elegidos; si falta, el siguiente automático. */
+      avatar?: number;
     },
   ): AgentRecord {
     const now = Date.now();
     const id = randomUUID();
+    const avatar = input.avatar ?? this.#nextAutoAvatar();
     this.#db
       .prepare(
         `INSERT INTO agents (id, name, role, instructions, provider, model, effort, access, workspace, project, read_at, avatar, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(avatar) + 1, 0) FROM agents), ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, input.name, input.role, input.instructions, input.provider, input.model, input.effort, input.access, input.workspace, input.project ?? "", now, now, now);
+      .run(id, input.name, input.role, input.instructions, input.provider, input.model, input.effort, input.access, input.workspace, input.project ?? "", now, avatar, now, now);
     return this.getAgent(id) as AgentRecord;
+  }
+
+  /** Los avatares automáticos siguen su propia numeración: los elegidos a mano no la mueven. */
+  #nextAutoAvatar(): number {
+    const row = this.#db.prepare("SELECT COALESCE(MAX(avatar) + 1, 0) AS next FROM agents WHERE avatar < ?").get(AVATAR_CUSTOM_BASE) as Row;
+    return Number(row.next ?? 0);
   }
 
   updateAgent(
     id: string,
     patch: Partial<
-      Pick<AgentRecord, "name" | "role" | "instructions" | "provider" | "model" | "effort" | "access" | "threadId" | "paused" | "preview" | "project" | "readAt">
+      Pick<
+        AgentRecord,
+        | "name"
+        | "role"
+        | "instructions"
+        | "provider"
+        | "model"
+        | "effort"
+        | "access"
+        | "threadId"
+        | "paused"
+        | "preview"
+        | "project"
+        | "readAt"
+        | "avatar"
+        | "pinned"
+        | "hidden"
+        | "voice"
+      >
     >,
   ): AgentRecord {
     const columns: Record<string, string> = {
@@ -309,6 +369,10 @@ export class Store {
       preview: "preview",
       project: "project",
       readAt: "read_at",
+      avatar: "avatar",
+      pinned: "pinned",
+      hidden: "hidden",
+      voice: "voice",
     };
     const sets: string[] = [];
     const values: SQLInputValue[] = [];
@@ -316,7 +380,8 @@ export class Store {
       const column = columns[key];
       if (!column || value === undefined) continue;
       sets.push(`${column} = ?`);
-      values.push(typeof value === "boolean" ? (value ? 1 : 0) : (value as SQLInputValue));
+      if (key === "voice") values.push(JSON.stringify(value));
+      else values.push(typeof value === "boolean" ? (value ? 1 : 0) : (value as SQLInputValue));
     }
     if (sets.length) {
       sets.push("updated_at = ?");
@@ -660,6 +725,19 @@ function parseJsonRecord(value: SQLInputValue | undefined): Record<string, unkno
   }
 }
 
+/** Ajustes de voz guardados; lo que falte o no sirva vuelve al valor por defecto. */
+export function toVoice(value: SQLInputValue | undefined | Record<string, unknown>): VoiceSettings {
+  const raw = value && typeof value === "object" && !(value instanceof Uint8Array) ? (value as Record<string, unknown>) : parseJsonRecord(value as SQLInputValue | undefined);
+  if (!raw) return { ...DEFAULT_VOICE };
+  const rate = Number(raw.rate);
+  return {
+    name: typeof raw.name === "string" ? raw.name.slice(0, 200) : DEFAULT_VOICE.name,
+    rate: Number.isFinite(rate) && rate >= 0.5 && rate <= 2 ? Math.round(rate * 100) / 100 : DEFAULT_VOICE.rate,
+    lang: typeof raw.lang === "string" && /^(auto|[a-z]{2,3}(-[A-Za-z0-9]{2,8})*)$/.test(raw.lang) ? raw.lang : DEFAULT_VOICE.lang,
+    autoRead: raw.autoRead === true,
+  };
+}
+
 function toRoutine(row: Row): RoutineRecord {
   return {
     id: String(row.id),
@@ -692,6 +770,9 @@ function toAgent(row: Row): AgentRecord {
     preview: String(row.preview ?? ""),
     project: String(row.project ?? ""),
     avatar: Number(row.avatar ?? 0),
+    pinned: Number(row.pinned ?? 0) === 1,
+    hidden: Number(row.hidden ?? 0) === 1,
+    voice: toVoice(row.voice),
     readAt: Number(row.read_at ?? 0),
     lastAt: row.last_at === null || row.last_at === undefined ? 0 : Number(row.last_at),
     createdAt: Number(row.created_at),

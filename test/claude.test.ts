@@ -336,3 +336,58 @@ test("Claude: en Windows el modo «carpeta» quita la terminal en vez de fallar"
   const total = client.buildOptions("00000000-0000-4000-8000-000000000002" as UUID, { ...config, access: "total" }, false);
   assert.equal(total.disallowedTools, undefined, "con acceso total conserva la terminal");
 });
+
+test("Claude: lee el uso del plan con una consulta corta, sin MCP ni conectores, y la cierra", async () => {
+  const seen: Options[] = [];
+  let closed = 0;
+  let available = true;
+  const client = new ClaudeAgentClient({
+    idleMs: 0,
+    createQuery: ({ options }) => {
+      seen.push(options);
+      const generator = (async function* (): AsyncGenerator<SDKMessage> {})();
+      return Object.assign(generator, {
+        close: () => {
+          closed += 1;
+        },
+        usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => ({
+          subscription_type: "max",
+          rate_limits_available: available,
+          rate_limits: available
+            ? {
+                five_hour: { utilization: 30, resets_at: "2026-11-03T05:00:00Z" },
+                seven_day: { utilization: 62, resets_at: "2026-11-05T07:00:00Z" },
+                seven_day_opus: null,
+                model_scoped: [{ display_name: "Fable", utilization: 12, resets_at: null }],
+              }
+            : null,
+        }),
+      }) as unknown as Query;
+    },
+  });
+  client.start();
+  try {
+    const response = await client.request<{ rateLimits: unknown }>("account/rateLimits/read", {});
+    assert.deepEqual(response.rateLimits, {
+      available: true,
+      plan: "max",
+      windows: [
+        { id: "seven_day", usedPercent: 62, resetsAt: "2026-11-05T07:00:00Z" },
+        { id: "five_hour", usedPercent: 30, resetsAt: "2026-11-03T05:00:00Z" },
+        { id: "model:Fable", label: "Semanal · Fable", usedPercent: 12, resetsAt: null },
+      ],
+    });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]?.strictMcpConfig, true);
+    assert.deepEqual(seen[0]?.mcpServers, {});
+    assert.equal(seen[0]?.env?.ENABLE_CLAUDEAI_MCP_SERVERS, "false");
+    assert.deepEqual(seen[0]?.settings, { disableClaudeAiConnectors: true });
+    assert.equal(closed, 1, "la consulta corta se cierra");
+
+    available = false;
+    const none = await client.request<{ rateLimits: unknown }>("account/rateLimits/read", {});
+    assert.deepEqual(none.rateLimits, { available: false, plan: "max", windows: [] });
+  } finally {
+    await client.stop();
+  }
+});

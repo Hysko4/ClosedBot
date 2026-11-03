@@ -1,8 +1,17 @@
 import { EventEmitter } from "node:events";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import type { AgentRecord, DeliveryRecord, MessageRecord, RoutineRecord, Store } from "./db.js";
-import { buildInstructions, composeDeliveryInput } from "./instructions.js";
+import { mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
+import {
+  type AgentRecord,
+  AVATAR_MAX,
+  type DeliveryRecord,
+  type MessageRecord,
+  type RoutineRecord,
+  type Store,
+  toVoice,
+  type VoiceSettings,
+} from "./db.js";
+import { buildInstructions, composeDeliveryInput, composeGreeting, GREETING_MARKER } from "./instructions.js";
 import type { AccessLevel, AgentClient, ProviderId } from "./providers/client.js";
 import {
   type AppServerNotification,
@@ -64,6 +73,16 @@ export const MAIN_AGENT_ROLE = "Bot principal: arma y coordina tus equipos de ag
 export const MAX_AGENTS = 60;
 export const MAX_AGENTS_PER_TURN = 8;
 const OPTION_LETTERS = "ABCD";
+/** Secciones de la barra lateral creadas a mano (pueden quedar vacías); las demás salen del proyecto de cada agente. */
+export const SECTIONS_META = "sections";
+export const MAX_SECTIONS = 50;
+/** Biblioteca: cuántos elementos muestra una carpeta como máximo. */
+export const MAX_LIBRARY_ENTRIES = 500;
+/** Uso del plan: cada cuánto se vuelve a leer y cuánto esperar como mínimo entre lecturas. */
+const USAGE_INTERVAL_MS = 10 * 60_000;
+const USAGE_MIN_GAP_MS = 60_000;
+const USAGE_AFTER_TURN_MS = 2 * 60_000;
+const USAGE_FIRST_MS = 20_000;
 
 export interface ProviderStatus {
   id: ProviderId;
@@ -105,6 +124,36 @@ export interface RoutineView extends RoutineRecord {
   running: boolean;
 }
 
+/** Una ventana de uso del plan (p. ej. la semanal): porcentaje usado y cuándo se reinicia. */
+export interface UsageWindow {
+  id: string;
+  label: string;
+  percent: number;
+  resetsAt: number | null;
+}
+
+/** Uso del plan de un proveedor, tal como lo informa su CLI. */
+export interface UsageView {
+  provider: ProviderId;
+  label: string;
+  plan: string | null;
+  windows: UsageWindow[];
+  updatedAt: number;
+  error: string | null;
+}
+
+/** Un archivo o carpeta de la biblioteca de un agente. */
+export interface LibraryEntry {
+  name: string;
+  /** Ruta relativa a la raíz, con «/». */
+  path: string;
+  dir: boolean;
+  size: number;
+  modifiedAt: number;
+}
+
+export type LibraryRoot = "agent" | "shared";
+
 /** Nombres que muestra la interfaz (el del asistente arriba a la izquierda y el del usuario abajo). */
 export interface Settings {
   botName: string;
@@ -121,6 +170,8 @@ export type ServiceEvent =
   | { type: "providers"; providers: ProviderStatus[] }
   | { type: "routines"; routines: RoutineView[] }
   | { type: "settings"; settings: Settings }
+  | { type: "sections"; sections: string[] }
+  | { type: "usage"; usage: UsageView[] }
   | { type: "notice"; level: "error" | "info"; message: string; agentId?: string };
 
 export interface ServiceOptions {
@@ -149,6 +200,11 @@ export interface AgentInput {
   access?: AccessLevel;
   /** Grupo en la barra lateral. */
   project?: string;
+  /** Figura y color elegidos (ver AVATAR_CUSTOM_BASE). */
+  avatar?: number;
+  pinned?: boolean;
+  hidden?: boolean;
+  voice?: Partial<VoiceSettings>;
 }
 
 export interface RoutineInput {
@@ -216,6 +272,11 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   #routineTimer: NodeJS.Timeout | null = null;
   #mainAgentId: string | null = null;
   readonly #signIns: SignInFlows;
+  readonly #usage = new Map<ProviderId, UsageView>();
+  #usageTimer: NodeJS.Timeout | null = null;
+  #usageSoon: NodeJS.Timeout | null = null;
+  #usageRefresh: Promise<UsageView[]> | null = null;
+  #usageReadAt = 0;
 
   constructor(options: ServiceOptions) {
     super();
@@ -237,7 +298,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     }
     for (const agentId of this.#store.agentsWithQueuedWork()) this.#scheduleDrain(agentId);
     this.#armRoutines();
-    void this.refreshProviders();
+    void this.refreshProviders().then(() => this.#armUsage());
   }
 
   async stop(): Promise<void> {
@@ -245,6 +306,10 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#signIns.stopAll();
     if (this.#routineTimer) clearTimeout(this.#routineTimer);
     this.#routineTimer = null;
+    if (this.#usageTimer) clearInterval(this.#usageTimer);
+    if (this.#usageSoon) clearTimeout(this.#usageSoon);
+    this.#usageTimer = null;
+    this.#usageSoon = null;
     const clients = [...this.#clients.values()];
     this.#clients.clear();
     this.#clientReady.clear();
@@ -393,7 +458,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     return this.#view(this.#requireAgent(id));
   }
 
-  createAgent(input: AgentInput): AgentView {
+  /** `greet`: el agente lo creó el usuario a mano, así que se presenta con un primer mensaje. */
+  createAgent(input: AgentInput, options: { greet?: boolean } = {}): AgentView {
     const name = cleanName(input.name);
     if (this.#store.findAgentByName(name)) throw new ServiceError(`Ya existe un agente llamado «${name}».`, 409);
     const provider = validProvider(input.provider);
@@ -409,9 +475,19 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       access: input.access === "total" ? "total" : "carpeta",
       workspace,
       project: cleanProject(input.project),
+      ...(input.avatar === undefined ? {} : { avatar: cleanAvatar(input.avatar) }),
     });
+    let created = agent;
+    if (input.voice !== undefined || input.pinned !== undefined || input.hidden !== undefined) {
+      created = this.#store.updateAgent(agent.id, {
+        ...(input.voice === undefined ? {} : { voice: toVoice({ ...agent.voice, ...input.voice }) }),
+        ...(input.pinned === undefined ? {} : { pinned: input.pinned === true }),
+        ...(input.hidden === undefined ? {} : { hidden: input.hidden === true }),
+      });
+    }
     this.#emitAgents();
-    return this.#view(agent);
+    if (options.greet) this.#greet(created);
+    return this.#view(created);
   }
 
   updateAgent(id: string, patch: Partial<AgentInput>): AgentView {
@@ -429,6 +505,10 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (patch.effort !== undefined) next.effort = cleanOptional(patch.effort, 20);
     if (patch.access !== undefined) next.access = patch.access === "total" ? "total" : "carpeta";
     if (patch.project !== undefined) next.project = cleanProject(patch.project);
+    if (patch.avatar !== undefined) next.avatar = cleanAvatar(patch.avatar);
+    if (patch.pinned !== undefined) next.pinned = patch.pinned === true;
+    if (patch.hidden !== undefined) next.hidden = patch.hidden === true;
+    if (patch.voice !== undefined) next.voice = toVoice({ ...agent.voice, ...patch.voice });
     if (patch.provider !== undefined) {
       const provider = validProvider(patch.provider);
       if (provider !== agent.provider) {
@@ -491,6 +571,289 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const updated = this.#store.updateAgent(id, { readAt: Math.max(Date.now(), agent.lastAt) });
     this.#emitAgents();
     return this.#view(updated);
+  }
+
+  /** «Marcar como no leído»: vuelve a mostrar el aviso aunque no haya mensajes nuevos. */
+  markUnread(id: string): AgentView {
+    this.#requireAgent(id);
+    const updated = this.#store.updateAgent(id, { readAt: -1 });
+    this.#emitAgents();
+    return this.#view(updated);
+  }
+
+  /** «Marcar todo como leído» desde la barra lateral. Devuelve cuántos agentes tenían novedades. */
+  markAllRead(): number {
+    const now = Date.now();
+    let changed = 0;
+    for (const agent of this.#store.listAgents()) {
+      if (agent.lastAt <= agent.readAt) continue;
+      this.#store.updateAgent(agent.id, { readAt: Math.max(now, agent.lastAt) });
+      changed += 1;
+    }
+    if (changed) this.#emitAgents();
+    return changed;
+  }
+
+  // ---------- secciones de la barra lateral ----------
+
+  /** Secciones creadas a mano, en orden. La interfaz les suma las que salen del proyecto de cada agente. */
+  listSections(): string[] {
+    try {
+      const parsed: unknown = JSON.parse(this.#store.getMeta(SECTIONS_META) ?? "[]");
+      if (!Array.isArray(parsed)) return [];
+      const seen = new Set<string>();
+      return parsed
+        .filter((item): item is string => typeof item === "string" && item.trim() !== "")
+        .filter((item) => {
+          const key = item.toLowerCase();
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+    } catch {
+      return [];
+    }
+  }
+
+  createSection(rawName: unknown): string[] {
+    const name = cleanProject(rawName);
+    if (!name) throw new ServiceError("Ponle un nombre a la sección.");
+    const sections = this.listSections();
+    if (this.#sectionExists(name)) throw new ServiceError(`Ya existe una sección llamada «${name}».`, 409);
+    if (sections.length >= MAX_SECTIONS) throw new ServiceError(`Puedes tener hasta ${MAX_SECTIONS} secciones.`, 409);
+    return this.#saveSections([...sections, name]);
+  }
+
+  /** Cambia el nombre de una sección y mueve a sus agentes. */
+  renameSection(rawFrom: unknown, rawTo: unknown): string[] {
+    const from = cleanProject(rawFrom);
+    const to = cleanProject(rawTo);
+    if (!from || !this.#sectionExists(from)) throw new ServiceError("Sección no encontrada.", 404);
+    if (!to) throw new ServiceError("Ponle un nombre a la sección.");
+    if (to.toLowerCase() !== from.toLowerCase() && this.#sectionExists(to)) throw new ServiceError(`Ya existe una sección llamada «${to}».`, 409);
+    const sections = this.listSections();
+    const index = sections.findIndex((item) => item.toLowerCase() === from.toLowerCase());
+    if (index >= 0) sections[index] = to;
+    let moved = 0;
+    for (const agent of this.#store.listAgents()) {
+      if (agent.project.toLowerCase() !== from.toLowerCase()) continue;
+      this.#store.updateAgent(agent.id, { project: to });
+      moved += 1;
+    }
+    const result = this.#saveSections(sections);
+    if (moved) this.#emitAgents();
+    return result;
+  }
+
+  /** Quita una sección: sus agentes pasan a «Sin asignar». */
+  deleteSection(rawName: unknown): string[] {
+    const name = cleanProject(rawName);
+    if (!name || !this.#sectionExists(name)) throw new ServiceError("Sección no encontrada.", 404);
+    let moved = 0;
+    for (const agent of this.#store.listAgents()) {
+      if (agent.project.toLowerCase() !== name.toLowerCase()) continue;
+      this.#store.updateAgent(agent.id, { project: "" });
+      moved += 1;
+    }
+    const result = this.#saveSections(this.listSections().filter((item) => item.toLowerCase() !== name.toLowerCase()));
+    if (moved) this.#emitAgents();
+    return result;
+  }
+
+  #sectionExists(name: string): boolean {
+    const key = name.toLowerCase();
+    return (
+      this.listSections().some((item) => item.toLowerCase() === key) ||
+      this.#store.listAgents().some((agent) => !this.#isMain(agent) && agent.project.toLowerCase() === key)
+    );
+  }
+
+  #saveSections(sections: string[]): string[] {
+    this.#store.setMeta(SECTIONS_META, JSON.stringify(sections));
+    const saved = this.listSections();
+    this.#emit({ type: "sections", sections: saved });
+    return saved;
+  }
+
+  // ---------- biblioteca ----------
+
+  /** Archivos de la carpeta del agente o de la compartida, para verlos y descargarlos desde la interfaz. */
+  listLibrary(agentId: string, root: LibraryRoot, relativePath: string): { root: LibraryRoot; path: string; base: string; entries: LibraryEntry[]; truncated: boolean } {
+    const { base, target, path } = this.#libraryPath(agentId, root, relativePath);
+    let info;
+    try {
+      info = statSync(target);
+    } catch {
+      if (!path) return { root, path, base, entries: [], truncated: false };
+      throw new ServiceError("Esa carpeta ya no existe.", 404);
+    }
+    if (!info.isDirectory()) throw new ServiceError("Eso es un archivo, no una carpeta.", 400);
+    const entries: LibraryEntry[] = [];
+    let total = 0;
+    for (const dirent of readdirSync(target, { withFileTypes: true })) {
+      if (dirent.name.startsWith(".")) continue;
+      total += 1;
+      if (entries.length >= MAX_LIBRARY_ENTRIES) continue;
+      const full = join(target, dirent.name);
+      try {
+        const stat = statSync(full);
+        entries.push({
+          name: dirent.name,
+          path: path ? `${path}/${dirent.name}` : dirent.name,
+          dir: stat.isDirectory(),
+          size: stat.isDirectory() ? 0 : stat.size,
+          modifiedAt: Math.round(stat.mtimeMs),
+        });
+      } catch {
+        // Un enlace roto o un archivo que se borró mientras leíamos: se omite.
+      }
+    }
+    entries.sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name, "es", { sensitivity: "base", numeric: true }));
+    return { root, path, base, entries, truncated: total > entries.length };
+  }
+
+  /** Ruta real de un archivo de la biblioteca, comprobando que no salga de su raíz. */
+  libraryFile(agentId: string, root: LibraryRoot, relativePath: string): { path: string; name: string; size: number; modifiedAt: number } {
+    const { target, path } = this.#libraryPath(agentId, root, relativePath);
+    if (!path) throw new ServiceError("Indica un archivo.", 400);
+    let info;
+    try {
+      info = statSync(target);
+    } catch {
+      throw new ServiceError("Ese archivo ya no existe.", 404);
+    }
+    if (!info.isFile()) throw new ServiceError("Eso no es un archivo.", 400);
+    return { path: target, name: target.split(sep).pop() ?? "archivo", size: info.size, modifiedAt: Math.round(info.mtimeMs) };
+  }
+
+  /** Carpeta de trabajo y compartida de un agente (para la pestaña «Computadora»). */
+  libraryBase(agentId: string, root: LibraryRoot): string {
+    const agent = this.#requireAgent(agentId);
+    return root === "shared" ? this.#options.sharedDir : agent.workspace;
+  }
+
+  #libraryPath(agentId: string, root: LibraryRoot, relativePath: string): { base: string; target: string; path: string } {
+    const base = this.libraryBase(agentId, root);
+    const parts = String(relativePath ?? "")
+      .split(/[\\/]+/)
+      .filter((part) => part !== "" && part !== ".");
+    if (parts.some((part) => part === ".." || part.includes("\0") || /^[a-zA-Z]:$/.test(part))) throw new ServiceError("Ruta no válida.", 400);
+    const target = resolve(base, ...parts);
+    const realBase = safeRealpath(base);
+    const realTarget = safeRealpath(target);
+    // Comprueba también los enlaces simbólicos: la ruta real tiene que seguir dentro de la raíz.
+    if (!isInside(resolve(base), target) || (realBase && realTarget && !isInside(realBase, realTarget))) {
+      throw new ServiceError("Ruta no válida.", 400);
+    }
+    return { base, target, path: parts.join("/") };
+  }
+
+  // ---------- uso del plan ----------
+
+  usage(): UsageView[] {
+    return [...this.#usage.values()];
+  }
+
+  /**
+   * Vuelve a leer el uso del plan de los proveedores con sesión (como /usage en Claude Code).
+   * Con `force` falso devuelve lo guardado si la última lectura es de hace menos de un minuto.
+   */
+  refreshUsage(force = false): Promise<UsageView[]> {
+    if (this.#usageRefresh) return this.#usageRefresh;
+    if (!force && Date.now() - this.#usageReadAt < USAGE_MIN_GAP_MS) return Promise.resolve(this.usage());
+    this.#usageRefresh = this.#readUsage().finally(() => {
+      this.#usageRefresh = null;
+    });
+    return this.#usageRefresh;
+  }
+
+  async #readUsage(): Promise<UsageView[]> {
+    this.#usageReadAt = Date.now();
+    for (const provider of ["claude", "codex"] as const) {
+      const status = this.#providers.find((item) => item.id === provider);
+      // Solo con la sesión confirmada (con la detección apagada no se sabe y no se arranca nada).
+      // Codex, además, solo si ya está en marcha: leer el uso no debe arrancar su proceso.
+      const ready =
+        Boolean(status?.available) && status?.loggedIn === true && (provider === "claude" || Boolean(this.#clients.get("codex")?.running));
+      if (!ready) {
+        if (status?.loggedIn === false) this.#usage.delete(provider);
+        continue;
+      }
+      try {
+        const client = await this.#getClient(provider);
+        const response = await client.request<unknown>("account/rateLimits/read", {}, 30_000);
+        const parsed = parseUsage(provider, response);
+        if (parsed) this.#usage.set(provider, parsed);
+        else this.#usage.delete(provider);
+      } catch (error) {
+        const previous = this.#usage.get(provider);
+        const message = errorText(error);
+        if (/no implementa|not implemented|unknown method/i.test(message)) continue;
+        this.#usage.set(provider, {
+          provider,
+          label: providerLabel(provider),
+          plan: previous?.plan ?? null,
+          windows: previous?.windows ?? [],
+          updatedAt: previous?.updatedAt ?? Date.now(),
+          error: `No se pudo leer el uso: ${message}`,
+        });
+      }
+    }
+    const usage = this.usage();
+    this.#emit({ type: "usage", usage });
+    return usage;
+  }
+
+  #armUsage(): void {
+    if (this.#stopping || this.#usageTimer) return;
+    // La primera lectura espera un poco: al arrancar no hace falta abrir otro proceso de Claude enseguida.
+    this.#usageSoon ??= setTimeout(() => {
+      this.#usageSoon = null;
+      void this.refreshUsage(true).catch(() => undefined);
+    }, USAGE_FIRST_MS);
+    this.#usageSoon.unref();
+    this.#usageTimer = setInterval(() => void this.refreshUsage(true).catch(() => undefined), USAGE_INTERVAL_MS);
+    this.#usageTimer.unref();
+  }
+
+  /** Tras un turno el uso cambió: se vuelve a leer, como mucho una vez cada dos minutos. */
+  #usageAfterTurn(): void {
+    if (this.#stopping || this.#usageSoon) return;
+    const wait = Math.max(5_000, USAGE_AFTER_TURN_MS - (Date.now() - this.#usageReadAt));
+    this.#usageSoon = setTimeout(() => {
+      this.#usageSoon = null;
+      void this.refreshUsage(true).catch(() => undefined);
+    }, wait);
+    this.#usageSoon.unref();
+  }
+
+  // ---------- saludo inicial ----------
+
+  /** El agente que acaba de crear el usuario se presenta: el pedido va oculto y solo se ve su respuesta. */
+  #greet(agent: AgentRecord): void {
+    const team = this.#store.listAgents().filter((other) => other.id !== agent.id && !this.#isMain(other));
+    const text = composeGreeting(agent, this.getSettings().userName, team);
+    const message = this.#store.transaction(() => {
+      const inserted = this.#store.insertMessage({
+        agentId: agent.id,
+        role: "activity",
+        text: "Saludo inicial",
+        status: "queued",
+        payload: { kind: "greeting" },
+      });
+      const { delivery } = this.#store.enqueueDelivery({
+        agentId: agent.id,
+        messageId: inserted.id,
+        senderKind: "user",
+        text,
+        idempotencyKey: `greeting:${agent.id}`,
+      });
+      return this.#store.updateMessage(inserted.id, { deliveryId: delivery.id }) as MessageRecord;
+    });
+    this.#emit({ type: "message", agentId: agent.id, message });
+    this.#emitQueue(agent.id);
+    this.#emitAgents();
+    this.#scheduleDrain(agent.id);
   }
 
   /** Id del bot principal (Claude Bot), o null si esta instalación no lo tiene. */
@@ -750,7 +1113,12 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 
   listQueue(agentId: string): DeliveryRecord[] {
     this.#requireAgent(agentId);
-    return this.#store.listQueue(agentId);
+    return this.#queueView(agentId);
+  }
+
+  /** La cola tal como la ve la interfaz: el pedido del saludo inicial no se muestra. */
+  #queueView(agentId: string): DeliveryRecord[] {
+    return this.#store.listQueue(agentId).map((delivery) => (delivery.text.startsWith(GREETING_MARKER) ? { ...delivery, text: "Saludo inicial" } : delivery));
   }
 
   sendUserMessage(agentId: string, text: string): { message: MessageRecord; delivery: DeliveryRecord } {
@@ -1014,6 +1382,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#emitQueue(agentId);
     this.#emitAgents();
     if (delivery && this.#store.listRoutines(agentId).some((routine) => routine.lastDeliveryId === delivery.id)) this.#emitRoutines();
+    if (state.provider !== "demo") this.#usageAfterTurn();
 
     if (
       terminal === "completed" &&
@@ -1598,7 +1967,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   }
 
   #emitQueue(agentId: string): void {
-    this.#emit({ type: "queue", agentId, queue: this.#store.listQueue(agentId) });
+    this.#emit({ type: "queue", agentId, queue: this.#queueView(agentId) });
   }
 
   #emitAgents(): void {
@@ -1642,10 +2011,102 @@ function cleanText(value: unknown, max: number): string {
   return text;
 }
 
+function cleanAvatar(value: unknown): number {
+  const avatar = typeof value === "number" ? value : Number.NaN;
+  if (!Number.isInteger(avatar) || avatar < 0 || avatar >= AVATAR_MAX) throw new ServiceError("La figura elegida no es válida.");
+  return avatar;
+}
+
+function safeRealpath(path: string): string | null {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return null;
+  }
+}
+
+function isInside(base: string, target: string): boolean {
+  const root = base.endsWith(sep) ? base : base + sep;
+  const a = process.platform === "win32" ? target.toLowerCase() : target;
+  const b = process.platform === "win32" ? root.toLowerCase() : root;
+  return a === b.slice(0, -1) || a.startsWith(b);
+}
+
+/** Nombre de cada ventana de uso de Claude. */
+const USAGE_LABELS: Record<string, string> = {
+  five_hour: "5 horas",
+  seven_day: "Semanal",
+  seven_day_opus: "Semanal · Opus",
+  seven_day_sonnet: "Semanal · Sonnet",
+  seven_day_oauth_apps: "Semanal · apps",
+};
+
+/** Normaliza la respuesta de `account/rateLimits/read`: la del adaptador de Claude o la del app-server de Codex. */
+export function parseUsage(provider: ProviderId, response: unknown): UsageView | null {
+  const limits = getRecord(response, "rateLimits") ?? (isRecord(response) ? response : null);
+  if (!limits || limits.available === false) return null;
+  const windows: UsageWindow[] = [];
+  const add = (id: string, label: string, percentValue: unknown, resetsValue: unknown): void => {
+    const percent = Number(percentValue);
+    if (!Number.isFinite(percent)) return;
+    windows.push({ id, label, percent: Math.max(0, Math.min(100, Math.round(percent))), resetsAt: toMillis(resetsValue) });
+  };
+  if (Array.isArray(limits.windows)) {
+    for (const window of limits.windows.filter(isRecord)) {
+      const id = String(window.id ?? "");
+      const label = typeof window.label === "string" && window.label ? window.label : (USAGE_LABELS[id] ?? (id.startsWith("model:") ? `Semanal · ${id.slice(6)}` : id));
+      add(id, label, window.usedPercent ?? window.used_percent, window.resetsAt ?? window.resets_at);
+    }
+  }
+  for (const key of ["primary", "secondary"]) {
+    const window = getRecord(limits, key);
+    if (!window) continue;
+    const minutes = Number(window.windowDurationMins ?? window.windowMinutes ?? window.window_minutes);
+    const label = !Number.isFinite(minutes)
+      ? key === "primary"
+        ? "Principal"
+        : "Secundario"
+      : minutes >= 7 * 24 * 60 - 60
+        ? "Semanal"
+        : minutes >= 24 * 60
+          ? `${Math.round(minutes / (24 * 60))} días`
+          : `${Math.round(minutes / 60)} horas`;
+    // Versiones viejas de Codex dicen cuántos segundos faltan en vez de la fecha del reinicio.
+    const rawSeconds = window.resetsInSeconds ?? window.resets_in_seconds;
+    const inSeconds = typeof rawSeconds === "number" ? rawSeconds : Number.NaN;
+    const resets = window.resetsAt ?? window.resets_at ?? (Number.isFinite(inSeconds) ? Date.now() + inSeconds * 1000 : null);
+    add(key, label, window.usedPercent ?? window.used_percent, resets);
+  }
+  if (!windows.length) return null;
+  // Primero la semanal (la que muestra el anillo), después las demás.
+  windows.sort((a, b) => Number(b.label === "Semanal") - Number(a.label === "Semanal"));
+  return {
+    provider,
+    label: providerLabel(provider),
+    plan: typeof limits.plan === "string" && limits.plan ? limits.plan : null,
+    windows,
+    updatedAt: Date.now(),
+    error: null,
+  };
+}
+
+/** Fecha en milisegundos a partir de segundos Unix, milisegundos o texto ISO. */
+function toMillis(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "number" && Number.isFinite(value)) return value < 1e11 ? Math.round(value * 1000) : Math.round(value);
+  if (typeof value === "string") {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return toMillis(numeric);
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  return null;
+}
+
 function cleanProject(value: unknown): string {
   const project = typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
-  if (project.length > 60) throw new ServiceError("El nombre del proyecto admite hasta 60 caracteres.");
-  if (/[\u0000-\u001f]/.test(project)) throw new ServiceError("El proyecto tiene caracteres no válidos.");
+  if (project.length > 60) throw new ServiceError("El nombre de la sección admite hasta 60 caracteres.");
+  if (/[\u0000-\u001f]/.test(project)) throw new ServiceError("La sección tiene caracteres no válidos.");
   return project;
 }
 

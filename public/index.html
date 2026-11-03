@@ -62,11 +62,6 @@
           <input id="search-input" type="search" placeholder="Buscar agente…" aria-label="Buscar agente" autocomplete="off" />
         </div>
 
-        <div class="sidebar-empty" id="sidebar-empty" hidden>
-          <p>Todavía no tienes equipos. Cuéntale a <span class="main-name">Claude Bot</span> qué necesitas y él los arma por ti.</p>
-          <button type="button" class="button primary" id="first-team">Hablar con <span class="main-name">Claude Bot</span></button>
-          <button type="button" class="button ghost" id="first-agent">Crear un agente a mano</button>
-        </div>
         <nav class="agent-groups" id="agent-groups" aria-label="Conversaciones"></nav>
 
         <footer class="sidebar-footer">
@@ -74,9 +69,26 @@
             <span class="user-avatar" id="user-avatar" aria-hidden="true">T</span>
             <span class="user-name" id="user-name">Tú</span>
           </button>
+          <button type="button" class="usage-button" id="usage-button" aria-haspopup="dialog" aria-expanded="false" aria-controls="usage-popover" hidden>
+            <svg class="usage-ring" viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="track" cx="18" cy="18" r="14.5" />
+              <circle class="value" id="usage-ring-value" cx="18" cy="18" r="14.5" pathLength="100" stroke-dasharray="0 100" />
+            </svg>
+            <span class="usage-number" id="usage-number"></span>
+          </button>
           <button type="button" class="square-button" id="open-settings" title="Ajustes" aria-label="Ajustes">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></svg>
           </button>
+          <div class="usage-popover" id="usage-popover" role="dialog" aria-label="Uso del plan" hidden>
+            <div class="usage-head">
+              <h2>Uso del plan</h2>
+              <button type="button" class="round-button small-round" id="usage-refresh" title="Actualizar" aria-label="Actualizar el uso">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12a7 7 0 1 1-2.05-4.95M19 4.5V8h-3.5" /></svg>
+              </button>
+            </div>
+            <div id="usage-list"></div>
+            <p class="usage-foot" id="usage-foot"></p>
+          </div>
         </footer>
       </aside>
 
@@ -101,19 +113,11 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
             </button>
             <div class="header-center">
-              <button type="button" class="title-pill" id="agent-menu-button" aria-haspopup="menu" aria-expanded="false" title="Opciones del agente">
+              <button type="button" class="title-pill" id="details-button" aria-haspopup="dialog" aria-controls="details-dialog" title="Ficha del agente">
                 <span class="pill-avatar" id="chat-avatar" aria-hidden="true"></span>
                 <span class="pill-name" id="chat-name"></span>
                 <span class="pill-state" id="chat-state" hidden></span>
               </button>
-              <div class="menu" id="agent-menu" role="menu" hidden>
-                <p class="menu-meta" id="chat-meta"></p>
-                <button type="button" role="menuitem" data-action="edit">Editar agente</button>
-                <button type="button" role="menuitem" data-action="routines">Rutinas de este agente</button>
-                <button type="button" role="menuitem" data-action="pause">Pausar la cola</button>
-                <button type="button" role="menuitem" data-action="reset">Empezar de cero</button>
-                <button type="button" role="menuitem" data-action="delete" class="danger">Eliminar agente</button>
-              </div>
             </div>
             <span class="header-spacer mobile-only" aria-hidden="true"></span>
           </header>
@@ -177,7 +181,7 @@
               <input name="name" maxlength="60" required placeholder="Ej.: Director de Programación" />
             </label>
             <label class="field" id="project-field">
-              <span>Proyecto</span>
+              <span>Sección</span>
               <input name="project" maxlength="60" list="project-options" placeholder="Ej.: Creación de Juegos" autocomplete="off" />
             </label>
           </div>
@@ -354,6 +358,155 @@
         </footer>
       </form>
     </dialog>
+
+    <dialog class="dialog dialog-create" id="create-dialog" aria-labelledby="create-title">
+      <form id="create-form" method="dialog" novalidate>
+        <div class="create-body">
+          <h2 class="create-title" id="create-title">Crear nuevo agente</h2>
+          <div class="create-preview" id="create-preview" aria-hidden="true"></div>
+          <input class="create-name" id="create-name" name="name" maxlength="60" placeholder="Ponle nombre a tu agente" aria-label="Nombre del agente" autocomplete="off" />
+          <div class="shape-grid" id="shape-grid" role="radiogroup" aria-label="Figura"></div>
+          <div class="color-row" id="color-row" role="radiogroup" aria-label="Color"></div>
+          <p class="form-error" id="create-error" role="alert"></p>
+        </div>
+        <footer class="dialog-footer">
+          <button type="button" class="button ghost" id="create-cancel">Cancelar</button>
+          <button type="submit" class="button primary" id="create-save">Crear</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog class="dialog dialog-small" id="prompt-dialog" aria-labelledby="prompt-title">
+      <form id="prompt-form" method="dialog" novalidate>
+        <div class="dialog-body">
+          <h2 id="prompt-title"></h2>
+          <label class="field prompt-field">
+            <span id="prompt-label"></span>
+            <input id="prompt-input" maxlength="60" autocomplete="off" />
+          </label>
+          <p class="form-error" id="prompt-error" role="alert"></p>
+        </div>
+        <footer class="dialog-footer">
+          <button type="button" class="button ghost" id="prompt-cancel">Cancelar</button>
+          <button type="submit" class="button primary" id="prompt-ok">Guardar</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog class="dialog details" id="details-dialog" aria-labelledby="details-name">
+      <div class="details-panel">
+        <header class="details-header">
+          <button type="button" class="details-avatar" id="details-avatar" title="Cambiar figura y color" aria-label="Cambiar figura y color"></button>
+          <div class="details-titles">
+            <h2 id="details-name"></h2>
+            <p class="details-meta" id="details-meta"></p>
+          </div>
+          <button type="button" class="round-button" id="details-close" aria-label="Cerrar">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>
+          </button>
+        </header>
+        <div class="tabs" role="tablist" aria-label="Ficha del agente">
+          <button type="button" role="tab" class="tab" id="tab-info" data-tab="info" aria-controls="panel-info" aria-selected="true">Detalles</button>
+          <button type="button" role="tab" class="tab" id="tab-library" data-tab="library" aria-controls="panel-library" aria-selected="false" tabindex="-1">Biblioteca</button>
+          <button type="button" role="tab" class="tab" id="tab-computer" data-tab="computer" aria-controls="panel-computer" aria-selected="false" tabindex="-1">Computadora</button>
+        </div>
+        <div class="details-body">
+          <section class="tab-panel" role="tabpanel" id="panel-info" aria-labelledby="tab-info">
+            <div class="details-block">
+              <div class="block-head">
+                <h3>Rutinas</h3>
+                <button type="button" class="button ghost small" id="details-new-routine">Nueva rutina</button>
+              </div>
+              <ul class="mini-routines" id="details-routines"></ul>
+              <p class="muted small" id="details-routines-empty" hidden>
+                Sin rutinas. Crea una aquí o pídesela al agente («cada mañana a las 9, revisa…»).
+              </p>
+            </div>
+            <div class="details-block" id="voice-block">
+              <h3>Chat de voz</h3>
+              <label class="setting">
+                <span>Voz</span>
+                <select id="voice-name"></select>
+              </label>
+              <label class="setting">
+                <span>Velocidad <output id="voice-rate-value" for="voice-rate">1.0×</output></span>
+                <input type="range" id="voice-rate" min="0.5" max="2" step="0.1" value="1" />
+              </label>
+              <label class="setting">
+                <span>Idioma</span>
+                <select id="voice-lang"></select>
+              </label>
+              <div class="setting-row">
+                <span id="voice-auto-label">Leer sus respuestas en voz alta</span>
+                <button type="button" class="switch" role="switch" id="voice-auto" aria-checked="false" aria-labelledby="voice-auto-label"></button>
+              </div>
+              <p class="hint setting-hint" id="voice-hint">
+                Cuando le hablas con el botón morado, te responde en voz alta aunque esto esté apagado. El idioma también se usa para el dictado.
+              </p>
+              <div class="details-actions">
+                <button type="button" class="button ghost small" id="voice-test">Probar voz</button>
+              </div>
+              <p class="muted small" id="voice-unsupported" hidden>Este navegador no puede leer en voz alta. Usa ClosedBot en Edge o Chrome.</p>
+            </div>
+            <div class="details-block">
+              <h3>Agente</h3>
+              <p class="details-role" id="details-role"></p>
+              <div class="details-actions">
+                <button type="button" class="button ghost small" id="details-edit">Instrucciones y modelo</button>
+                <button type="button" class="button ghost small" id="details-pause">Pausar la cola</button>
+                <button type="button" class="button ghost small" id="details-reset">Empezar de cero</button>
+                <button type="button" class="button danger-soft small" id="details-delete">Eliminar agente</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="tab-panel" role="tabpanel" id="panel-library" aria-labelledby="tab-library" hidden>
+            <div class="library-bar">
+              <div class="segmented compact" role="radiogroup" aria-label="Carpeta">
+                <label><input type="radio" name="library-root" value="agent" checked /><span>Su carpeta</span></label>
+                <label><input type="radio" name="library-root" value="shared" /><span>Compartida</span></label>
+              </div>
+              <button type="button" class="button ghost small" id="library-upload">Subir archivo</button>
+              <input type="file" id="library-file" multiple hidden />
+            </div>
+            <nav class="crumbs" id="library-crumbs" aria-label="Ruta"></nav>
+            <ul class="library-list" id="library-list"></ul>
+            <p class="muted small library-note" id="library-note" hidden></p>
+          </section>
+
+          <section class="tab-panel" role="tabpanel" id="panel-computer" aria-labelledby="tab-computer" hidden>
+            <div class="details-block">
+              <h3>Su carpeta de trabajo</h3>
+              <p class="path-box" id="computer-workspace"></p>
+              <div class="details-actions">
+                <button type="button" class="button ghost small" id="open-workspace" data-local-only>Abrir en el explorador</button>
+                <button type="button" class="button ghost small" id="copy-workspace">Copiar ruta</button>
+              </div>
+            </div>
+            <div class="details-block">
+              <h3>Carpeta compartida</h3>
+              <p class="path-box" id="computer-shared"></p>
+              <div class="details-actions">
+                <button type="button" class="button ghost small" id="open-shared" data-local-only>Abrir en el explorador</button>
+                <button type="button" class="button ghost small" id="copy-shared">Copiar ruta</button>
+              </div>
+              <p class="hint setting-hint">La ven todos los agentes: sirve para pasarse archivos.</p>
+            </div>
+            <div class="details-block">
+              <h3>Acceso a este equipo</h3>
+              <p class="details-access" id="computer-access"></p>
+              <div class="details-actions">
+                <button type="button" class="button ghost small" id="computer-change">Cambiar el acceso</button>
+              </div>
+            </div>
+            <p class="muted small" id="computer-remote" hidden>Las carpetas se abren solo desde el equipo donde corre ClosedBot.</p>
+          </section>
+        </div>
+      </div>
+    </dialog>
+
+    <div class="menu context-menu" id="context-menu" role="menu" tabindex="-1" hidden></div>
+    <div class="menu context-menu" id="context-submenu" role="menu" tabindex="-1" hidden></div>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   </body>

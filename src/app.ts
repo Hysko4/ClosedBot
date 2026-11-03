@@ -1,11 +1,13 @@
+import { spawn } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, mkdirSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, resolve, sep } from "node:path";
 import { type Auth, clearSessionCookie, hashToken, type LoginResult, readCookie, SESSION_COOKIE, serializeSessionCookie } from "./auth.js";
 import { isRecord } from "./providers/protocol.js";
-import { type AgentInput, type AgentService, MAX_UPLOAD_BYTES, ServiceError, type ServiceEvent, VERSION } from "./service.js";
+import type { VoiceSettings } from "./db.js";
+import { type AgentInput, type AgentService, type LibraryRoot, MAX_UPLOAD_BYTES, ServiceError, type ServiceEvent, VERSION } from "./service.js";
 
 export interface AppOptions {
   service: AgentService;
@@ -66,6 +68,26 @@ const MIME: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
   ".txt": "text/plain; charset=utf-8",
+};
+
+/** Archivos de la biblioteca que se pueden ver en el navegador; el resto se descarga. Nunca HTML, SVG ni scripts. */
+const LIBRARY_INLINE: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".pdf": "application/pdf",
+  ".txt": "text/plain; charset=utf-8",
+  ".md": "text/plain; charset=utf-8",
+  ".csv": "text/plain; charset=utf-8",
+  ".log": "text/plain; charset=utf-8",
+  ".json": "text/plain; charset=utf-8",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
 };
 
 const CSP = [
@@ -188,6 +210,8 @@ export function createApp(options: AppOptions): App {
     providers: service.providers(),
     routines: service.listRoutines(),
     settings: service.getSettings(),
+    sections: service.listSections(),
+    usage: service.usage(),
     paths: { shared: options.sharedDir, workspaces: options.workspacesDir },
     maxHops: options.maxHops,
     platform: process.platform,
@@ -228,7 +252,8 @@ export function createApp(options: AppOptions): App {
   route("POST", "/api/agents", async (ctx) => {
     const body = await readJson(ctx.req);
     ctx.res.statusCode = 201;
-    return { agent: service.createAgent(agentInput(body, true) as AgentInput) };
+    // greet: lo creó el usuario con el «+», así que el agente se presenta con un primer mensaje.
+    return { agent: service.createAgent(agentInput(body, true) as AgentInput, { greet: body.greet === true }) };
   });
 
   route("GET", "/api/agents/:id", (ctx) => ({ agent: service.getAgent(param(ctx, 0)) }));
@@ -269,6 +294,81 @@ export function createApp(options: AppOptions): App {
   });
 
   route("POST", "/api/agents/:id/read", (ctx) => ({ agent: service.markRead(param(ctx, 0)) }));
+
+  route("POST", "/api/agents/:id/unread", (ctx) => ({ agent: service.markUnread(param(ctx, 0)) }));
+
+  route("POST", "/api/read-all", () => ({ changed: service.markAllRead() }));
+
+  // ---------- biblioteca y carpetas ----------
+
+  route("GET", "/api/agents/:id/library", (ctx) =>
+    service.listLibrary(param(ctx, 0), libraryRoot(ctx.url.searchParams.get("root")), ctx.url.searchParams.get("path") ?? ""),
+  );
+
+  route("GET", "/api/agents/:id/library/file", async (ctx) => {
+    const file = service.libraryFile(param(ctx, 0), libraryRoot(ctx.url.searchParams.get("root")), ctx.url.searchParams.get("path") ?? "");
+    const ext = extname(file.name).toLowerCase();
+    const type = LIBRARY_INLINE[ext];
+    const inline = Boolean(type) && ctx.url.searchParams.get("download") !== "1";
+    const res = ctx.res;
+    res.statusCode = 200;
+    res.setHeader("content-type", inline ? (type as string) : "application/octet-stream");
+    res.setHeader("content-length", String(file.size));
+    res.setHeader("content-disposition", `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(file.name)}`);
+    // Un archivo que escribió un agente nunca corre con los permisos de la app (sin scripts ni acceso a la API).
+    res.setHeader(
+      "content-security-policy",
+      ext === ".pdf" ? "default-src 'none'; object-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'" : "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'",
+    );
+    res.setHeader("cache-control", "private, no-store");
+    await new Promise<void>((resolveStream, reject) => {
+      const stream = createReadStream(file.path);
+      stream.once("error", reject);
+      res.once("close", () => {
+        stream.destroy();
+        resolveStream();
+      });
+      stream.once("end", resolveStream);
+      stream.pipe(res);
+    });
+    return NO_CONTENT;
+  });
+
+  // Abre la carpeta en el explorador de archivos, solo si la petición viene de este mismo equipo.
+  route("POST", "/api/agents/:id/open-folder", async (ctx) => {
+    const body = await readJson(ctx.req);
+    if (!isLocalRequest(ctx.req)) throw new HttpError(403, "La carpeta solo se puede abrir desde el propio equipo donde corre ClosedBot.");
+    const dir = service.libraryBase(param(ctx, 0), libraryRoot(typeof body.root === "string" ? body.root : null));
+    mkdirSync(dir, { recursive: true });
+    openFolder(dir, log);
+    return { opened: true, path: dir };
+  });
+
+  // ---------- secciones de la barra lateral ----------
+
+  route("GET", "/api/sections", () => ({ sections: service.listSections() }));
+
+  route("POST", "/api/sections", async (ctx) => {
+    const body = await readJson(ctx.req);
+    ctx.res.statusCode = 201;
+    return { sections: service.createSection(body.name) };
+  });
+
+  route("POST", "/api/sections/rename", async (ctx) => {
+    const body = await readJson(ctx.req);
+    return { sections: service.renameSection(body.from, body.to) };
+  });
+
+  route("POST", "/api/sections/delete", async (ctx) => {
+    const body = await readJson(ctx.req);
+    return { sections: service.deleteSection(body.name) };
+  });
+
+  // ---------- uso del plan ----------
+
+  route("GET", "/api/usage", () => ({ usage: service.usage() }));
+
+  route("POST", "/api/usage/refresh", async () => ({ usage: await service.refreshUsage(false) }));
 
   route("POST", "/api/agents/:id/decisions/:messageId", async (ctx) => {
     const body = await readJson(ctx.req);
@@ -357,6 +457,8 @@ export function createApp(options: AppOptions): App {
       providers: service.providers(),
       routines: service.listRoutines(),
       settings: service.getSettings(),
+      sections: service.listSections(),
+      usage: service.usage(),
     });
     const listener = (event: ServiceEvent) => send(event);
     service.on("event", listener);
@@ -585,6 +687,20 @@ function agentInput(body: Record<string, unknown>, creating: boolean): Partial<A
     if (access !== "carpeta" && access !== "total") throw new HttpError(400, "El acceso debe ser «carpeta» o «total».");
     input.access = access;
   }
+  if (body.avatar !== undefined) {
+    if (typeof body.avatar !== "number") throw new HttpError(400, "El campo avatar debe ser un número.");
+    input.avatar = body.avatar;
+  }
+  for (const key of ["pinned", "hidden"] as const) {
+    const value = body[key];
+    if (value === undefined) continue;
+    if (typeof value !== "boolean") throw new HttpError(400, `El campo ${key} debe ser true o false.`);
+    input[key] = value;
+  }
+  if (body.voice !== undefined) {
+    if (!isRecord(body.voice)) throw new HttpError(400, "El campo voice debe ser un objeto.");
+    input.voice = body.voice as Partial<VoiceSettings>;
+  }
   if (creating && (input.name === undefined || input.provider === undefined)) {
     throw new HttpError(400, "Indica al menos el nombre y el proveedor.");
   }
@@ -595,6 +711,28 @@ function header(req: IncomingMessage, name: string): string | null {
   const value = req.headers[name];
   if (Array.isArray(value)) return value[0] ?? null;
   return value ?? null;
+}
+
+function libraryRoot(value: string | null): LibraryRoot {
+  if (value === null || value === "" || value === "agent") return "agent";
+  if (value === "shared") return "shared";
+  throw new HttpError(400, "La raíz debe ser «agent» o «shared».");
+}
+
+/** La petición viene de este mismo equipo (no reenviada por `tailscale serve` ni por otro proxy). */
+function isLocalRequest(req: IncomingMessage): boolean {
+  return isLoopback(req.socket.remoteAddress) && !header(req, "x-forwarded-for") && !header(req, "x-forwarded-host");
+}
+
+function openFolder(dir: string, log: (level: "info" | "warn" | "error", message: string) => void): void {
+  const command = process.platform === "win32" ? "explorer.exe" : process.platform === "darwin" ? "open" : "xdg-open";
+  try {
+    const child = spawn(command, [dir], { detached: true, stdio: "ignore" });
+    child.once("error", (error) => log("warn", `No se pudo abrir la carpeta: ${error.message}`));
+    child.unref();
+  } catch (error) {
+    log("warn", `No se pudo abrir la carpeta: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function isLoopback(address: string | undefined): boolean {

@@ -5,6 +5,11 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const LETTERS = "ABCD";
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+const Synth = "speechSynthesis" in window && typeof window.SpeechSynthesisUtterance === "function" ? window.speechSynthesis : null;
+/** Los avatares elegidos a mano se guardan como 10000 + figura × 100 + color (los automáticos son 0, 1, 2…). */
+const AVATAR_CUSTOM_BASE = 10_000;
+const LONG_PRESS_MS = 500;
+const COLLAPSED_KEY = "closedbot:secciones-plegadas";
 
 const state = {
   agents: [],
@@ -24,6 +29,11 @@ const state = {
   queueOpen: false,
   navigatedInApp: false,
   search: "",
+  sections: [], // secciones creadas a mano, en orden
+  usage: [], // uso del plan por proveedor
+  showHidden: false,
+  keepUnread: new Set(), // «Marcar como no leído» en la conversación abierta: sigue así hasta que vuelvas a entrar
+  collapsed: loadCollapsed(),
 };
 
 const elements = new Map(); // id de mensaje -> elemento del DOM (solo el agente abierto)
@@ -186,11 +196,14 @@ async function enterApp() {
   state.version = data.version;
   state.maxHops = data.maxHops;
   state.platform = data.platform ?? "";
+  state.sections = data.sections ?? [];
+  state.usage = data.usage ?? [];
   $("#login").hidden = true;
   $("#app").hidden = false;
   renderIdentity();
   renderSidebar();
   renderProviders();
+  renderUsage();
   connectEvents();
   await route();
 }
@@ -256,11 +269,15 @@ function handleEvent(event) {
       state.providers = event.providers;
       if (event.routines) state.routines = event.routines;
       if (event.settings) state.settings = event.settings;
+      if (event.sections) state.sections = event.sections;
+      if (event.usage) state.usage = event.usage;
       renderIdentity();
       renderPermissions();
       renderSidebar();
       renderProviders();
       renderRoutinesIfOpen();
+      renderUsage();
+      renderDetailsIfOpen();
       // Tras reconectar pudimos perder eventos: recargamos la conversación abierta.
       if (state.currentId) void loadConversation(state.currentId, { keepScroll: true });
       break;
@@ -270,8 +287,18 @@ function handleEvent(event) {
       renderHeader();
       updateWorkingIndicator();
       updateActionButton();
+      renderDetailsIfOpen();
+      noteVoiceTurn();
       if (state.currentId && !findAgent(state.currentId)) void navigate(null);
       else if (state.currentId && findAgent(state.currentId)?.unread) scheduleMarkRead(state.currentId);
+      break;
+    case "sections":
+      state.sections = event.sections;
+      renderSidebar();
+      break;
+    case "usage":
+      state.usage = event.usage;
+      renderUsage();
       break;
     case "providers":
       state.providers = event.providers;
@@ -280,6 +307,7 @@ function handleEvent(event) {
     case "routines":
       state.routines = event.routines;
       renderRoutinesIfOpen();
+      renderDetailsIfOpen();
       break;
     case "settings":
       state.settings = event.settings;
@@ -322,9 +350,13 @@ async function navigate(agentId) {
 async function route() {
   const id = currentRouteId();
   const agent = id ? findAgent(id) : null;
-  closeMenu();
+  closeContextMenu();
   if (!agent) {
-    if (state.currentId) stopDictation({ cancel: true });
+    if (state.currentId) {
+      stopDictation({ cancel: true });
+      stopSpeaking();
+    }
+    closeDialog($("#details-dialog"));
     state.currentId = null;
     elements.clear();
     document.body.classList.remove("show-chat");
@@ -334,7 +366,13 @@ async function route() {
     return;
   }
   const changed = state.currentId !== agent.id;
-  if (changed) stopDictation({ cancel: true });
+  if (changed) {
+    stopDictation({ cancel: true });
+    stopSpeaking();
+    closeDialog($("#details-dialog"));
+    // Volver a entrar a una conversación marcada como no leída la marca como leída.
+    state.keepUnread.delete(agent.id);
+  }
   state.currentId = agent.id;
   document.body.classList.add("show-chat");
   $("#chat-empty").hidden = true;
@@ -360,14 +398,30 @@ function scheduleMarkRead(agentId, delay = 700) {
   clearTimeout(readTimer);
   readTimer = setTimeout(() => {
     const agent = findAgent(agentId);
-    if (!agent?.unread || agentId !== state.currentId || document.hidden) return;
+    if (!agent?.unread || agentId !== state.currentId || document.hidden || state.keepUnread.has(agentId)) return;
     api(`/api/agents/${encodeURIComponent(agentId)}/read`, { method: "POST" }).catch(() => undefined);
   }, delay);
 }
 
 // ---------- avatares ----------
 
-const BLOB_COLORS = ["#8b5cf6", "#e5484d", "#4cbb73", "#ef9f3a", "#6f6f6f", "#3b82f6", "#e0609d", "#22b3a3", "#c9a227", "#a07cf0"];
+const BLOB_COLORS = [
+  "#8b5cf6",
+  "#e5484d",
+  "#4cbb73",
+  "#ef9f3a",
+  "#6f6f6f",
+  "#3b82f6",
+  "#e0609d",
+  "#22b3a3",
+  "#c9a227",
+  "#a07cf0",
+  "#38bdf8",
+  "#84cc16",
+];
+/** Los avatares automáticos de antes solo usaban las 7 primeras figuras y los 10 primeros colores: así no cambian. */
+const LEGACY_SHAPES = 7;
+const LEGACY_COLORS = 10;
 
 const TENT = "M15.6 11.4Q20 3.6 24.4 11.4L34 28.2Q38.2 35 30.6 35H9.4Q1.8 35 6 28.2Z";
 
@@ -401,6 +455,39 @@ const BLOB_SHAPES = [
     body: [["rect", { x: 7, y: 7.5, width: 26, height: 25, rx: 9, transform: "rotate(-16 20 20)" }]],
     eyes: [[17.2, 21.4], [22.4, 19.8]],
     eye: { rx: 1.1, ry: 2.2, rotate: -16 },
+  },
+  { body: [["rect", { x: 11, y: 3.5, width: 18, height: 33, rx: 9 }]], eyes: [[16.7, 14.5], [23.3, 14.5]], eye: { rx: 1.4, ry: 2.6, rotate: 0 } },
+  { body: [["rect", { x: 5, y: 5, width: 30, height: 30, rx: 11 }]], eyes: [[15.6, 19], [24.4, 19]], eye: { rx: 1.7, ry: 3, rotate: 0 } },
+  {
+    body: [["rect", { x: 8.5, y: 8.5, width: 23, height: 23, rx: 6.5, transform: "rotate(45 20 20)" }]],
+    eyes: [[16.9, 20.4], [23.1, 20.4]],
+    eye: { rx: 1.3, ry: 2.4, rotate: 0 },
+  },
+  {
+    body: [["path", { d: "M20 3.5C26.6 11.6 33 18.8 33 25.3A13 13 0 0 1 7 25.3C7 18.8 13.4 11.6 20 3.5Z" }]],
+    eyes: [[16.2, 25.2], [23.8, 25.2]],
+    eye: { rx: 1.5, ry: 2.7, rotate: 0 },
+  },
+  {
+    body: [["path", { d: "M7 18.5a13 13 0 0 1 26 0V34.2l-4.33-2.7-4.34 2.7L20 31.5l-4.33 2.7-4.34-2.7L7 34.2Z" }]],
+    eyes: [[15.8, 18.6], [24.2, 18.6]],
+    eye: { rx: 1.7, ry: 3, rotate: 0 },
+  },
+  {
+    body: [
+      ["circle", { cx: 20, cy: 10.8, r: 8.2 }],
+      ["circle", { cx: 29.2, cy: 20, r: 8.2 }],
+      ["circle", { cx: 20, cy: 29.2, r: 8.2 }],
+      ["circle", { cx: 10.8, cy: 20, r: 8.2 }],
+      ["circle", { cx: 20, cy: 20, r: 9 }],
+    ],
+    eyes: [[16.9, 20], [23.1, 20]],
+    eye: { rx: 1.4, ry: 2.6, rotate: 0 },
+  },
+  {
+    body: [["path", { d: "M4.5 30.2a15.5 15.5 0 0 1 31 0q0 3.3-3.3 3.3H7.8q-3.3 0-3.3-3.3Z" }]],
+    eyes: [[16, 25], [24, 25]],
+    eye: { rx: 1.5, ry: 2.7, rotate: 0 },
   },
 ];
 
@@ -457,12 +544,25 @@ const AVATAR_SEQUENCE = [
   [6, "#4cbb73"],
 ];
 
-/** Avatar estable de un agente: sale del número que le dio el servidor al crearlo (o de su id). Claude Bot usa la mascota. */
+/** Figura y color de un agente: los que eligió el usuario o, si no, los automáticos (estables desde que se creó). */
+function avatarParts(agent) {
+  if (Number.isInteger(agent.avatar) && agent.avatar >= AVATAR_CUSTOM_BASE) {
+    const rest = agent.avatar - AVATAR_CUSTOM_BASE;
+    return [Math.floor(rest / 100) % BLOB_SHAPES.length, BLOB_COLORS[(rest % 100) % BLOB_COLORS.length]];
+  }
+  const index = Number.isInteger(agent.avatar) ? agent.avatar : hashString(agent.id ?? String(agent));
+  return AVATAR_SEQUENCE[index] ?? [index % LEGACY_SHAPES, BLOB_COLORS[Math.floor(index / LEGACY_SHAPES) % LEGACY_COLORS]];
+}
+
+/** Número que guarda el servidor para una figura y un color elegidos a mano. */
+function customAvatar(shape, color) {
+  return AVATAR_CUSTOM_BASE + shape * 100 + color;
+}
+
+/** Avatar estable de un agente. Claude Bot usa la mascota. */
 function blobAvatar(agent) {
   if (agent?.main) return drawBlob(MASCOT, "#f2f2f2");
-  const index = Number.isInteger(agent.avatar) ? agent.avatar : hashString(agent.id ?? String(agent));
-  const [shape, color] =
-    AVATAR_SEQUENCE[index] ?? [index % BLOB_SHAPES.length, BLOB_COLORS[Math.floor(index / BLOB_SHAPES.length) % BLOB_COLORS.length]];
+  const [shape, color] = avatarParts(agent);
   return drawBlob(BLOB_SHAPES[shape], color);
 }
 
@@ -485,10 +585,35 @@ const ICONS = {
   close: ["M7 7l10 10M17 7L7 17"],
   team: ["M9.5 4.8a3.2 3.2 0 1 0 0 6.4a3.2 3.2 0 1 0 0-6.4", "M3.8 19c.6-3.2 3-5 5.7-5s5.1 1.8 5.7 5", "M18.5 8v6M15.5 11h6"],
   pencil: ["M5 19l1-4.2 9.6-9.6a2 2 0 0 1 2.8 0l.4.4a2 2 0 0 1 0 2.8L9.2 18z", "M13.8 7l3.2 3.2"],
+  pin: ["M9 4.5h6l-1 5 3 3H7l3-3z", "M12 12.5V20"],
+  folder: ["M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"],
+  move: ["M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z", "M9.5 13h6M13 10.5l2.5 2.5-2.5 2.5"],
+  folderPlus: ["M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z", "M12 10.5v5M9.5 13h5"],
+  unread: ["M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8"],
+  check: ["M5 12.5l4.5 4.5L19 7.5"],
+  allRead: ["M2.5 12.5l4 4 9-9", "M10.5 16.5l1 1 9-9"],
+  eye: ["M2.5 12C3.5 10.5 7 6 12 6s8.5 4.5 9.5 6c-1 1.5-4.5 6-9.5 6s-8.5-4.5-9.5-6z", "M12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6"],
+  eyeOff: [
+    "M3.5 3.5l17 17",
+    "M10.6 6.1A9.4 9.4 0 0 1 12 6c5 0 8.5 4.5 9.5 6-.5.8-1.6 2.3-3.1 3.6",
+    "M6.4 7.6C4.6 8.9 3.2 10.7 2.5 12c1 1.5 4.5 6 9.5 6 1.6 0 3-.4 4.3-1.1",
+    "M9.9 9.9a3 3 0 0 0 4.2 4.2",
+  ],
+  trash: ["M4.5 7h15", "M9.5 7V4.8h5V7", "M6.5 7l1 12.5h9l1-12.5", "M10 11v5M14 11v5"],
+  plus: ["M12 5v14M5 12h14"],
+  section: ["M4 6.5h16M4 12h9M4 17.5h7", "M17.5 14.5v6M14.5 17.5h6"],
+  chevron: ["M10 6l6 6-6 6"],
+  speaker: ["M4.5 9.5h3l4-3.5v12l-4-3.5h-3z", "M15.5 9a4 4 0 0 1 0 6", "M18 6.5a7.5 7.5 0 0 1 0 11"],
+  stop: ["M8 8h8v8H8z"],
+  download: ["M12 4.5v10", "M7.5 10.5l4.5 4.5 4.5-4.5", "M5 19.5h14"],
+  upload: ["M12 15V4.5", "M7.5 9L12 4.5 16.5 9", "M5 19.5h14"],
+  external: ["M14 4.5h5.5V10", "M19.5 4.5L11 13", "M18 14v4.5a1 1 0 0 1-1 1H5.5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1H10"],
+  more: ["M6 12h.01M12 12h.01M18 12h.01"],
+  details: ["M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16", "M12 11v5", "M12 8h.01"],
 };
 
-function icon(name) {
-  const svg = svgElement("svg", { viewBox: "0 0 24 24", "aria-hidden": "true", focusable: "false" });
+function icon(name, className = "") {
+  const svg = svgElement("svg", { viewBox: "0 0 24 24", "aria-hidden": "true", focusable: "false", class: className || null });
   for (const d of ICONS[name] ?? []) svg.append(svgElement("path", { d }));
   return svg;
 }
@@ -551,9 +676,11 @@ function agentName(id) {
   return findAgent(id)?.name ?? "un agente eliminado";
 }
 
-/** El agente abierto en una ventana visible no cuenta como no leído. */
+/** El agente abierto en una ventana visible no cuenta como no leído, salvo que lo marcaras así a propósito. */
 function isUnread(agent) {
-  return Boolean(agent.unread) && !(agent.id === state.currentId && !document.hidden);
+  if (!agent.unread) return false;
+  if (state.keepUnread.has(agent.id)) return true;
+  return !(agent.id === state.currentId && !document.hidden);
 }
 
 function fold(text) {
@@ -563,47 +690,144 @@ function fold(text) {
     .toLowerCase();
 }
 
+function loadCollapsed() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "[]");
+    return new Set(Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsed() {
+  try {
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...state.collapsed]));
+  } catch {
+    // Sin almacenamiento local: se pliega solo mientras dure la sesión.
+  }
+}
+
+/** Todas las secciones: primero las creadas a mano (en su orden) y después las que salen de los agentes. */
+function allSections() {
+  const seen = new Set();
+  const result = [];
+  const add = (name) => {
+    const key = name.toLowerCase();
+    if (!name || seen.has(key)) return;
+    seen.add(key);
+    result.push(name);
+  };
+  for (const name of state.sections) add(name);
+  const derived = [...new Set(state.agents.filter((agent) => !agent.main && agent.project).map((agent) => agent.project))];
+  derived.sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
+  for (const name of derived) add(name);
+  return result;
+}
+
+function sectionKey(name) {
+  return `s:${name.toLowerCase()}`;
+}
+
 function renderSidebar() {
   const container = $("#agent-groups");
+  const scroll = container.scrollTop;
   container.replaceChildren();
   renderBotCard();
   // Claude Bot va en la tarjeta de arriba; la lista muestra los equipos.
   const team = state.agents.filter((agent) => !agent.main);
-  const empty = team.length === 0;
-  $("#sidebar-empty").hidden = !empty;
-  $("#first-team").hidden = !mainAgent();
-  $("#first-agent").className = mainAgent() ? "button ghost" : "button primary";
   const query = fold(state.search.trim());
-  const visible = team.filter((agent) => !query || fold(`${agent.name} ${agent.role} ${agent.project}`).includes(query));
-  const groups = new Map();
-  for (const agent of visible) {
-    const key = agent.project || "";
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(agent);
+  if (query) {
+    // Buscando: todos los que coinciden, también los ocultos.
+    const found = team.filter((agent) => fold(`${agent.name} ${agent.role} ${agent.project}`).includes(query));
+    if (found.length) container.append(sidebarGroup({ title: "Resultados", agents: found }));
+    else container.append(sidebarNote("Ningún agente coincide con la búsqueda."));
+    updateTitle();
+    return;
   }
-  const onlyUngrouped = groups.size === 1 && groups.has("");
-  for (const [project, agents] of groups) {
-    const section = document.createElement("section");
-    const title = document.createElement("h2");
-    title.className = "group-title";
-    title.textContent = project || (onlyUngrouped ? "Tu equipo" : "General");
+  const shown = team.filter((agent) => !agent.hidden);
+  const hidden = team.filter((agent) => agent.hidden);
+  const pinned = shown.filter((agent) => agent.pinned);
+  const rest = shown.filter((agent) => !agent.pinned);
+  const explicit = new Set(state.sections.map((name) => name.toLowerCase()));
+  const sections = allSections();
+  if (pinned.length) container.append(sidebarGroup({ key: "\0pinned", title: "Fijados", agents: pinned }));
+  for (const name of sections) {
+    const lower = name.toLowerCase();
+    const agents = rest.filter((agent) => agent.project.toLowerCase() === lower);
+    // Una sección que sale solo de agentes fijados u ocultos no se repite vacía.
+    if (!agents.length && !explicit.has(lower)) continue;
+    const anyAgent = team.some((agent) => agent.project.toLowerCase() === lower);
+    container.append(sidebarGroup({ key: sectionKey(name), title: name, agents, section: name, empty: anyAgent ? "" : "Sin agentes todavía" }));
+  }
+  const loose = rest.filter((agent) => !agent.project);
+  if (loose.length) {
+    const alone = !pinned.length && !container.childElementCount;
+    container.append(sidebarGroup({ key: "\0none", title: alone ? "Tu equipo" : "Sin asignar", agents: loose }));
+  }
+  if (hidden.length) container.append(sidebarGroup({ key: "\0hidden", title: `Ocultos (${hidden.length})`, agents: hidden }));
+  container.scrollTop = scroll;
+  updateTitle();
+}
+
+function isCollapsed(key) {
+  return key === "\0hidden" ? !state.showHidden : state.collapsed.has(key);
+}
+
+function toggleGroup(key) {
+  if (key === "\0hidden") state.showHidden = !state.showHidden;
+  else if (state.collapsed.has(key)) state.collapsed.delete(key);
+  else state.collapsed.add(key);
+  saveCollapsed();
+  renderSidebar();
+}
+
+/** Un grupo de la barra lateral (Fijados, una sección, Sin asignar, Ocultos). Con `key` se puede plegar. */
+function sidebarGroup({ key = null, title, agents, section = null, empty = "" }) {
+  const group = document.createElement("section");
+  group.className = "group";
+  const heading = document.createElement("h2");
+  heading.className = "group-title";
+  const collapsed = key ? isCollapsed(key) : false;
+  if (key) {
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "group-head";
+    head.setAttribute("aria-expanded", String(!collapsed));
+    if (section) head.dataset.section = section;
+    const label = document.createElement("span");
+    label.className = "group-label";
+    label.textContent = title;
+    head.append(label, icon("chevron", "group-chevron"));
+    head.addEventListener("click", () => toggleGroup(key));
+    heading.append(head);
+  } else {
+    heading.textContent = title;
+  }
+  group.append(heading);
+  if (collapsed) return group;
+  if (agents.length) {
     const list = document.createElement("ul");
     list.className = "agent-list";
     for (const agent of agents) list.append(agentRow(agent));
-    section.append(title, list);
-    container.append(section);
+    group.append(list);
+  } else if (empty) {
+    group.append(sidebarNote(empty, "group-empty"));
   }
-  if (query && !visible.length && !empty) {
-    const none = document.createElement("p");
-    none.className = "sidebar-empty";
-    none.textContent = "Ningún agente coincide con la búsqueda.";
-    container.append(none);
-  }
-  updateTitle();
+  return group;
+}
+
+function sidebarNote(text, className = "sidebar-note") {
+  const note = document.createElement("p");
+  note.className = className;
+  note.textContent = text;
+  return note;
 }
 
 function agentRow(agent) {
   const item = document.createElement("li");
+  item.className = "agent-item";
+  item.dataset.id = agent.id;
+  if (agent.hidden) item.dataset.hidden = "true";
   const button = document.createElement("button");
   button.type = "button";
   button.className = "agent-row";
@@ -633,6 +857,7 @@ function agentRow(agent) {
   if (isUnread(agent)) {
     mark.dataset.kind = "unread";
     mark.title = "Mensajes nuevos";
+    button.classList.add("unread");
   } else if (agent.state === "working") {
     mark.dataset.kind = "working";
     mark.title = "Trabajando";
@@ -642,7 +867,20 @@ function agentRow(agent) {
   }
   button.append(blobAvatar(agent), texts, mark);
   button.title = [agent.name, agent.role].filter(Boolean).join(" · ");
-  item.append(button);
+
+  // «⋯»: el mismo menú del clic derecho (en el celular se abre manteniendo presionado).
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "row-more";
+  more.title = "Más opciones";
+  more.setAttribute("aria-label", `Opciones de ${agent.name}`);
+  more.setAttribute("aria-haspopup", "menu");
+  more.append(icon("more", "dots"));
+  more.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openContextMenu(agentMenuItems(agent.id), { anchor: more, source: more });
+  });
+  item.append(button, more);
   return item;
 }
 
@@ -679,9 +917,10 @@ function renderHeader() {
   const agent = findAgent(state.currentId);
   if (!agent) return;
   const avatar = $("#chat-avatar");
-  if (avatar.dataset.agent !== agent.id) {
+  const avatarKey = `${agent.id}:${agent.avatar}`;
+  if (avatar.dataset.key !== avatarKey) {
     avatar.replaceChildren(blobAvatar(agent));
-    avatar.dataset.agent = agent.id;
+    avatar.dataset.key = avatarKey;
   }
   $("#chat-name").textContent = agent.name;
   const label =
@@ -689,16 +928,7 @@ function renderHeader() {
   const stateNode = $("#chat-state");
   stateNode.textContent = label;
   stateNode.hidden = !label;
-  const parts = [agent.role || "Asistente general", providerLabel(agent.provider)];
-  if (agent.model) parts.push(agent.model);
-  if (agent.access === "total" || state.settings.fullAccess) parts.push("acceso total");
-  if (agent.project) parts.push(agent.project);
-  $("#chat-meta").textContent = parts.filter(Boolean).join(" · ");
-  const pause = document.querySelector('#agent-menu [data-action="pause"]');
-  pause.textContent = agent.paused ? "Reanudar la cola" : "Pausar la cola";
-  // Claude Bot no se elimina: se puede empezar de cero.
-  document.querySelector('#agent-menu [data-action="delete"]').hidden = Boolean(agent.main);
-  document.querySelector('#agent-menu [data-action="edit"]').textContent = agent.main ? `Editar a ${agent.name}` : "Editar agente";
+  $("#details-button").title = `Ficha de ${agent.name}: rutinas, voz, archivos y carpeta`;
   updatePlaceholder();
 }
 
@@ -813,12 +1043,16 @@ function renderAllMessages() {
 
 function upsertMessage(agentId, message) {
   const list = state.messages.get(agentId);
+  let finished = false;
   if (list) {
     const index = list.findIndex((item) => item.id === message.id);
+    const before = index >= 0 ? list[index].status : null;
     if (index >= 0) list[index] = { ...list[index], ...message };
     else list.push(message);
+    finished = message.role === "assistant" && message.status === "completed" && before !== "completed";
   }
   if (agentId !== state.currentId || !list) return;
+  if (finished) maybeAutoRead(agentId, list.find((item) => item.id === message.id) ?? message);
   const scroller = $("#messages");
   const atBottom = isNearBottom(scroller);
   const existing = elements.get(message.id);
@@ -888,6 +1122,11 @@ function buildMessage(message) {
   if (message.role === "activity") {
     node.className = "msg msg-activity";
     const kind = message.payload?.kind;
+    // El pedido del saludo inicial no se muestra: solo se ve la respuesta del agente.
+    if (kind === "greeting") {
+      node.hidden = true;
+      return node;
+    }
     if (kind === "agent-created" || kind === "agent-updated") {
       const target = findAgent(message.payload.agentId);
       const created = kind === "agent-created";
@@ -987,7 +1226,30 @@ function buildMessage(message) {
   }
   if (message.role !== "user") bubble.classList.add("md");
   node.append(bubble, meta);
+  if (message.role === "assistant" && message.status === "completed" && Synth && message.text.trim()) node.append(messageTools(message));
   return node;
+}
+
+/** Botones bajo una respuesta terminada: por ahora, leerla en voz alta. */
+function messageTools(message) {
+  const tools = document.createElement("div");
+  tools.className = "msg-tools";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "speak-button";
+  button.dataset.id = message.id;
+  setSpeakButton(button, speech.current?.messageId === message.id);
+  button.addEventListener("click", () => toggleSpeakMessage(message.agentId, message.id));
+  tools.append(button);
+  return tools;
+}
+
+function setSpeakButton(button, active) {
+  button.setAttribute("aria-pressed", String(active));
+  const label = active ? "Dejar de leer" : "Leer en voz alta";
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.replaceChildren(icon(active ? "stop" : "speaker"));
 }
 
 function buildDecision(message) {
@@ -1411,6 +1673,8 @@ async function sendMessage() {
   }
   if (!text) return;
   stopDictation({ cancel: true });
+  stopSpeaking();
+  state.keepUnread.delete(agentId);
   const button = $("#send");
   button.disabled = true;
   try {
@@ -1507,6 +1771,12 @@ function speechLanguage() {
   return language.toLowerCase().startsWith("es") ? language : "es-ES";
 }
 
+/** Idioma del dictado: el elegido en el chat de voz del agente o, en automático, el español del navegador. */
+function dictationLanguage() {
+  const lang = findAgent(state.currentId)?.voice?.lang;
+  return lang && lang !== "auto" ? lang : speechLanguage();
+}
+
 function toggleDictation(mode) {
   if (dictation) {
     stopDictation();
@@ -1518,9 +1788,12 @@ function toggleDictation(mode) {
 /** mode «dictate» escribe en el cuadro; «voice» además envía el mensaje al terminar de hablar. */
 function startDictation(mode) {
   if (!Recognition || !state.currentId) return;
+  // Si el agente está leyendo en voz alta, se calla: el micrófono no debe escucharlo.
+  stopSpeaking();
+  primeSpeech();
   const input = $("#composer-input");
   const rec = new Recognition();
-  rec.lang = speechLanguage();
+  rec.lang = dictationLanguage();
   rec.interimResults = true;
   rec.continuous = mode === "dictate";
   rec.maxAlternatives = 1;
@@ -1545,7 +1818,7 @@ function startDictation(mode) {
       "service-not-allowed": "El navegador no permite el dictado aquí.",
       "audio-capture": "No se encontró un micrófono.",
       network: "El dictado necesita conexión a internet (lo procesa el servicio de voz del navegador).",
-      "language-not-supported": "El dictado no está disponible en español en este navegador.",
+      "language-not-supported": "El dictado no está disponible en ese idioma en este navegador.",
     };
     if (event.error === "no-speech" || event.error === "aborted") return;
     showToast(messages[event.error] ?? `El dictado falló (${event.error}).`, "error");
@@ -1556,7 +1829,11 @@ function startDictation(mode) {
     recognition = null;
     updateDictationUi();
     saveDraft();
-    if (session.mode === "voice" && !session.cancelled && state.currentId === session.agentId && input.value.trim()) void sendMessage();
+    if (session.mode === "voice" && !session.cancelled && state.currentId === session.agentId && input.value.trim()) {
+      // Le hablaste: la respuesta se lee en voz alta aunque «Leer sus respuestas» esté apagado.
+      voiceReply = { agentId: session.agentId, startedAt: Date.now(), sawWorking: false, until: null };
+      void sendMessage();
+    }
   };
   try {
     rec.start();
@@ -1589,21 +1866,9 @@ function updateDictationUi() {
 
 // ---------- acciones del agente ----------
 
-function toggleMenu() {
-  const menu = $("#agent-menu");
-  const open = menu.hidden;
-  menu.hidden = !open;
-  $("#agent-menu-button").setAttribute("aria-expanded", String(open));
-}
-
-function closeMenu() {
-  $("#agent-menu").hidden = true;
-  $("#agent-menu-button").setAttribute("aria-expanded", "false");
-}
-
-async function agentAction(action) {
-  closeMenu();
-  const agent = findAgent(state.currentId);
+async function agentAction(action, agentId = state.currentId) {
+  closeContextMenu();
+  const agent = findAgent(agentId);
   if (!agent) return;
   const path = `/api/agents/${encodeURIComponent(agent.id)}`;
   try {
@@ -1624,10 +1889,14 @@ async function agentAction(action) {
       await api(`${path}/reset`, { method: "POST" });
       state.messages.set(agent.id, []);
       state.hasMore.set(agent.id, false);
-      renderAllMessages();
-      renderQueue();
-      updatePlaceholder();
+      if (agent.id === state.currentId) {
+        renderAllMessages();
+        renderQueue();
+        updatePlaceholder();
+      }
     } else if (action === "delete") {
+      // Claude Bot no se elimina: se puede empezar de cero.
+      if (agent.main) return;
       const ok = await confirmAction(
         `¿Eliminar a ${agent.name}?`,
         "Se borran el agente, su historial, su cola y sus rutinas. Su carpeta de trabajo queda en el equipo por si la necesitas.",
@@ -1637,11 +1906,501 @@ async function agentAction(action) {
       await api(path, { method: "DELETE" });
       state.messages.delete(agent.id);
       state.attachments.delete(agent.id);
-      await navigate(null);
+      state.keepUnread.delete(agent.id);
+      state.agents = state.agents.filter((item) => item.id !== agent.id);
+      if (details.agentId === agent.id) closeDialog($("#details-dialog"));
+      if (agent.id === state.currentId) await navigate(null);
+      else renderSidebar();
     }
   } catch (error) {
     showToast(error.message, "error");
   }
+}
+
+/** Guarda un cambio del agente y actualiza la interfaz sin esperar al aviso del servidor. */
+async function patchAgent(agentId, body) {
+  try {
+    const result = await api(`/api/agents/${encodeURIComponent(agentId)}`, { method: "PATCH", body });
+    replaceAgent(result.agent);
+    return result.agent;
+  } catch (error) {
+    showToast(error.message, "error");
+    return null;
+  }
+}
+
+function replaceAgent(agent) {
+  const index = state.agents.findIndex((item) => item.id === agent.id);
+  if (index >= 0) state.agents[index] = agent;
+  else state.agents.push(agent);
+  renderSidebar();
+  renderHeader();
+  renderDetailsIfOpen();
+}
+
+async function renameAgent(agentId) {
+  const agent = findAgent(agentId);
+  if (!agent) return;
+  await promptText({
+    title: "Cambiar nombre",
+    label: "Nombre",
+    value: agent.name,
+    okLabel: "Guardar",
+    submit: async (name) => {
+      if (name === agent.name) return;
+      const result = await api(`/api/agents/${encodeURIComponent(agentId)}`, { method: "PATCH", body: { name } });
+      replaceAgent(result.agent);
+    },
+  });
+}
+
+async function toggleHidden(agentId) {
+  const agent = findAgent(agentId);
+  if (!agent) return;
+  const updated = await patchAgent(agentId, { hidden: !agent.hidden });
+  if (updated?.hidden) showToast(`Ocultaste a ${updated.name}: está al final de la lista, en «Ocultos», y en la búsqueda.`);
+}
+
+async function setUnread(agentId, unread) {
+  // Antes de pedirlo: el aviso del servidor puede llegar antes que la respuesta.
+  if (unread) state.keepUnread.add(agentId);
+  else state.keepUnread.delete(agentId);
+  try {
+    const result = await api(`/api/agents/${encodeURIComponent(agentId)}/${unread ? "unread" : "read"}`, { method: "POST" });
+    replaceAgent(result.agent);
+  } catch (error) {
+    if (unread) state.keepUnread.delete(agentId);
+    showToast(error.message, "error");
+  }
+}
+
+async function markAllRead() {
+  state.keepUnread.clear();
+  try {
+    await api("/api/read-all", { method: "POST" });
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function moveAgent(agentId, project) {
+  await patchAgent(agentId, { project });
+}
+
+/** Crea la sección si no existe (si ya existe, se usa esa). */
+async function ensureSection(name) {
+  try {
+    const result = await api("/api/sections", { method: "POST", body: { name } });
+    state.sections = result.sections;
+  } catch (error) {
+    if (error.status !== 409) throw error;
+  }
+}
+
+async function createSectionFor(agentId) {
+  await promptText({
+    title: "Nueva sección",
+    label: "Nombre de la sección",
+    placeholder: "Ej.: Creación de Juegos",
+    okLabel: "Crear y mover",
+    submit: async (name) => {
+      await ensureSection(name);
+      const result = await api(`/api/agents/${encodeURIComponent(agentId)}`, { method: "PATCH", body: { project: name } });
+      replaceAgent(result.agent);
+    },
+  });
+}
+
+async function newSection() {
+  await promptText({
+    title: "Nueva sección",
+    label: "Nombre de la sección",
+    placeholder: "Ej.: Creación de Juegos",
+    okLabel: "Crear",
+    submit: async (name) => {
+      const result = await api("/api/sections", { method: "POST", body: { name } });
+      state.sections = result.sections;
+      renderSidebar();
+    },
+  });
+}
+
+async function renameSection(name) {
+  await promptText({
+    title: "Cambiar nombre de la sección",
+    label: "Nombre",
+    value: name,
+    okLabel: "Guardar",
+    submit: async (to) => {
+      if (to === name) return;
+      const result = await api("/api/sections/rename", { method: "POST", body: { from: name, to } });
+      state.sections = result.sections;
+      if (state.collapsed.delete(sectionKey(name))) {
+        state.collapsed.add(sectionKey(to));
+        saveCollapsed();
+      }
+      renderSidebar();
+    },
+  });
+}
+
+async function deleteSection(name) {
+  const count = state.agents.filter((agent) => !agent.main && agent.project.toLowerCase() === name.toLowerCase()).length;
+  const text = count
+    ? `${count === 1 ? "Su agente pasa" : `Sus ${count} agentes pasan`} a «Sin asignar». No se borra ningún agente.`
+    : "No tiene agentes, así que no se borra nada más.";
+  if (!(await confirmAction(`¿Eliminar la sección «${name}»?`, text, "Eliminar sección"))) return;
+  try {
+    const result = await api("/api/sections/delete", { method: "POST", body: { name } });
+    state.sections = result.sections;
+    if (state.collapsed.delete(sectionKey(name))) saveCollapsed();
+    renderSidebar();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+// ---------- menús contextuales (clic derecho, «⋯» o mantener presionado) ----------
+
+let menuState = null; // { source, openedAt, submenuFor }
+
+function agentMenuItems(agentId) {
+  const agent = findAgent(agentId);
+  if (!agent) return [];
+  const readItem = agent.unread
+    ? { label: "Marcar como leído", icon: "check", run: () => setUnread(agent.id, false) }
+    : { label: "Marcar como no leído", icon: "unread", run: () => setUnread(agent.id, true) };
+  if (agent.main) {
+    // Claude Bot va fijo arriba: no se mueve, no se oculta ni se elimina.
+    return [
+      { label: "Ver su ficha", icon: "details", run: () => openDetails(agent.id) },
+      readItem,
+      { label: "Cambiar nombre", icon: "pencil", run: () => renameAgent(agent.id) },
+    ];
+  }
+  return [
+    { label: agent.pinned ? "Desfijar" : "Fijar", icon: "pin", run: () => patchAgent(agent.id, { pinned: !agent.pinned }) },
+    { label: "Mover a", icon: "move", submenu: () => moveMenuItems(agent.id) },
+    readItem,
+    { label: "Cambiar nombre", icon: "pencil", run: () => renameAgent(agent.id) },
+    agent.hidden
+      ? { label: "Mostrar en la barra lateral", icon: "eye", run: () => toggleHidden(agent.id) }
+      : { label: "Ocultar de la barra lateral", icon: "eyeOff", run: () => toggleHidden(agent.id) },
+    "-",
+    { label: "Eliminar", icon: "trash", danger: true, run: () => agentAction("delete", agent.id) },
+  ];
+}
+
+function moveMenuItems(agentId) {
+  const agent = findAgent(agentId);
+  if (!agent) return [];
+  const current = agent.project.toLowerCase();
+  const items = allSections().map((name) => ({
+    label: name,
+    checked: name.toLowerCase() === current,
+    run: () => moveAgent(agentId, name),
+  }));
+  items.push({ label: "Sin asignar", checked: !agent.project, run: () => moveAgent(agentId, "") });
+  items.push("-", { label: "Crear sección", icon: "folderPlus", run: () => createSectionFor(agentId) });
+  return items;
+}
+
+function sidebarMenuItems() {
+  return [
+    { label: "Nuevo agente", icon: "plus", run: () => openCreateDialog() },
+    { label: "Nueva sección", icon: "section", run: () => newSection() },
+    "-",
+    { label: "Marcar todo como leído", icon: "allRead", disabled: !state.agents.some((agent) => agent.unread), run: () => markAllRead() },
+  ];
+}
+
+function sectionMenuItems(name) {
+  return [
+    { label: "Nuevo agente aquí", icon: "plus", run: () => openCreateDialog({ project: name }) },
+    { label: "Cambiar nombre de la sección", icon: "pencil", run: () => renameSection(name) },
+    "-",
+    { label: "Eliminar sección", icon: "trash", danger: true, run: () => deleteSection(name) },
+  ];
+}
+
+/** Qué menú corresponde a lo que se tocó en la barra lateral (o nada, si es un campo o un botón de arriba). */
+function sidebarMenuFor(target) {
+  if (!(target instanceof Element)) return null;
+  if (target.closest("input, textarea, select, .sidebar-footer, .search-box, .sidebar-tools")) return null;
+  const row = target.closest(".agent-item");
+  if (row) return findAgent(row.dataset.id) ? { items: agentMenuItems(row.dataset.id), anchor: row.querySelector(".row-more") ?? row } : null;
+  if (target.closest("#bot-card")) {
+    const main = mainAgent();
+    return main ? { items: agentMenuItems(main.id), anchor: $("#bot-card") } : null;
+  }
+  const head = target.closest(".group-head[data-section]");
+  if (head) return { items: sectionMenuItems(head.dataset.section), anchor: head };
+  return { items: sidebarMenuItems(), anchor: null };
+}
+
+function openContextMenu(items, { x = 0, y = 0, anchor = null, source = null } = {}) {
+  if (!items.length) return;
+  closeContextMenu();
+  const menu = $("#context-menu");
+  fillMenu(menu, items, false);
+  menu.hidden = false;
+  placeMenu(menu, anchor?.getBoundingClientRect() ?? null, x, y);
+  menuState = { source: source ?? anchor, openedAt: Date.now(), submenuFor: null };
+  if (menuState.source?.getAttribute?.("aria-haspopup") === "menu") menuState.source.setAttribute("aria-expanded", "true");
+  menu.focus({ preventScroll: true });
+}
+
+function fillMenu(menu, items, isSub) {
+  menu.replaceChildren();
+  for (const item of items) {
+    if (item === "-") {
+      const line = document.createElement("div");
+      line.className = "menu-sep";
+      line.setAttribute("role", "separator");
+      menu.append(line);
+      continue;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = item.danger ? "menu-item danger" : "menu-item";
+    button.disabled = Boolean(item.disabled);
+    const checkable = item.checked !== undefined;
+    button.setAttribute("role", checkable ? "menuitemradio" : "menuitem");
+    if (checkable) button.setAttribute("aria-checked", String(item.checked));
+    const lead = checkable ? (item.checked ? icon("check") : document.createElement("span")) : item.icon ? icon(item.icon) : document.createElement("span");
+    lead.classList.add("menu-icon");
+    const label = document.createElement("span");
+    label.className = "menu-label";
+    label.textContent = item.label;
+    button.append(lead, label);
+    if (item.submenu) {
+      button.setAttribute("aria-haspopup", "menu");
+      button.setAttribute("aria-expanded", "false");
+      button.append(icon("chevron", "menu-trail"));
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openSubmenu(button, item.submenu, { focus: true });
+      });
+      if (!coarsePointer) button.addEventListener("pointerenter", () => openSubmenu(button, item.submenu, { focus: false }));
+    } else {
+      button.addEventListener("click", () => {
+        closeContextMenu();
+        void item.run();
+      });
+      if (!isSub && !coarsePointer) button.addEventListener("pointerenter", closeSubmenu);
+    }
+    menu.append(button);
+  }
+}
+
+function placeMenu(menu, anchorRect, x, y) {
+  menu.style.left = "0px";
+  menu.style.top = "0px";
+  const rect = menu.getBoundingClientRect();
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  let left;
+  let top;
+  if (anchorRect) {
+    left = anchorRect.right - rect.width;
+    top = anchorRect.bottom + 4;
+    if (top + rect.height > height - 8) top = anchorRect.top - rect.height - 4;
+  } else {
+    left = x + 2;
+    top = y + 2;
+    if (left + rect.width > width - 8) left = x - rect.width - 2;
+    if (top + rect.height > height - 8) top = y - rect.height - 2;
+  }
+  left = Math.max(8, Math.min(left, width - rect.width - 8));
+  top = Math.max(8, Math.min(top, height - rect.height - 8));
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+}
+
+function openSubmenu(parent, items, { focus = false } = {}) {
+  const sub = $("#context-submenu");
+  if (menuState?.submenuFor === parent && !sub.hidden) {
+    if (focus) focusMenuItem(sub, 0);
+    return;
+  }
+  closeSubmenu();
+  fillMenu(sub, typeof items === "function" ? items() : items, true);
+  sub.hidden = false;
+  sub.style.left = "0px";
+  sub.style.top = "0px";
+  const parentRect = parent.getBoundingClientRect();
+  const menuRect = $("#context-menu").getBoundingClientRect();
+  const rect = sub.getBoundingClientRect();
+  let left = menuRect.right - 4;
+  let top = parentRect.top - 6;
+  if (left + rect.width > window.innerWidth - 8) left = menuRect.left - rect.width + 4;
+  if (left < 8) {
+    // Pantalla angosta: el submenú va debajo de la opción, encima del menú.
+    left = Math.max(8, Math.min(menuRect.left + 16, window.innerWidth - rect.width - 8));
+    top = parentRect.bottom + 2;
+  }
+  top = Math.max(8, Math.min(top, window.innerHeight - rect.height - 8));
+  sub.style.left = `${Math.round(left)}px`;
+  sub.style.top = `${Math.round(top)}px`;
+  parent.setAttribute("aria-expanded", "true");
+  if (menuState) menuState.submenuFor = parent;
+  if (focus) focusMenuItem(sub, 0);
+}
+
+function closeSubmenu() {
+  const sub = $("#context-submenu");
+  if (sub.hidden) return;
+  sub.hidden = true;
+  sub.replaceChildren();
+  menuState?.submenuFor?.setAttribute("aria-expanded", "false");
+  if (menuState) menuState.submenuFor = null;
+}
+
+function closeContextMenu({ restoreFocus = false } = {}) {
+  closeSubmenu();
+  const menu = $("#context-menu");
+  const source = menuState?.source;
+  menuState = null;
+  if (source?.getAttribute?.("aria-haspopup") === "menu") source.setAttribute("aria-expanded", "false");
+  if (menu.hidden) return;
+  menu.hidden = true;
+  menu.replaceChildren();
+  if (restoreFocus && source?.isConnected) source.focus({ preventScroll: true });
+}
+
+function menuItemsOf(menu) {
+  return [...menu.querySelectorAll(".menu-item:not(:disabled)")];
+}
+
+function focusMenuItem(menu, index) {
+  const items = menuItemsOf(menu);
+  if (!items.length) {
+    menu.focus({ preventScroll: true });
+    return;
+  }
+  items[((index % items.length) + items.length) % items.length].focus({ preventScroll: true });
+}
+
+function onMenuKeydown(event) {
+  const menu = event.currentTarget;
+  const items = menuItemsOf(menu);
+  const current = items.indexOf(document.activeElement);
+  const isSub = menu.id === "context-submenu";
+  const backToParent = () => {
+    const parent = menuState?.submenuFor;
+    closeSubmenu();
+    parent?.focus({ preventScroll: true });
+  };
+  switch (event.key) {
+    case "ArrowDown":
+      event.preventDefault();
+      focusMenuItem(menu, current + 1);
+      break;
+    case "ArrowUp":
+      event.preventDefault();
+      focusMenuItem(menu, current < 0 ? -1 : current - 1);
+      break;
+    case "Home":
+      event.preventDefault();
+      focusMenuItem(menu, 0);
+      break;
+    case "End":
+      event.preventDefault();
+      focusMenuItem(menu, -1);
+      break;
+    case "ArrowRight":
+      if (!isSub && document.activeElement?.getAttribute("aria-haspopup") === "menu") {
+        event.preventDefault();
+        document.activeElement.click();
+      }
+      break;
+    case "ArrowLeft":
+      if (isSub) {
+        event.preventDefault();
+        backToParent();
+      }
+      break;
+    case "Escape":
+      event.preventDefault();
+      event.stopPropagation();
+      if (isSub) backToParent();
+      else closeContextMenu({ restoreFocus: true });
+      break;
+    case "Tab":
+      event.preventDefault();
+      closeContextMenu({ restoreFocus: true });
+      break;
+    default:
+      break;
+  }
+}
+
+/** Clic derecho y mantener presionado (celular) en la barra lateral. */
+function bindSidebarMenus() {
+  const sidebar = $(".sidebar");
+  const press = { timer: null, x: 0, y: 0, target: null, fired: false, releasedAt: 0 };
+  const cancel = () => {
+    clearTimeout(press.timer);
+    press.timer = null;
+  };
+  sidebar.addEventListener("pointerdown", (event) => {
+    press.fired = false;
+    if (event.pointerType !== "touch") return;
+    cancel();
+    press.x = event.clientX;
+    press.y = event.clientY;
+    press.target = event.target;
+    press.timer = setTimeout(() => {
+      press.timer = null;
+      const spec = sidebarMenuFor(press.target);
+      if (!spec) return;
+      press.fired = true;
+      navigator.vibrate?.(8);
+      openContextMenu(spec.items, { x: press.x, y: press.y + 8 });
+    }, LONG_PRESS_MS);
+  });
+  sidebar.addEventListener("pointermove", (event) => {
+    if (press.timer && Math.hypot(event.clientX - press.x, event.clientY - press.y) > 10) cancel();
+  });
+  sidebar.addEventListener("pointerup", () => {
+    cancel();
+    if (press.fired) press.releasedAt = Date.now();
+  });
+  sidebar.addEventListener("pointercancel", cancel);
+  // El toque que abrió el menú no debe abrir además la conversación.
+  sidebar.addEventListener(
+    "click",
+    (event) => {
+      if (!press.fired) return;
+      press.fired = false;
+      if (Date.now() - press.releasedAt < 600) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    },
+    true,
+  );
+  sidebar.addEventListener("contextmenu", (event) => {
+    // Android también avisa «contextmenu» al mantener presionado: un solo menú.
+    if (press.fired) {
+      event.preventDefault();
+      return;
+    }
+    const spec = sidebarMenuFor(event.target);
+    if (!spec) return;
+    event.preventDefault();
+    const touch = Boolean(press.timer) || event.pointerType === "touch";
+    cancel();
+    if (touch) {
+      press.fired = true;
+      openContextMenu(spec.items, { x: event.clientX, y: event.clientY + 8 });
+    } else if (event.button !== 2 && !event.clientX && !event.clientY) {
+      // Teclado (Mayús+F10 o la tecla de menú): junto al elemento.
+      openContextMenu(spec.items, { anchor: spec.anchor ?? event.target, source: event.target });
+    } else {
+      openContextMenu(spec.items, { x: event.clientX, y: event.clientY, source: event.target.closest("button") });
+    }
+  });
 }
 
 async function stopAgent() {
@@ -1674,8 +2433,7 @@ async function openAgentDialog(agent = null) {
   form.elements.role.value = agent?.role ?? "";
   form.elements.instructions.value = agent?.instructions ?? "";
   form.elements.access.value = agent?.access ?? "carpeta";
-  const projects = [...new Set(state.agents.filter((item) => !item.main).map((item) => item.project).filter(Boolean))];
-  $("#project-options").replaceChildren(...projects.map((project) => new Option(project, project)));
+  $("#project-options").replaceChildren(...allSections().map((section) => new Option(section, section)));
   fillProviders(agent?.provider);
   updateAccessWarning();
   openDialog($("#agent-dialog"));
@@ -1683,11 +2441,15 @@ async function openAgentDialog(agent = null) {
   if (!coarsePointer) form.elements.name.focus();
 }
 
+/** Proveedor para un agente nuevo: el primero con IA instalado y con sesión; si no hay, Demo. */
+function preferredProvider() {
+  return state.providers.find((provider) => provider.id !== "demo" && provider.available && provider.loggedIn !== false)?.id ?? "demo";
+}
+
 function fillProviders(selected) {
   const select = $("#agent-form").elements.provider;
   select.replaceChildren();
-  const preferred =
-    selected ?? state.providers.find((provider) => provider.id !== "demo" && provider.available && provider.loggedIn !== false)?.id ?? "demo";
+  const preferred = selected ?? preferredProvider();
   for (const provider of state.providers) {
     const option = document.createElement("option");
     option.value = provider.id;
@@ -1796,6 +2558,178 @@ async function saveAgent(event) {
   } finally {
     button.disabled = false;
   }
+}
+
+// ---------- crear agente: figura, color y nombre ----------
+
+const COLOR_NAMES = ["Morado", "Rojo", "Verde", "Naranja", "Gris", "Azul", "Rosado", "Turquesa", "Mostaza", "Lavanda", "Celeste", "Lima"];
+const createState = { shape: 0, color: 0, project: "", agentId: null };
+
+/** «+»: nombre, figura y color, como en la app de referencia. Con agentId cambia la apariencia de uno que ya existe. */
+function openCreateDialog({ project = "", agentId = null } = {}) {
+  closeContextMenu();
+  const agent = agentId ? findAgent(agentId) : null;
+  createState.agentId = agent?.id ?? null;
+  createState.project = agent ? agent.project : project;
+  if (agent) {
+    const [shape, color] = avatarParts(agent);
+    const index = BLOB_COLORS.indexOf(color);
+    createState.shape = shape;
+    createState.color = index >= 0 ? index : 4;
+  } else {
+    createState.shape = Math.floor(Math.random() * BLOB_SHAPES.length);
+    createState.color = Math.floor(Math.random() * BLOB_COLORS.length);
+  }
+  $("#create-title").textContent = agent ? `Apariencia de ${agent.name}` : project ? `Nuevo agente en «${project}»` : "Crear nuevo agente";
+  $("#create-save").textContent = agent ? "Guardar" : "Crear";
+  const name = $("#create-name");
+  name.value = agent?.name ?? "";
+  $("#create-error").textContent = "";
+  renderCreatePickers();
+  openDialog($("#create-dialog"));
+  if (!coarsePointer) name.focus();
+}
+
+function renderCreatePickers(focusKind = null) {
+  const color = BLOB_COLORS[createState.color];
+  $("#create-preview").replaceChildren(drawBlob(BLOB_SHAPES[createState.shape], color));
+  $("#shape-grid").replaceChildren(
+    ...BLOB_SHAPES.map((shape, index) => pickerButton("shape", index, drawBlob(shape, color), `Figura ${index + 1}`)),
+  );
+  $("#color-row").replaceChildren(
+    ...BLOB_COLORS.map((value, index) => {
+      const swatch = document.createElement("span");
+      swatch.className = "swatch";
+      swatch.style.background = value;
+      return pickerButton("color", index, swatch, COLOR_NAMES[index] ?? `Color ${index + 1}`);
+    }),
+  );
+  if (focusKind) $(`#${focusKind === "shape" ? "shape-grid" : "color-row"} [aria-checked="true"]`)?.focus();
+}
+
+function pickerButton(kind, index, content, label) {
+  const selected = createState[kind] === index;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = kind === "shape" ? "shape-option" : "color-option";
+  button.setAttribute("role", "radio");
+  button.setAttribute("aria-checked", String(selected));
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  button.tabIndex = selected ? 0 : -1;
+  button.append(content);
+  button.addEventListener("click", () => {
+    createState[kind] = index;
+    renderCreatePickers(kind);
+  });
+  return button;
+}
+
+/** Flechas dentro de las figuras o los colores (grupo de opciones). */
+function onPickerKeydown(event, kind) {
+  const total = kind === "shape" ? BLOB_SHAPES.length : BLOB_COLORS.length;
+  const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+  if (!step) return;
+  event.preventDefault();
+  createState[kind] = (createState[kind] + step + total) % total;
+  renderCreatePickers(kind);
+}
+
+async function saveCreate(event) {
+  event.preventDefault();
+  const input = $("#create-name");
+  const error = $("#create-error");
+  error.textContent = "";
+  const name = input.value.trim();
+  if (!name) {
+    error.textContent = "Ponle un nombre a tu agente.";
+    input.focus();
+    return;
+  }
+  const avatar = customAvatar(createState.shape, createState.color);
+  const button = $("#create-save");
+  button.disabled = true;
+  try {
+    if (createState.agentId) {
+      const result = await api(`/api/agents/${encodeURIComponent(createState.agentId)}`, { method: "PATCH", body: { name, avatar } });
+      closeDialog($("#create-dialog"));
+      replaceAgent(result.agent);
+    } else {
+      // greet: como lo creaste tú, se presenta con un primer mensaje (los que arma Claude Bot no).
+      const body = { name, avatar, project: createState.project, provider: preferredProvider(), greet: true };
+      const result = await api("/api/agents", { method: "POST", body });
+      closeDialog($("#create-dialog"));
+      if (!findAgent(result.agent.id)) state.agents.push(result.agent);
+      renderSidebar();
+      await navigate(result.agent.id);
+    }
+  } catch (problem) {
+    error.textContent = problem.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// ---------- pedir un nombre (renombrar, secciones) ----------
+
+/** Pide un texto corto. `submit` puede fallar: el error se muestra y el cuadro sigue abierto. */
+function promptText({ title, label, value = "", placeholder = "", okLabel = "Guardar", maxLength = 60, submit = null }) {
+  closeContextMenu();
+  const dialog = $("#prompt-dialog");
+  const form = $("#prompt-form");
+  const input = $("#prompt-input");
+  const error = $("#prompt-error");
+  const ok = $("#prompt-ok");
+  const cancelButton = $("#prompt-cancel");
+  $("#prompt-title").textContent = title;
+  $("#prompt-label").textContent = label;
+  input.value = value;
+  input.placeholder = placeholder;
+  input.maxLength = maxLength;
+  ok.textContent = okLabel;
+  ok.disabled = false;
+  error.textContent = "";
+  openDialog(dialog);
+  input.focus();
+  input.select();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      form.removeEventListener("submit", onSubmit);
+      cancelButton.removeEventListener("click", onCancel);
+      dialog.removeEventListener("close", onCancel);
+      closeDialog(dialog);
+      resolve(result);
+    };
+    const onSubmit = async (event) => {
+      event.preventDefault();
+      const text = input.value.trim().replace(/\s+/g, " ");
+      if (!text) {
+        error.textContent = "Escribe un nombre.";
+        input.focus();
+        return;
+      }
+      if (submit) {
+        ok.disabled = true;
+        error.textContent = "";
+        try {
+          await submit(text);
+        } catch (problem) {
+          ok.disabled = false;
+          error.textContent = problem.message;
+          input.focus();
+          return;
+        }
+      }
+      finish(text);
+    };
+    const onCancel = () => finish(null);
+    form.addEventListener("submit", onSubmit);
+    cancelButton.addEventListener("click", onCancel);
+    dialog.addEventListener("close", onCancel);
+  });
 }
 
 // ---------- rutinas ----------
@@ -2291,6 +3225,841 @@ async function refreshProviders() {
   }
 }
 
+// ---------- ficha del agente: Detalles, Biblioteca y Computadora ----------
+
+const DEFAULT_VOICE = { name: "", rate: 1, lang: "auto", autoRead: false };
+const VOICE_LANGS = [
+  ["auto", "Automático (según el texto)"],
+  ["es-CL", "Español (Chile)"],
+  ["es-ES", "Español (España)"],
+  ["es-MX", "Español (México)"],
+  ["es-AR", "Español (Argentina)"],
+  ["es-US", "Español (EE. UU.)"],
+  ["en-US", "Inglés (EE. UU.)"],
+  ["en-GB", "Inglés (Reino Unido)"],
+  ["pt-BR", "Portugués (Brasil)"],
+  ["fr-FR", "Francés"],
+  ["de-DE", "Alemán"],
+  ["it-IT", "Italiano"],
+];
+const details = { agentId: null, tab: "info", root: "agent", path: "", library: null, loading: false, request: 0, uploading: false };
+
+function openDetails(agentId = state.currentId, tab = "info") {
+  closeContextMenu();
+  const agent = findAgent(agentId);
+  if (!agent) return;
+  if (details.agentId !== agent.id) {
+    details.root = "agent";
+    details.path = "";
+    details.library = null;
+  }
+  details.agentId = agent.id;
+  selectTab(tab);
+  renderDetails();
+  openDialog($("#details-dialog"));
+}
+
+function renderDetailsIfOpen() {
+  if ($("#details-dialog").open) renderDetails();
+}
+
+function renderDetails() {
+  const agent = findAgent(details.agentId);
+  if (!agent) {
+    closeDialog($("#details-dialog"));
+    return;
+  }
+  const avatar = $("#details-avatar");
+  const key = `${agent.id}:${agent.avatar}:${agent.main}`;
+  if (avatar.dataset.key !== key) {
+    avatar.replaceChildren(blobAvatar(agent));
+    avatar.dataset.key = key;
+  }
+  avatar.disabled = Boolean(agent.main);
+  avatar.title = agent.main ? agent.name : "Cambiar figura y color";
+  $("#details-name").textContent = agent.name;
+  const parts = [agent.role || (agent.main ? "Bot principal" : "Asistente general"), providerLabel(agent.provider)];
+  if (agent.model) parts.push(agent.model);
+  if (agent.project) parts.push(agent.project);
+  $("#details-meta").textContent = parts.filter(Boolean).join(" · ");
+  if (details.tab === "info") renderDetailsInfo(agent);
+  else if (details.tab === "library") renderLibrary(agent);
+  else renderComputer(agent);
+}
+
+function selectTab(tab, { focus = false } = {}) {
+  details.tab = tab;
+  for (const button of document.querySelectorAll("#details-dialog [role='tab']")) {
+    const selected = button.dataset.tab === tab;
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+    if (selected && focus) button.focus();
+  }
+  $("#panel-info").hidden = tab !== "info";
+  $("#panel-library").hidden = tab !== "library";
+  $("#panel-computer").hidden = tab !== "computer";
+}
+
+function onTabKeydown(event) {
+  const tabs = [...document.querySelectorAll("#details-dialog [role='tab']")];
+  const index = tabs.indexOf(event.target);
+  if (index < 0) return;
+  const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
+  let next = step === undefined ? null : (index + step + tabs.length) % tabs.length;
+  if (event.key === "Home") next = 0;
+  if (event.key === "End") next = tabs.length - 1;
+  if (next === null) return;
+  event.preventDefault();
+  showTab(tabs[next].dataset.tab, { focus: true });
+}
+
+function showTab(tab, { focus = false } = {}) {
+  // La biblioteca se vuelve a leer cada vez que se abre: los agentes crean archivos todo el tiempo.
+  if (tab === "library") details.library = null;
+  selectTab(tab, { focus });
+  renderDetails();
+}
+
+function renderDetailsInfo(agent) {
+  const routines = state.routines.filter((routine) => routine.agentId === agent.id);
+  $("#details-routines").replaceChildren(...routines.map(miniRoutine));
+  $("#details-routines-empty").hidden = routines.length > 0;
+  renderVoiceSettings(agent);
+  const instructions = agent.instructions?.trim();
+  $("#details-role").textContent = instructions
+    ? instructions.length > 240
+      ? `${instructions.slice(0, 240).trimEnd()}…`
+      : instructions
+    : agent.main
+      ? "Arma y coordina tus equipos de agentes."
+      : "Sin instrucciones permanentes: hace lo que le pidas en el chat.";
+  $("#details-edit").textContent = agent.main ? "Preferencias y modelo" : "Instrucciones y modelo";
+  $("#details-pause").textContent = agent.paused ? "Reanudar la cola" : "Pausar la cola";
+  $("#details-delete").hidden = Boolean(agent.main);
+}
+
+function miniRoutine(routine) {
+  const item = document.createElement("li");
+  item.className = "mini-routine";
+  item.dataset.enabled = String(routine.enabled);
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "mini-routine-open";
+  open.title = "Ver y editar en Rutinas";
+  const name = document.createElement("span");
+  name.className = "mini-routine-name";
+  name.textContent = routine.name;
+  const meta = document.createElement("span");
+  meta.className = "mini-routine-meta";
+  const when = routine.running
+    ? "en curso…"
+    : routine.enabled
+      ? routine.nextRunAt
+        ? `próxima: ${formatWhen(routine.nextRunAt)}`
+        : "sin próxima ejecución"
+      : "en pausa";
+  meta.textContent = [routine.description, when].filter(Boolean).join(" · ");
+  open.append(icon("clock"), name, meta);
+  open.addEventListener("click", () => openRoutines(routine.agentId));
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "switch";
+  toggle.setAttribute("role", "switch");
+  toggle.setAttribute("aria-checked", String(routine.enabled));
+  toggle.setAttribute("aria-label", routine.enabled ? `Pausar «${routine.name}»` : `Activar «${routine.name}»`);
+  toggle.title = routine.enabled ? "Activa" : "En pausa";
+  toggle.addEventListener("click", () => void routineRequest(`/api/routines/${encodeURIComponent(routine.id)}`, "PATCH", { enabled: !routine.enabled }));
+  item.append(open, toggle);
+  return item;
+}
+
+function renderVoiceSettings(agent) {
+  const voice = { ...DEFAULT_VOICE, ...(agent.voice ?? {}) };
+  $("#voice-unsupported").hidden = Boolean(Synth);
+  const lang = voice.lang === "auto" ? speechLanguage() : voice.lang;
+  const select = $("#voice-name");
+  const key = `${agent.id}|${voices.length}|${lang}|${voice.name}`;
+  if (select.dataset.key !== key && document.activeElement !== select) {
+    const base = lang.split("-")[0].toLowerCase();
+    const list = sortVoices(
+      voices.filter((item) => normalizeLang(item.lang).split("-")[0] === base),
+      lang,
+    );
+    if (voice.name && !list.some((item) => item.name === voice.name)) {
+      list.unshift(voices.find((item) => item.name === voice.name) ?? { name: voice.name, lang: "" });
+    }
+    const options = [new Option(Synth ? "Automática (la mejor para el idioma)" : "No disponible en este navegador", "")];
+    for (const item of list) options.push(new Option(voiceLabel(item), item.name));
+    select.replaceChildren(...options);
+    select.value = voice.name;
+    select.dataset.key = key;
+  }
+  select.disabled = !Synth;
+  const rate = $("#voice-rate");
+  if (document.activeElement !== rate) rate.value = String(voice.rate);
+  $("#voice-rate-value").textContent = formatRate(Number(rate.value));
+  const langSelect = $("#voice-lang");
+  const langKey = `${agent.id}|${voice.lang}`;
+  if (langSelect.dataset.key !== langKey && document.activeElement !== langSelect) {
+    const entries = VOICE_LANGS.some(([value]) => value === voice.lang) ? VOICE_LANGS : [...VOICE_LANGS, [voice.lang, voice.lang]];
+    langSelect.replaceChildren(...entries.map(([value, label]) => new Option(label, value)));
+    langSelect.value = voice.lang;
+    langSelect.dataset.key = langKey;
+  }
+  const auto = $("#voice-auto");
+  auto.setAttribute("aria-checked", String(voice.autoRead));
+  auto.disabled = !Synth;
+  $("#voice-test").disabled = !Synth;
+}
+
+function formatRate(value) {
+  return `${(Number.isFinite(value) ? value : 1).toLocaleString("es", { minimumFractionDigits: 1, maximumFractionDigits: 2 })}×`;
+}
+
+function voiceLabel(voice) {
+  const name = String(voice.name)
+    .replace(/^Microsoft\s+/i, "")
+    .replace(/^Google\s+/i, "Google ")
+    .replace(/\s+-\s+[^-]+$/, "");
+  return voice.lang ? `${name} · ${voice.lang}` : name;
+}
+
+/** Cambia el chat de voz del agente: se ve enseguida y el servidor lo guarda. */
+async function saveVoice(patch) {
+  const agent = findAgent(details.agentId);
+  if (!agent) return;
+  agent.voice = { ...DEFAULT_VOICE, ...(agent.voice ?? {}), ...patch };
+  renderDetailsIfOpen();
+  await patchAgent(agent.id, { voice: patch });
+}
+
+function onVoiceLangChange(value) {
+  const agent = findAgent(details.agentId);
+  const current = agent?.voice?.name ? voices.find((item) => item.name === agent.voice.name) : null;
+  const target = value === "auto" ? speechLanguage() : value;
+  // Una voz elegida para otro idioma ya no sirve: se vuelve a la automática.
+  const keepVoice = current && normalizeLang(current.lang).split("-")[0] === target.split("-")[0].toLowerCase();
+  void saveVoice(keepVoice ? { lang: value } : { lang: value, name: "" });
+}
+
+function testVoice() {
+  const agent = findAgent(details.agentId);
+  if (!agent || !Synth) return;
+  primeSpeech();
+  if (speech.current?.messageId === "voice-test") {
+    stopSpeaking();
+    return;
+  }
+  const lang = agent.voice?.lang && agent.voice.lang !== "auto" ? agent.voice.lang : speechLanguage();
+  const sample = lang.startsWith("en")
+    ? `Hi, I'm ${agent.name}. This is how I sound when I read my answers.`
+    : lang.startsWith("pt")
+      ? `Olá, sou ${agent.name}. É assim que eu falo quando leio as minhas respostas.`
+      : lang.startsWith("fr")
+        ? `Bonjour, je suis ${agent.name}. Voici ma voix quand je lis mes réponses.`
+        : lang.startsWith("de")
+          ? `Hallo, ich bin ${agent.name}. So klinge ich, wenn ich meine Antworten vorlese.`
+          : lang.startsWith("it")
+            ? `Ciao, sono ${agent.name}. Questa è la mia voce quando leggo le risposte.`
+            : `Hola, soy ${agent.name}. Así sueno cuando leo mis respuestas.`;
+  speak(sample, agent, { messageId: "voice-test" });
+}
+
+// Biblioteca: archivos de su carpeta o de la compartida.
+
+function libraryUrl(agentId, root, path, file = false) {
+  const base = `/api/agents/${encodeURIComponent(agentId)}/library${file ? "/file" : ""}`;
+  return `${base}?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`;
+}
+
+function renderLibrary(agent) {
+  const data = details.library;
+  if (!details.loading && (!data || data.agentId !== agent.id || data.root !== details.root || data.path !== details.path)) {
+    void loadLibrary(agent.id, details.root, details.path);
+    return;
+  }
+  renderLibraryView();
+}
+
+async function loadLibrary(agentId, root, path) {
+  const request = ++details.request;
+  details.loading = true;
+  details.root = root;
+  details.path = path;
+  renderLibraryView();
+  let data;
+  try {
+    data = { ...(await api(libraryUrl(agentId, root, path))), agentId };
+  } catch (error) {
+    if (request !== details.request) return;
+    if (error.status === 404 && path) {
+      // La carpeta ya no existe: se vuelve a la raíz.
+      details.loading = false;
+      void loadLibrary(agentId, root, "");
+      return;
+    }
+    data = { agentId, root, path, entries: [], truncated: false, error: error.message };
+  }
+  if (request !== details.request) return;
+  details.library = data;
+  details.loading = false;
+  renderLibraryView();
+}
+
+function renderLibraryView() {
+  const agent = findAgent(details.agentId);
+  if (!agent || details.tab !== "library") return;
+  for (const radio of document.querySelectorAll('input[name="library-root"]')) radio.checked = radio.value === details.root;
+  const upload = $("#library-upload");
+  upload.hidden = details.root !== "agent";
+  upload.disabled = details.uploading;
+  upload.textContent = details.uploading ? "Subiendo…" : "Subir archivo";
+  const crumbs = $("#library-crumbs");
+  const parts = details.path ? details.path.split("/") : [];
+  const nodes = [crumbButton(details.root === "shared" ? "Compartida" : "Su carpeta", "", parts.length === 0)];
+  parts.forEach((part, index) => {
+    const separator = document.createElement("span");
+    separator.className = "crumb-sep";
+    separator.textContent = "›";
+    separator.setAttribute("aria-hidden", "true");
+    nodes.push(separator, crumbButton(part, parts.slice(0, index + 1).join("/"), index === parts.length - 1));
+  });
+  crumbs.replaceChildren(...nodes);
+  const list = $("#library-list");
+  const note = $("#library-note");
+  const data = details.library;
+  const fresh = data && data.agentId === agent.id && data.root === details.root && data.path === details.path;
+  if (!fresh) {
+    list.replaceChildren();
+    note.hidden = false;
+    note.textContent = "Cargando…";
+    return;
+  }
+  list.replaceChildren(...data.entries.map((entry) => libraryItem(agent, entry)));
+  note.hidden = false;
+  if (data.error) note.textContent = data.error;
+  else if (!data.entries.length)
+    note.textContent = details.path
+      ? "Esta carpeta está vacía."
+      : details.root === "shared"
+        ? "La carpeta compartida está vacía. Lo que dejen ahí tus agentes aparecerá aquí."
+        : "Todavía no hay archivos. Lo que cree en su carpeta aparecerá aquí.";
+  else if (data.truncated) note.textContent = `Se muestran los primeros ${data.entries.length} elementos.`;
+  else note.hidden = true;
+}
+
+function crumbButton(label, path, current) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "crumb";
+  button.textContent = label;
+  if (current) button.setAttribute("aria-current", "location");
+  // El de la carpeta actual vuelve a leerla.
+  button.addEventListener("click", () => void loadLibrary(details.agentId, details.root, path));
+  return button;
+}
+
+function libraryItem(agent, entry) {
+  const item = document.createElement("li");
+  item.className = "library-item";
+  const main = document.createElement(entry.dir ? "button" : "a");
+  main.className = "library-open";
+  if (entry.dir) {
+    main.type = "button";
+    main.addEventListener("click", () => void loadLibrary(agent.id, details.root, entry.path));
+  } else {
+    main.href = libraryUrl(agent.id, details.root, entry.path, true);
+    main.target = "_blank";
+    main.rel = "noopener";
+  }
+  const name = document.createElement("span");
+  name.className = "library-name";
+  name.textContent = entry.name;
+  const meta = document.createElement("span");
+  meta.className = "library-meta";
+  meta.textContent = entry.dir ? "Carpeta" : `${formatSize(entry.size)} · ${formatTime(entry.modifiedAt)}`;
+  main.title = entry.dir ? `Abrir la carpeta «${entry.name}»` : `Abrir «${entry.name}»`;
+  main.append(icon(entry.dir ? "folder" : "file"), name, meta);
+  item.append(main);
+  if (!entry.dir) {
+    const download = document.createElement("a");
+    download.className = "library-download";
+    download.href = `${libraryUrl(agent.id, details.root, entry.path, true)}&download=1`;
+    download.setAttribute("download", entry.name);
+    download.title = `Descargar «${entry.name}»`;
+    download.setAttribute("aria-label", download.title);
+    download.append(icon("download"));
+    item.append(download);
+  }
+  return item;
+}
+
+function formatSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 1024) return `${bytes || 0} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toLocaleString("es", { maximumFractionDigits: value < 10 ? 1 : 0 })} ${units[unit]}`;
+}
+
+async function uploadToLibrary(files) {
+  const agentId = details.agentId;
+  if (!agentId || !files.length) return;
+  details.uploading = true;
+  renderLibraryView();
+  let saved = 0;
+  for (const file of files) {
+    if (file.size > MAX_UPLOAD_BYTES) {
+      showToast(`«${file.name}» supera los 25 MB.`, "error");
+      continue;
+    }
+    if (file.size === 0) {
+      showToast(`«${file.name}» está vacío.`, "error");
+      continue;
+    }
+    try {
+      await uploadFile(agentId, file);
+      saved += 1;
+    } catch (error) {
+      if (error.status !== 401) showToast(`No se pudo subir «${file.name}»: ${error.message}`, "error");
+    }
+  }
+  details.uploading = false;
+  if (saved) showToast(saved === 1 ? "Archivo guardado en «adjuntos»." : `${saved} archivos guardados en «adjuntos».`);
+  if (details.agentId === agentId) await loadLibrary(agentId, "agent", saved ? "adjuntos" : details.path);
+}
+
+// Computadora: dónde trabaja y con qué acceso.
+
+function renderComputer(agent) {
+  $("#computer-workspace").textContent = agent.workspace || "—";
+  $("#computer-shared").textContent = state.paths?.shared ?? "—";
+  const local = isThisComputer();
+  for (const button of document.querySelectorAll("#panel-computer [data-local-only]")) button.hidden = !local;
+  $("#computer-remote").hidden = local;
+  const full = Boolean(state.settings.fullAccess);
+  let text = full
+    ? "Acceso total para todos (lo activaste en Ajustes): ejecuta comandos y usa todo el equipo sin pedir permiso."
+    : agent.access === "total"
+      ? "Acceso total: ejecuta comandos y usa todo el equipo sin pedir permiso."
+      : "Solo su carpeta: escribe en su carpeta y en la compartida, con sandbox.";
+  if (!full && agent.access !== "total" && state.platform === "win32" && agent.provider === "claude") {
+    text += " En Windows, así no tiene terminal: trabaja con archivos, la web y sus compañeros.";
+  }
+  $("#computer-access").textContent = `${text} Los conectores de tu cuenta de Claude (servidores, bancos, brókeres) siguen fuera de su alcance.`;
+  $("#computer-change").textContent = full ? "Abrir Ajustes" : "Cambiar el acceso";
+}
+
+async function openFolder(root) {
+  const agentId = details.agentId;
+  if (!agentId) return;
+  try {
+    await api(`/api/agents/${encodeURIComponent(agentId)}/open-folder`, { method: "POST", body: { root } });
+    showToast("Abrí la carpeta en el explorador.");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast("Ruta copiada.");
+  } catch {
+    showToast("No se pudo copiar: selecciona la ruta y cópiala a mano.", "error");
+  }
+}
+
+// ---------- lectura en voz alta ----------
+
+let voices = [];
+/** Lo que se está leyendo: el mensaje, cuántos trozos faltan y un número que invalida lo que se canceló. */
+const speech = { current: null, pending: 0, token: 0, primed: false };
+/** Respuestas a lo que dijiste con el botón de voz: se leen aunque «Leer sus respuestas» esté apagado. */
+let voiceReply = null;
+
+const LANGUAGE_WORDS = {
+  es: "el la los las del al es son pero muy también cuando hola gracias y lo su sus hay una un con por en qué cómo más esto eso puedo quieres tienes".split(" "),
+  en: "the and is are you that this with for have was not but what can will your from about hello thanks it of to in on we they be if or an".split(" "),
+  pt: "o os um uma com em mais muito também quando olá obrigado obrigada e é são mas seu sua há não você isso então já do da dos das na ao".split(" "),
+};
+const LANGUAGE_SETS = Object.fromEntries(Object.entries(LANGUAGE_WORDS).map(([lang, words]) => [lang, new Set(words)]));
+
+function loadVoices() {
+  if (!Synth) return;
+  try {
+    voices = Synth.getVoices() ?? [];
+  } catch {
+    voices = [];
+  }
+  renderDetailsIfOpen();
+}
+
+function normalizeLang(value) {
+  return String(value || "")
+    .replace(/_/g, "-")
+    .toLowerCase();
+}
+
+/** Idioma de un texto, por sus palabras más comunes. Ante la duda, el español del navegador. */
+function detectLanguage(text) {
+  const words = text.slice(0, 3000).toLowerCase().split(/[^\p{L}]+/u);
+  let best = "es";
+  let bestScore = 0;
+  for (const [lang, set] of Object.entries(LANGUAGE_SETS)) {
+    let score = 0;
+    for (const word of words) if (set.has(word)) score += 1;
+    if (score > bestScore) {
+      best = lang;
+      bestScore = score;
+    }
+  }
+  return best === "en" ? "en-US" : best === "pt" ? "pt-BR" : speechLanguage();
+}
+
+function voiceScore(voice, lang) {
+  const wanted = lang.toLowerCase();
+  const own = normalizeLang(voice.lang);
+  let score = 0;
+  if (own === wanted) score += 8;
+  // Sin voz de Chile, mejor una latinoamericana que una de España.
+  else if (wanted.startsWith("es-") && wanted !== "es-es" && own !== "es-es") score += 2;
+  if (/natural|neural|online|premium|enhanced|mejorada/i.test(voice.name)) score += 4;
+  if (voice.default) score += 1;
+  return score;
+}
+
+function sortVoices(list, lang) {
+  return [...list].sort((a, b) => voiceScore(b, lang) - voiceScore(a, lang) || String(a.name).localeCompare(String(b.name)));
+}
+
+function pickVoice(name, lang) {
+  if (!voices.length) loadVoices();
+  if (name) {
+    const chosen = voices.find((voice) => voice.name === name);
+    if (chosen) return chosen;
+  }
+  const base = lang.toLowerCase().split("-")[0];
+  return sortVoices(
+    voices.filter((voice) => normalizeLang(voice.lang).split("-")[0] === base),
+    lang,
+  )[0] ?? null;
+}
+
+/** El texto de un mensaje tal como se lee: sin código, enlaces ni marcas de Markdown. */
+function speakableText(text) {
+  return String(text)
+    .replace(/```[\s\S]*?(?:```|$)/g, "\n")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/!?\[([^\]\n]+)\]\((?:https?:\/\/|\/)[^\s)]+\)/g, "$1")
+    .replace(/https?:\/\/[^\s<>"')\]]+/g, "")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*•]\s+/gm, "")
+    .replace(/^>\s?/gm, "")
+    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+    .replace(/(^|[^\p{L}\d])[*_]([^*_\n]+)[*_](?=[^\p{L}\d]|$)/gu, "$1$2")
+    .replace(/\|/g, " ")
+    .replace(/\p{Extended_Pictographic}️?/gu, "")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+}
+
+/** Trozos cortos (por frases): los navegadores cortan las lecturas muy largas. */
+function chunkText(text, max = 220) {
+  const pieces = text.match(/[^]*?(?:[.!?…;:]+(?=\s|$)|\n+|$)/gu) ?? [];
+  const chunks = [];
+  let current = "";
+  for (const piece of pieces) {
+    let clean = piece.replace(/\s+/g, " ").trim();
+    if (!clean) continue;
+    // Un título o un punto de una lista termina en un salto de línea: se le da la pausa de un punto.
+    if (/\n\s*$/.test(piece) && !/[.!?…;:,]$/.test(clean)) clean += ".";
+    if (current && current.length + clean.length + 1 > max) {
+      chunks.push(current);
+      current = "";
+    }
+    if (clean.length <= max) {
+      current = current ? `${current} ${clean}` : clean;
+      continue;
+    }
+    for (const word of clean.split(" ")) {
+      if (current && current.length + word.length + 1 > max) {
+        chunks.push(current);
+        current = "";
+      }
+      current = current ? `${current} ${word}` : word;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+/** Algunos navegadores (Safari) solo dejan hablar después de un toque: se «despierta» la voz con el primero. */
+function primeSpeech() {
+  if (!Synth || speech.primed) return;
+  speech.primed = true;
+  try {
+    const utterance = new SpeechSynthesisUtterance(" ");
+    utterance.volume = 0;
+    Synth.speak(utterance);
+  } catch {
+    // Sin voz: no pasa nada.
+  }
+}
+
+function stopSpeaking() {
+  if (!Synth) return;
+  const active = speech.current !== null || speech.pending > 0 || Synth.speaking || Synth.pending;
+  speech.token += 1;
+  speech.pending = 0;
+  speech.current = null;
+  if (active) Synth.cancel();
+  updateSpeakButtons();
+}
+
+/** Lee un texto con la voz del agente. Con `queue`, espera a que termine lo que se está leyendo. */
+function speak(text, agent, { messageId = null, queue = false } = {}) {
+  if (!Synth) return false;
+  const clean = speakableText(text);
+  if (!clean) return false;
+  const busy = speech.pending > 0 || Synth.speaking || Synth.pending;
+  if (!queue && busy) stopSpeaking();
+  const token = speech.token;
+  const settings = { ...DEFAULT_VOICE, ...(agent?.voice ?? {}) };
+  const lang = settings.lang !== "auto" ? settings.lang : detectLanguage(clean);
+  const voice = pickVoice(settings.name, lang);
+  const job = { messageId, agentId: agent?.id ?? null };
+  const utterances = chunkText(clean).map((chunk) => {
+    const utterance = new SpeechSynthesisUtterance(chunk);
+    utterance.lang = voice?.lang || lang;
+    if (voice) utterance.voice = voice;
+    utterance.rate = settings.rate;
+    utterance.onstart = () => {
+      if (token !== speech.token) return;
+      speech.current = job;
+      updateSpeakButtons();
+    };
+    const done = () => {
+      if (token !== speech.token) return;
+      speech.pending = Math.max(0, speech.pending - 1);
+      if (speech.pending === 0) {
+        speech.current = null;
+        updateSpeakButtons();
+      }
+    };
+    utterance.onend = done;
+    utterance.onerror = done;
+    return utterance;
+  });
+  if (!utterances.length) return false;
+  speech.pending += utterances.length;
+  speech.current ??= job;
+  updateSpeakButtons();
+  const start = () => {
+    if (token !== speech.token) return;
+    for (const utterance of utterances) Synth.speak(utterance);
+  };
+  // Chrome y Edge a veces no hablan si se pide justo después de cancelar.
+  if (!queue && busy) setTimeout(start, 80);
+  else start();
+  return true;
+}
+
+function updateSpeakButtons() {
+  for (const button of document.querySelectorAll(".speak-button")) {
+    const active = speech.current?.messageId === button.dataset.id;
+    if (button.getAttribute("aria-pressed") !== String(active)) setSpeakButton(button, active);
+  }
+  const test = $("#voice-test");
+  if (test) test.textContent = speech.current?.messageId === "voice-test" ? "Detener" : "Probar voz";
+}
+
+function toggleSpeakMessage(agentId, messageId) {
+  primeSpeech();
+  if (speech.current?.messageId === messageId) {
+    stopSpeaking();
+    return;
+  }
+  const message = (state.messages.get(agentId) ?? []).find((item) => item.id === messageId);
+  if (!message || !speak(message.text, findAgent(agentId), { messageId })) showToast("No hay nada que leer en ese mensaje.");
+}
+
+/** Lee sola una respuesta recién terminada si el agente lo tiene activado o si le hablaste con el botón de voz. */
+function maybeAutoRead(agentId, message) {
+  if (!Synth || agentId !== state.currentId || document.hidden || dictation || !message.text?.trim()) return;
+  const agent = findAgent(agentId);
+  if (!agent) return;
+  const replying =
+    voiceReply?.agentId === agentId &&
+    Date.now() - voiceReply.startedAt < 15 * 60_000 &&
+    (!voiceReply.until || Date.now() < voiceReply.until);
+  if (!agent.voice?.autoRead && !replying) return;
+  speak(message.text, agent, { messageId: message.id, queue: true });
+}
+
+/** Cuando el agente termina el turno que empezó tu mensaje de voz, se dejan de leer sus respuestas. */
+function noteVoiceTurn() {
+  if (!voiceReply) return;
+  const agent = findAgent(voiceReply.agentId);
+  if (!agent || Date.now() - voiceReply.startedAt > 15 * 60_000) {
+    voiceReply = null;
+    return;
+  }
+  if (agent.state === "working") {
+    voiceReply.sawWorking = true;
+    voiceReply.until = null;
+  } else if (voiceReply.sawWorking && !voiceReply.until && agent.state !== "queued") {
+    voiceReply.until = Date.now() + 4_000;
+  }
+}
+
+// ---------- uso del plan ----------
+
+let usageTicker = null;
+
+function usageEntries() {
+  return state.usage.filter((entry) => entry.windows?.length || entry.error);
+}
+
+function renderUsage() {
+  const button = $("#usage-button");
+  const entries = usageEntries();
+  button.hidden = entries.length === 0;
+  if (!entries.length) {
+    closeUsage();
+    return;
+  }
+  const primary = entries.find((entry) => entry.provider === "claude" && entry.windows.length) ?? entries.find((entry) => entry.windows.length) ?? null;
+  const window = primary?.windows[0] ?? null;
+  const percent = window ? window.percent : null;
+  $("#usage-ring-value").setAttribute("stroke-dasharray", `${percent ?? 0} 100`);
+  button.dataset.level = percent === null ? "unknown" : percent >= 90 ? "high" : percent >= 75 ? "mid" : "low";
+  $("#usage-number").textContent = percent === null ? "!" : String(percent);
+  const label = window
+    ? `Uso de ${primary.label}: ${percent}% (${window.label.toLowerCase()})${window.resetsAt ? `, se reinicia en ${formatCountdown(window.resetsAt - Date.now())}` : ""}`
+    : "Uso del plan: no se pudo leer";
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  if (!$("#usage-popover").hidden) renderUsagePopover();
+}
+
+function renderUsagePopover() {
+  const list = $("#usage-list");
+  list.replaceChildren();
+  for (const entry of usageEntries()) {
+    const block = document.createElement("div");
+    block.className = "usage-provider";
+    const title = document.createElement("div");
+    title.className = "usage-provider-title";
+    title.textContent = entry.plan ? `${entry.label} · ${planLabel(entry.plan)}` : entry.label;
+    block.append(title);
+    for (const window of entry.windows) {
+      const row = document.createElement("div");
+      row.className = "usage-window";
+      const top = document.createElement("div");
+      top.className = "usage-row";
+      const name = document.createElement("span");
+      name.textContent = window.label;
+      const value = document.createElement("strong");
+      value.textContent = `${window.percent}%`;
+      top.append(name, value);
+      const bar = document.createElement("div");
+      bar.className = "usage-bar";
+      bar.dataset.level = window.percent >= 90 ? "high" : window.percent >= 75 ? "mid" : "low";
+      const fill = document.createElement("span");
+      fill.style.width = `${window.percent}%`;
+      bar.append(fill);
+      row.append(top, bar);
+      if (window.resetsAt) {
+        const reset = document.createElement("div");
+        reset.className = "usage-reset";
+        reset.textContent = `Se reinicia en ${formatCountdown(window.resetsAt - Date.now())}`;
+        row.append(reset);
+      }
+      block.append(row);
+    }
+    if (entry.error) {
+      const problem = document.createElement("p");
+      problem.className = "usage-error";
+      problem.textContent = entry.error;
+      block.append(problem);
+    }
+    list.append(block);
+  }
+  const updated = Math.max(0, ...state.usage.map((entry) => entry.updatedAt || 0));
+  $("#usage-foot").textContent = `${updated ? `Actualizado ${formatAgo(updated)}. ` : ""}Es el uso de toda tu cuenta, también fuera de ClosedBot.`;
+}
+
+function planLabel(plan) {
+  const known = { max: "Max", pro: "Pro", team: "Team", enterprise: "Enterprise", free: "Gratis", plus: "Plus" };
+  const value = String(plan);
+  return known[value.toLowerCase()] ?? value.replace(/_/g, " ").replace(/^\p{L}/u, (letter) => letter.toUpperCase());
+}
+
+function formatCountdown(ms) {
+  if (!Number.isFinite(ms) || ms < 60_000) return "menos de 1 min";
+  const minutes = Math.floor(ms / 60_000);
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const rest = minutes % 60;
+  if (days > 0) return hours ? `${days} d ${hours} h` : `${days} d`;
+  if (hours > 0) return rest ? `${hours} h ${rest} min` : `${hours} h`;
+  return `${rest} min`;
+}
+
+function formatAgo(timestamp) {
+  const diff = Date.now() - timestamp;
+  if (diff < 60_000) return "recién";
+  if (diff < 3_600_000) return `hace ${Math.floor(diff / 60_000)} min`;
+  if (diff < 86_400_000) return `hace ${Math.floor(diff / 3_600_000)} h`;
+  return formatTime(timestamp);
+}
+
+function toggleUsage() {
+  if ($("#usage-popover").hidden) openUsage();
+  else closeUsage();
+}
+
+function openUsage() {
+  closeContextMenu();
+  const popover = $("#usage-popover");
+  popover.hidden = false;
+  $("#usage-button").setAttribute("aria-expanded", "true");
+  renderUsagePopover();
+  clearInterval(usageTicker);
+  usageTicker = setInterval(renderUsagePopover, 30_000);
+  void refreshUsage();
+}
+
+function closeUsage() {
+  const popover = $("#usage-popover");
+  if (popover.hidden) return;
+  popover.hidden = true;
+  $("#usage-button").setAttribute("aria-expanded", "false");
+  clearInterval(usageTicker);
+  usageTicker = null;
+}
+
+async function refreshUsage() {
+  const button = $("#usage-refresh");
+  button.classList.add("spinning");
+  button.disabled = true;
+  try {
+    const result = await api("/api/usage/refresh", { method: "POST" });
+    state.usage = result.usage ?? [];
+    renderUsage();
+  } catch (error) {
+    if (error.status !== 401) showToast(error.message, "error");
+  } finally {
+    button.classList.remove("spinning");
+    button.disabled = false;
+  }
+}
+
 // ---------- utilidades de interfaz ----------
 
 function openDialog(dialog) {
@@ -2329,9 +4098,7 @@ function showToast(message, tone = "info") {
 
 function bindUi() {
   $("#login-form").addEventListener("submit", login);
-  $("#new-agent").addEventListener("click", () => openAgentDialog());
-  $("#first-agent").addEventListener("click", () => openAgentDialog());
-  $("#first-team").addEventListener("click", openMainAgent);
+  $("#new-agent").addEventListener("click", () => openCreateDialog());
   $("#empty-talk").addEventListener("click", openMainAgent);
   $("#bot-card").addEventListener("click", openMainAgent);
   $("#search-toggle").addEventListener("click", () => toggleSearch());
@@ -2352,20 +4119,110 @@ function bindUi() {
   $("#connect-claude").addEventListener("click", () => void connectClaude());
   $("#logout").addEventListener("click", logout);
   $("#back").addEventListener("click", goBack);
-  $("#agent-menu-button").addEventListener("click", (event) => {
-    event.stopPropagation();
-    toggleMenu();
-  });
-  $("#agent-menu").addEventListener("click", (event) => {
-    const action = event.target.closest("[data-action]")?.dataset.action;
-    if (action) void agentAction(action);
-  });
-  document.addEventListener("click", (event) => {
-    if (!event.target.closest("#agent-menu")) closeMenu();
-  });
+  $("#details-button").addEventListener("click", () => openDetails(state.currentId));
+
+  // Menús contextuales: se cierran al tocar fuera, al cambiar el tamaño o al desplazar la lista.
+  bindSidebarMenus();
+  for (const menu of [$("#context-menu"), $("#context-submenu")]) menu.addEventListener("keydown", onMenuKeydown);
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (menuState && !target?.closest("#context-menu, #context-submenu")) closeContextMenu();
+      if (!$("#usage-popover").hidden && !target?.closest("#usage-popover, #usage-button")) closeUsage();
+      primeSpeech();
+    },
+    true,
+  );
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeMenu();
+    if (event.key !== "Escape") return;
+    if (!$("#usage-popover").hidden) {
+      closeUsage();
+      $("#usage-button").focus();
+    }
   });
+  window.addEventListener("resize", () => closeContextMenu());
+  window.addEventListener("blur", () => closeContextMenu());
+  document.addEventListener(
+    "scroll",
+    (event) => {
+      if (menuState && !(event.target instanceof Element && event.target.closest("#context-menu, #context-submenu"))) closeContextMenu();
+    },
+    true,
+  );
+
+  // Crear agente (figura, color y nombre) y cuadro de nombre.
+  $("#create-form").addEventListener("submit", saveCreate);
+  $("#create-cancel").addEventListener("click", () => closeDialog($("#create-dialog")));
+  $("#shape-grid").addEventListener("keydown", (event) => onPickerKeydown(event, "shape"));
+  $("#color-row").addEventListener("keydown", (event) => onPickerKeydown(event, "color"));
+
+  // Ficha del agente.
+  const detailsDialog = $("#details-dialog");
+  $("#details-close").addEventListener("click", () => closeDialog(detailsDialog));
+  detailsDialog.addEventListener("click", (event) => {
+    // Clic en el fondo oscuro (fuera del panel): se cierra.
+    if (event.target === detailsDialog) closeDialog(detailsDialog);
+  });
+  detailsDialog.addEventListener("close", () => {
+    if (speech.current?.messageId === "voice-test") stopSpeaking();
+  });
+  $("#details-avatar").addEventListener("click", () => openCreateDialog({ agentId: details.agentId }));
+  for (const tab of document.querySelectorAll("#details-dialog [role='tab']")) {
+    tab.addEventListener("click", () => showTab(tab.dataset.tab));
+    tab.addEventListener("keydown", onTabKeydown);
+  }
+  $("#details-new-routine").addEventListener("click", () => openRoutines(details.agentId));
+  $("#details-edit").addEventListener("click", () => void agentAction("edit", details.agentId));
+  $("#details-pause").addEventListener("click", () => void agentAction("pause", details.agentId));
+  $("#details-reset").addEventListener("click", () => void agentAction("reset", details.agentId));
+  $("#details-delete").addEventListener("click", () => void agentAction("delete", details.agentId));
+  $("#voice-name").addEventListener("change", (event) => void saveVoice({ name: event.target.value }));
+  $("#voice-rate").addEventListener("input", (event) => {
+    $("#voice-rate-value").textContent = formatRate(Number(event.target.value));
+  });
+  $("#voice-rate").addEventListener("change", (event) => void saveVoice({ rate: Number(event.target.value) }));
+  $("#voice-lang").addEventListener("change", (event) => onVoiceLangChange(event.target.value));
+  $("#voice-auto").addEventListener("click", () => {
+    primeSpeech();
+    const agent = findAgent(details.agentId);
+    if (agent) void saveVoice({ autoRead: !agent.voice?.autoRead });
+  });
+  $("#voice-test").addEventListener("click", testVoice);
+  for (const radio of document.querySelectorAll('input[name="library-root"]')) {
+    radio.addEventListener("change", () => {
+      if (radio.checked) void loadLibrary(details.agentId, radio.value, "");
+    });
+  }
+  $("#library-upload").addEventListener("click", () => $("#library-file").click());
+  $("#library-file").addEventListener("change", (event) => {
+    const files = [...event.target.files];
+    event.target.value = "";
+    void uploadToLibrary(files);
+  });
+  $("#open-workspace").addEventListener("click", () => void openFolder("agent"));
+  $("#open-shared").addEventListener("click", () => void openFolder("shared"));
+  $("#copy-workspace").addEventListener("click", () => void copyText($("#computer-workspace").textContent));
+  $("#copy-shared").addEventListener("click", () => void copyText($("#computer-shared").textContent));
+  $("#computer-change").addEventListener("click", () => {
+    if (state.settings.fullAccess) {
+      closeDialog(detailsDialog);
+      openSettings();
+    } else {
+      void agentAction("edit", details.agentId);
+    }
+  });
+
+  // Uso del plan.
+  $("#usage-button").addEventListener("click", toggleUsage);
+  $("#usage-refresh").addEventListener("click", () => void refreshUsage());
+
+  // Voces para leer en voz alta (algunos navegadores las cargan tarde).
+  if (Synth) {
+    loadVoices();
+    Synth.addEventListener?.("voiceschanged", loadVoices);
+    setTimeout(loadVoices, 600);
+  }
   $("#queue-toggle").addEventListener("click", () => {
     state.queueOpen = !state.queueOpen;
     renderQueue();

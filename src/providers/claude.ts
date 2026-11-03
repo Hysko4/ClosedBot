@@ -195,6 +195,8 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
         return {} as T;
       case "model/list":
         return { data: CLAUDE_MODELS } as T;
+      case "account/rateLimits/read":
+        return { rateLimits: await this.#readRateLimits() } as T;
       case "thread/start": {
         const threadId = randomUUID();
         this.#startThread(threadId, readThreadConfig(params), false);
@@ -245,6 +247,77 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
     if (!pending) return;
     this.#pendingServerRequests.delete(id);
     pending.reject(new Error(error.message));
+  }
+
+  /**
+   * Uso del plan de claude.ai (lo mismo que /usage en Claude Code): ventanas de 5 horas, semanal y por modelo.
+   * Usa la sesión de un hilo abierto si hay alguno; si no, abre una consulta corta sin herramientas ni MCP.
+   */
+  async #readRateLimits(): Promise<{ available: boolean; plan: string | null; windows: Array<{ id: string; label?: string; usedPercent: number; resetsAt: string | null }> }> {
+    const live = [...this.#threads.values()].find((runtime) => !runtime.closing);
+    let probe: { input: AsyncMessageQueue; query: Query } | null = null;
+    let target: Query;
+    if (live) {
+      target = live.query;
+    } else {
+      const input = new AsyncMessageQueue();
+      const env: Record<string, string> = {};
+      for (const [key, value] of Object.entries(this.#options.env ?? process.env)) if (typeof value === "string") env[key] = value;
+      env.CLAUDE_AGENT_SDK_CLIENT_APP = `closedbot/${VERSION}`;
+      env.ENABLE_CLAUDEAI_MCP_SERVERS = "false";
+      target = this.#createQuery({
+        prompt: input,
+        options: {
+          ...(this.#options.executable ? { pathToClaudeCodeExecutable: this.#options.executable } : {}),
+          mcpServers: {},
+          strictMcpConfig: true,
+          settingSources: [],
+          persistSession: false,
+          settings: { disableClaudeAiConnectors: true },
+          env,
+        },
+      });
+      probe = { input, query: target };
+    }
+    try {
+      const reader = (target as unknown as Record<string, unknown>).usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+      if (typeof reader !== "function") throw new Error("Esta versión de Claude Code no informa el uso del plan.");
+      const response = (await withTimeout(
+        (reader as (opts: { skipBehaviors: boolean }) => Promise<unknown>).call(target, { skipBehaviors: true }),
+        25_000,
+        "Claude tardó demasiado en informar el uso.",
+      )) as Record<string, unknown> | null;
+      const limits = isRecord(response?.rate_limits) ? response.rate_limits : null;
+      const plan = typeof response?.subscription_type === "string" ? response.subscription_type : null;
+      if (response?.rate_limits_available !== true || !limits) return { available: false, plan, windows: [] };
+      const windows: Array<{ id: string; label?: string; usedPercent: number; resetsAt: string | null }> = [];
+      for (const id of ["seven_day", "five_hour", "seven_day_opus", "seven_day_sonnet"]) {
+        const window = limits[id];
+        if (!isRecord(window) || typeof window.utilization !== "number") continue;
+        windows.push({ id, usedPercent: window.utilization, resetsAt: typeof window.resets_at === "string" ? window.resets_at : null });
+      }
+      if (Array.isArray(limits.model_scoped)) {
+        for (const window of limits.model_scoped.filter(isRecord)) {
+          if (typeof window.utilization !== "number" || typeof window.display_name !== "string") continue;
+          windows.push({
+            id: `model:${window.display_name}`,
+            label: `Semanal · ${window.display_name}`,
+            usedPercent: window.utilization,
+            resetsAt: typeof window.resets_at === "string" ? window.resets_at : null,
+          });
+        }
+      }
+      return { available: true, plan, windows };
+    } finally {
+      if (probe) {
+        probe.input.close();
+        try {
+          probe.query.close();
+        } catch {
+          // Ya había terminado.
+        }
+      }
+    }
   }
 
   /** Opciones del SDK para un hilo; se exporta para poder probar la política de acceso. */
@@ -691,6 +764,19 @@ function explainClaudeError(error: string): string {
     return `${error}\nEl modo «solo su carpeta» necesita el sandbox de Claude Code. En Linux: sudo apt install bubblewrap socat. Otra opción es dar acceso total a este agente, solo en una máquina dedicada.`;
   }
   return error;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    promise,
+    new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+      timer.unref?.();
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 class AsyncMessageQueue implements AsyncIterable<SDKUserMessage> {

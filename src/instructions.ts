@@ -14,12 +14,12 @@ export const MAIN_AGENT_GUIDE = [
   "1. Entiende el objetivo. Si falta un dato que cambia el equipo, pregúntalo una sola vez con ask_user; si no, decide tú y explica tus supuestos.",
   "2. Mira con list_agents quién existe ya: reutiliza o ajusta agentes (update_agent) antes de crear otros parecidos.",
   "3. Diseña un equipo pequeño y enfocado, por lo general de 2 a 5 agentes (nunca más de 8 por pedido), con un líder que reparte el trabajo. Dale a cada uno un nombre claro y único, su rol en una frase e instrucciones concretas: qué hace, qué entrega, con quién coordina y cuándo preguntarle al usuario.",
-  "4. Créalos con create_agent, todos con el mismo proyecto: un nombre corto que describa el objetivo (p. ej. «Creación de Juegos»). Así quedan agrupados en la barra lateral.",
+  "4. Créalos con create_agent, todos con el mismo proyecto: un nombre corto que describa el objetivo (p. ej. «Creación de Juegos»). El proyecto es la sección de la barra lateral donde quedan agrupados.",
   "5. Envíale el primer encargo al líder con send_message: el objetivo del usuario, el plan y quién hace qué. El trabajo lo hace el equipo, no tú.",
   "6. Cierra con un resumen breve para el usuario: el proyecto, cada agente con su rol y qué está haciendo ahora. Recuérdale que puede escribirle a cualquiera desde la lista.",
   "Cuando el líder te responda, cuéntale al usuario el avance en pocas líneas, sin volver a encargar lo mismo.",
   "Si el usuario pide cambios en un equipo (otro rol, mover a alguien de proyecto, otro modelo), hazlos con update_agent.",
-  "No puedes eliminar agentes ni cambiar sus permisos. Si el usuario quiere eliminar uno, dile que abra su conversación y use el menú de arriba → «Eliminar agente». Los agentes nuevos trabajan con el acceso que el usuario fija en Ajustes.",
+  "No puedes eliminar agentes ni cambiar sus permisos. Si el usuario quiere eliminar uno, dile que haga clic derecho sobre el agente en la barra lateral (en el teléfono, que lo mantenga presionado) y elija «Eliminar». Los agentes nuevos trabajan con el acceso que el usuario fija en Ajustes.",
   "Si el usuario solo conversa o pregunta algo, respóndele directamente sin crear agentes.",
 ].join("\n");
 
@@ -57,6 +57,38 @@ export function buildInstructions(agent: AgentRecord, sharedDir: string, userNam
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+/** Primera línea del saludo inicial: el proveedor demo la reconoce para contestar como lo haría un agente real. */
+export const GREETING_MARKER = "[ClosedBot · saludo inicial]";
+
+/**
+ * Pedido oculto que recibe un agente recién creado por el usuario: que se presente y le pregunte para qué lo quiere.
+ * `team` son los demás agentes (sin el bot principal) para que pueda mencionar los equipos que ya existen.
+ */
+export function composeGreeting(
+  agent: Pick<AgentRecord, "name">,
+  userName: string,
+  team: Array<Pick<AgentRecord, "name" | "role" | "project">>,
+): string {
+  const user = userName.trim();
+  const sections = new Map<string, string[]>();
+  for (const member of team) {
+    const key = member.project.trim();
+    if (!sections.has(key)) sections.set(key, []);
+    sections.get(key)?.push(member.role.trim() ? `${member.name} (${truncate(member.role.trim(), 80)})` : member.name);
+  }
+  const lines = [...sections].map(([section, members]) => `- ${section ? `Sección «${section}»` : "Sin sección"}: ${members.slice(0, 8).join(", ")}${members.length > 8 ? "…" : ""}`);
+  return [
+    GREETING_MARKER,
+    `Te llamas «${agent.name}» y ${user || "el usuario"} acaba de crearte en ClosedBot. Este es tu primer mensaje: no hay nada que hacer todavía, solo presentarte.`,
+    user ? `El usuario se llama «${user}».` : "No sabes cómo se llama el usuario: salúdalo sin nombre.",
+    lines.length ? ["Su equipo actual de agentes:", ...lines].join("\n") : "Todavía no tiene otros agentes.",
+    "Escribe dos párrafos breves, como en un chat y sin títulos ni listas:",
+    `1. Un saludo cálido${user ? " por su nombre" : ""} en el que digas tu nombre y que estás listo para echarle una mano.`,
+    "2. Pregúntale para qué le gustaría usarte principalmente. Si ya tiene un equipo, menciónalo por lo que hace (por ejemplo, «un equipo armado para tus videojuegos») y pregúntale si quiere que te sumes a ese trabajo o que te encargues de otra cosa; da dos o tres ejemplos breves.",
+    "No uses herramientas ni crees archivos en este turno. Responde en español, salvo que su nombre o su equipo indiquen otro idioma.",
+  ].join("\n");
 }
 
 /** Texto que recibe el agente para una entrega de la cola. */

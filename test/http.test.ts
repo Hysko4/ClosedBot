@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { type AddressInfo, connect } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -437,5 +437,80 @@ test("HTTP: inicio de sesión de los proveedores, con sesión y cabecera CSRF", 
     assert.equal(logout.status, 409);
   } finally {
     await s.close();
+  }
+});
+
+test("HTTP: agente simple con saludo, menú de la barra, secciones, biblioteca y uso", async () => {
+  const server = await startServer();
+  try {
+    await server.login();
+    server.h.service.updateSettings({ userName: "Jonathan" });
+    const created = await server.call("/api/agents", { method: "POST", body: { name: "d", provider: "demo", avatar: 10_409, greet: true } });
+    assert.equal(created.status, 201);
+    const agent = created.json?.agent;
+    assert.equal(agent.avatar, 10_409);
+    assert.equal(agent.pinned, false);
+    await waitFor(() => server.h.service.listMessages(agent.id).some((message) => message.role === "assistant" && message.status === "completed"), 5_000, "saludo");
+    const messages = await server.call(`/api/agents/${agent.id}/messages`);
+    assert.deepEqual(
+      messages.json?.messages.map((message: { role: string }) => message.role),
+      ["activity", "assistant"],
+    );
+    assert.match(messages.json?.messages[1].text, /^¡Hola, Jonathan! Soy d/);
+
+    // Menú de la barra lateral.
+    assert.equal((await server.call(`/api/agents/${agent.id}`, { method: "PATCH", body: { pinned: true, hidden: true } })).json?.agent.hidden, true);
+    assert.equal((await server.call(`/api/agents/${agent.id}`, { method: "PATCH", body: { pinned: "sí" } })).status, 400);
+    assert.equal((await server.call(`/api/agents/${agent.id}/unread`, { method: "POST" })).json?.agent.unread, true);
+    assert.equal((await server.call("/api/read-all", { method: "POST" })).json?.changed, 1);
+    const voice = await server.call(`/api/agents/${agent.id}`, { method: "PATCH", body: { voice: { rate: 1.5, lang: "es-CL" } } });
+    assert.deepEqual(voice.json?.agent.voice, { name: "", rate: 1.5, lang: "es-CL", autoRead: false });
+
+    // Secciones.
+    assert.deepEqual((await server.call("/api/sections", { method: "POST", body: { name: "Correo" } })).json?.sections, ["Correo"]);
+    assert.equal((await server.call("/api/sections", { method: "POST", body: { name: "correo" } })).status, 409);
+    assert.deepEqual((await server.call("/api/sections/rename", { method: "POST", body: { from: "Correo", to: "Correo y agenda" } })).json?.sections, ["Correo y agenda"]);
+    assert.deepEqual((await server.call("/api/sections/delete", { method: "POST", body: { name: "Correo y agenda" } })).json?.sections, []);
+    const state = await server.call("/api/state");
+    assert.deepEqual(state.json?.sections, []);
+    assert.deepEqual(state.json?.usage, []);
+
+    // Biblioteca: lista, ve archivos seguros en el navegador y descarga el resto, siempre sin scripts.
+    writeFileSync(join(agent.workspace, "nota.txt"), "hola");
+    writeFileSync(join(agent.workspace, "pagina.html"), "<script>alert(1)</script>");
+    const library = await server.call(`/api/agents/${agent.id}/library?root=agent`);
+    assert.deepEqual(
+      library.json?.entries.map((entry: { name: string }) => entry.name),
+      ["nota.txt", "pagina.html"],
+    );
+    const text = await fetch(`${server.base}/api/agents/${agent.id}/library/file?path=nota.txt`, { headers: { cookie: server.cookie } });
+    assert.equal(text.status, 200);
+    assert.equal(await text.text(), "hola");
+    assert.equal(text.headers.get("content-type"), "text/plain; charset=utf-8");
+    assert.match(text.headers.get("content-disposition") ?? "", /^inline/);
+    assert.match(text.headers.get("content-security-policy") ?? "", /^sandbox/);
+    const html = await fetch(`${server.base}/api/agents/${agent.id}/library/file?path=pagina.html`, { headers: { cookie: server.cookie } });
+    await html.arrayBuffer();
+    assert.equal(html.headers.get("content-type"), "application/octet-stream");
+    assert.match(html.headers.get("content-disposition") ?? "", /^attachment; filename\*=UTF-8''pagina\.html/);
+    assert.equal((await server.call(`/api/agents/${agent.id}/library/file?path=../../etc/passwd`)).status, 400);
+    assert.equal((await server.call(`/api/agents/${agent.id}/library?root=otra`)).status, 400);
+    const anonymous = await fetch(`${server.base}/api/agents/${agent.id}/library/file?path=nota.txt`);
+    assert.equal(anonymous.status, 401);
+    await anonymous.arrayBuffer();
+
+    // Abrir la carpeta solo desde el propio equipo (no a través de tailscale serve).
+    const forwarded = await server.call(`/api/agents/${agent.id}/open-folder`, {
+      method: "POST",
+      body: { root: "agent" },
+      headers: { "x-forwarded-for": "100.64.0.7" },
+    });
+    assert.equal(forwarded.status, 403);
+
+    // Uso del plan.
+    assert.deepEqual((await server.call("/api/usage")).json?.usage, []);
+    assert.equal((await server.call("/api/usage/refresh", { method: "POST" })).status, 200);
+  } finally {
+    await server.close();
   }
 });

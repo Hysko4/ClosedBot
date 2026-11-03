@@ -244,7 +244,7 @@ test("Store: una base de la versión 0.1 se actualiza sin perder datos", () => {
       });
       assert.equal(carla.avatar, 2);
       assert.equal(store.getMessage("m1")?.payload, null);
-      assert.equal(store.getMeta("schema_version"), "2");
+      assert.equal(store.getMeta("schema_version"), "3");
       assert.deepEqual(store.listRoutines(), []);
     } finally {
       store.close();

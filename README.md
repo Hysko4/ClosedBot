@@ -13,7 +13,11 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
 - **Respuestas en vivo**, con el historial guardado en SQLite. Cada agente retoma su conversación aunque reinicies el servidor.
 - **Preguntas con opciones**: un agente puede preguntarte algo con una tarjeta de 2 a 4 opciones (con una recomendada). Tocas una y tu respuesta le llega como un mensaje nuevo.
 - **Rutinas**: tareas que se repiten solas, a horas fijas (por ejemplo, de lunes a viernes a las 08:30) o cada cierto tiempo (desde 15 minutos). Las creas tú o se las pides a un agente. Solo corren mientras ClosedBot está abierta; si una se atrasa más de 2 horas, se salta y queda el aviso.
-- **Lista de agentes como en una app de chat**: agrupados por proyecto, con su último mensaje y un punto en los que tienen novedades.
+- **Lista de agentes como en una app de chat**: agrupados en secciones, con su último mensaje y un punto en los que tienen novedades. Clic derecho (o mantener presionado en el celular) en un agente: fijar, mover a otra sección, marcar como no leído, cambiar nombre, ocultar y eliminar. Clic derecho en el fondo de la lista: nuevo agente, nueva sección y marcar todo como leído.
+- **Crear un agente en un paso**: el **+** pide solo el nombre, una figura y un color. El agente nuevo te saluda y te pregunta para qué lo quieres. Los que arma Claude Bot no saludan.
+- **Ficha de cada agente** (tocando su nombre arriba del chat): *Detalles* con sus rutinas y el chat de voz, *Biblioteca* con los archivos de su carpeta y de la compartida, y *Computadora* con sus carpetas y su nivel de acceso.
+- **Respuestas en voz alta**: cada agente tiene su voz, velocidad e idioma (usa las voces de Windows y Edge). Lee solo sus respuestas si lo activas, o cuando le hablas con el botón morado.
+- **Uso del plan de Claude**: un anillo junto a Ajustes muestra el porcentaje semanal. Al tocarlo se ven también las 5 horas y cuánto falta para que se reinicien. Es el uso de toda tu cuenta.
 - **Dictado por voz y adjuntos**: el micrófono escribe lo que dices (en Edge o Chrome) y puedes adjuntar archivos, que quedan en la carpeta del agente.
 - **App instalable** (PWA) en Android y iPhone, a través de tu red privada de Tailscale.
 - **Conexión con tu cuenta**: en Ajustes, «Iniciar sesión con Claude» abre el navegador para que entres con tu cuenta de Claude, como en OpenBot. No hace falta una clave de API.
@@ -150,15 +154,18 @@ Si el navegador no se abre (o usas la app desde otro equipo), Ajustes muestra un
 ## Uso
 
 - **Armar un equipo**: toca a Claude Bot (arriba en la barra lateral) y cuéntale qué necesitas, por ejemplo: «Arma un equipo para crear un videojuego de plataformas». Cada agente que crea aparece en la lista, dentro de su proyecto y con un punto azul. En su chat verás «Creó a …»; al tocar el nombre se abre la conversación de ese agente. En «Editar a Claude Bot» puedes dejarle tus preferencias para armar equipos (por ejemplo, «máximo 3 agentes» o «usa Sonnet para tareas simples»).
-- **Crear un agente**: botón **+**. Elige el proveedor, el modelo (o «Predeterminado»), el esfuerzo y el acceso.
+- **Crear un agente**: botón **+**. Ponle nombre y elige figura y color. Usa Claude si tienes sesión (si no, Demo). El rol, las instrucciones, el modelo, el esfuerzo y el acceso se cambian en su ficha → «Instrucciones y modelo».
 - **Escribir**: en el computador, Enter envía y Mayús+Enter hace un salto de línea. En el teléfono se envía con el botón.
-- **Cola**: si el agente está ocupado, verás «N mensajes esperando turno». Desde ahí puedes quitar mensajes. En el menú ⋯ puedes pausar la cola, empezar de cero, editar o eliminar el agente. «Detener» corta el turno en curso.
+- **Cola**: si el agente está ocupado, verás «N mensajes esperando turno». Desde ahí puedes quitar mensajes. En su ficha (toca su nombre arriba) puedes pausar la cola, empezar de cero o eliminarlo. «Detener» corta el turno en curso.
 - **Equipo**: pídele a un agente que consulte a otro, por ejemplo: «Pídele a Beto que revise esto». En su chat verás «Enviado a Beto» y después «Respuesta de Beto».
 - **Carpetas**: cada agente trabaja en `~/.closedbot/agentes/<nombre>`, y todos comparten `~/.closedbot/compartida`.
 - **Preguntas**: cuando un agente necesita que elijas, verás una tarjeta con opciones (A, B, C…). La recomendada lleva una etiqueta. Al tocar una, el agente sigue con tu respuesta.
 - **Rutinas**: botón del reloj en la barra lateral, o pídeselo a un agente («todos los días a las 9, revisa…»). Puedes pausarlas, ejecutarlas al momento o borrarlas. Cada agente tiene hasta 20.
-- **Proyectos**: al crear o editar un agente, escribe un proyecto para agruparlo en la barra lateral.
-- **Voz**: el micrófono dicta en el cuadro de texto. Con el cuadro vacío, el botón morado graba y envía al terminar. El dictado usa el reconocimiento de voz del navegador, que en Edge y Chrome procesa el audio en los servidores de Microsoft o Google.
+- **Secciones**: agrupan a los agentes en la barra lateral. Créalas con clic derecho en el fondo de la lista y mueve agentes con «Mover a». Al eliminar una sección, sus agentes pasan a «Sin asignar». Claude Bot pone en la misma sección a los agentes de un equipo.
+- **Ocultos y fijados**: los fijados van arriba; los ocultos, plegados al final de la lista («Ocultos») y en la búsqueda.
+- **Voz**: el micrófono dicta en el cuadro de texto. Con el cuadro vacío, el botón morado graba y envía al terminar, y la respuesta se lee en voz alta. El dictado usa el reconocimiento de voz del navegador, que en Edge y Chrome procesa el audio en los servidores de Microsoft o Google. En la ficha del agente, *Chat de voz* elige la voz (las «Natural» de Edge son las mejores y necesitan internet), la velocidad y el idioma, y si lee siempre sus respuestas. Bajo cada respuesta hay un botón para escucharla.
+- **Biblioteca**: en la ficha del agente se ven y descargan los archivos de su carpeta y de la compartida. «Subir archivo» los deja en `adjuntos/`. Los archivos se abren en una pestaña aparte, sin permisos sobre la app.
+- **Uso del plan**: lo informa Claude Code (como `/usage`) cada 10 minutos y tras cada turno. Esa lectura es una función experimental del SDK de Claude: si cambia, el anillo desaparece y la app sigue igual.
 - **Adjuntos**: clip, pegar o arrastrar. Hasta 25 MB por archivo; se guardan en `adjuntos/` dentro de la carpeta del agente.
 - **Probar sin IA**: con el proveedor Demo, una línea `@Nombre: texto` envía `texto` a ese compañero, `/equipo` lista a los compañeros, `/lento` responde despacio (para probar «Detener»), `/pregunta ¿Texto? | A | B` muestra una tarjeta de opciones y `/rutina 09:00 Nombre` crea una rutina. Si Claude Bot usa la demo, `/crear Nombre | Rol | Proyecto` crea un agente y `/ajustar Nombre | Rol nuevo` le cambia el rol.
 
@@ -236,7 +243,7 @@ test/                  pruebas (node:test)
 
 ## Estado y límites conocidos
 
-- Versión 0.4.0. Se probó con el proveedor Demo y con simulaciones de Claude y Codex. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
+- Versión 0.5.0. Se probó con el proveedor Demo y con simulaciones de Claude y Codex. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
 - Un solo usuario y sin notificaciones push por ahora.
 - Claude Bot crea hasta 8 agentes por pedido y deja de crear cuando ya hay 60 agentes en total.
 - Las preguntas con opciones terminan el turno del agente: tu respuesta le llega como un mensaje nuevo.

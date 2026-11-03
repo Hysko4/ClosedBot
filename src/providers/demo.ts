@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { GREETING_MARKER } from "../instructions.js";
 import {
   TEAM_NAMESPACE,
   TOOL_ASK_USER,
@@ -213,7 +214,7 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
       }
       const fromTeammate = input.startsWith("Mensaje de tu compañero") || input.startsWith("Respuesta de tu compañero");
       const summary = body.length > 160 ? `${body.slice(0, 160)}…` : body;
-      const reply = [
+      const reply = input.startsWith(GREETING_MARKER) ? demoGreeting(input) : [
         fromTeammate ? `Modo demo: recibí el mensaje de mi compañero («${summary}»).` : `Modo demo (sin IA): recibí «${summary}».`,
         ...notes,
         fromTeammate ? "" : "Este modo no usa ningún modelo; sirve para probar la cola, la transmisión en vivo y los mensajes entre agentes.",
@@ -269,6 +270,19 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
     if (isRecord(result) && result.success === false) throw new Error(text || "La herramienta falló.");
     return text;
   }
+}
+
+/** Saludo inicial de la demo, con el nombre del agente y del usuario que trae el pedido. */
+function demoGreeting(input: string): string {
+  const agent = /Te llamas «([^»]+)»/.exec(input)?.[1] ?? "tu agente nuevo";
+  const user = /El usuario se llama «([^»]+)»/.exec(input)?.[1];
+  const team = /Sección «([^»]+)»/.exec(input)?.[1];
+  return [
+    `¡Hola${user ? `, ${user}` : ""}! Soy ${agent}, recién llegado y listo para echarte una mano.`,
+    team
+      ? `Para empezar con buen pie: ¿para qué te gustaría usarme principalmente? Veo que ya tienes un equipo en «${team}», así que me sirve saber si quieres que me sume a ese trabajo o que me encargue de otra cosa, como tu correo, tus archivos o tareas del día a día.`
+      : "Para empezar con buen pie: ¿para qué te gustaría usarme principalmente? Puedo encargarme de tu correo, tus archivos, investigar algo o ayudarte con tareas del día a día.",
+  ].join("\n\n");
 }
 
 /** Quita el encabezado que el orquestador añade a los mensajes de compañeros. */
