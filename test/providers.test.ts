@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { detectProviders, geminiAuthMethod } from "../src/providers/detect.js";
+import { antigravityTokenPath } from "../src/providers/antigravity.js";
+import { detectProviders } from "../src/providers/detect.js";
 import { findOnPath, type LocatedCli, locateCli, npmCommand } from "../src/providers/locate.js";
 import { acpAuthMethods, GROK_INSTALL, installCommand, providerEnv, signInCommands } from "../src/providers/presets.js";
 import { type ProviderStatus, type ServiceEvent, ServiceError } from "../src/service.js";
@@ -42,7 +43,8 @@ process.exit(2);`;
 const GROK = `const a = process.argv.slice(2);
 if (a[0] === "--no-auto-update" && a[1] === "--version") { console.log("grok 0.9.1"); process.exit(0); }
 process.exit(2);`;
-const GEMINI = `if (process.argv[2] === "--version") { console.log("0.66.0"); process.exit(0); } process.exit(2);`;
+/** Antigravity no se ejecuta al detectarlo (cada arranque descomprime unos 300 MB): si corre, falla la prueba. */
+const ANTIGRAVITY = `require("fs").writeFileSync(process.env.FAKE_AGY_RAN, "si"); process.exit(3);`;
 const BROKEN = `console.error("Error: falta una biblioteca"); process.exit(1);`;
 
 /** Entorno sin las claves de proveedores que pudiera tener el equipo de pruebas. */
@@ -60,9 +62,10 @@ test("buscar programas en Windows: PATH, npm, la app de Codex, el instalador de 
     const appData = join(temp.path, "Roaming");
     const local = join(temp.path, "Local");
     const home = join(temp.path, "Usuario");
+    const programs = join(temp.path, "datos", "programas");
     const env = { PATH: "", PATHEXT: ".COM;.EXE;.BAT;.CMD", APPDATA: appData, LOCALAPPDATA: local, USERPROFILE: home };
     const find = (name: "codex" | "grok" | "gemini", extra: NodeJS.ProcessEnv = {}, configured?: string) =>
-      locateCli(name, { env: { ...env, ...extra }, platform: "win32", configured: configured ?? null });
+      locateCli(name, { env: { ...env, ...extra }, platform: "win32", configured: configured ?? null, programsDir: programs });
 
     for (const name of ["codex", "grok", "gemini"] as const) assert.equal(find(name), null, name);
 
@@ -87,8 +90,16 @@ test("buscar programas en Windows: PATH, npm, la app de Codex, el instalador de 
     const official = touch(join(home, ".grok", "bin", "grok.exe"));
     assert.deepEqual(find("grok"), { path: official, source: "oficial" });
 
-    const gemini = touch(join(appData, "npm", "gemini.cmd"));
-    assert.deepEqual(find("gemini"), { path: gemini, source: "npm" });
+    // Gemini es Antigravity: el Gemini CLI de npm ya no sirve con cuentas personales y no se toma.
+    touch(join(appData, "npm", "gemini.cmd"));
+    assert.equal(find("gemini"), null);
+    const fromOpenbot = touch(join(appData, "OpenBot", "provider-runtimes", "antigravity", "win32-x64", "1.4.5", "bin", "agy_acp_server.exe"));
+    assert.deepEqual(find("gemini"), { path: fromOpenbot, source: "openbot" });
+    // La que bajó «Instalar» en ClosedBot va antes; una instalación a medias no cuenta.
+    touch(join(programs, "antigravity", ".instalando-1", "agy_acp_server.exe"), Date.now() + 60_000);
+    assert.deepEqual(find("gemini"), { path: fromOpenbot, source: "openbot" });
+    const own = touch(join(programs, "antigravity", "1.4.5", "agy_acp_server.exe"));
+    assert.deepEqual(find("gemini"), { path: own, source: "propia" });
     // npm no deja «.ps1» ni nada que no sea .exe/.cmd en el PATH: no se toma.
     const psDir = join(temp.path, "ps");
     touch(join(psDir, "gemini.ps1"));
@@ -107,8 +118,11 @@ test("buscar programas en Linux y macOS, y el npm del mismo Node", () => {
     const grok = touch(join(home, ".grok", "bin", "grok"));
     assert.deepEqual(locateCli("grok", { env, platform: "linux" }), { path: grok, source: "oficial" });
     const prefix = join(temp.path, "npm-global");
-    const gemini = touch(join(prefix, "bin", "gemini"));
-    assert.deepEqual(locateCli("gemini", { env: { ...env, npm_config_prefix: prefix }, platform: "darwin" }), { path: gemini, source: "npm" });
+    touch(join(prefix, "bin", "gemini"));
+    const programs = join(temp.path, "programas");
+    assert.equal(locateCli("gemini", { env: { ...env, npm_config_prefix: prefix }, platform: "darwin", programsDir: programs }), null, "Gemini CLI no");
+    const gemini = touch(join(programs, "antigravity", "1.4.5", "agy_acp_server.par"));
+    assert.deepEqual(locateCli("gemini", { env, platform: "darwin", programsDir: programs }), { path: gemini, source: "propia" });
 
     const nodeDir = join(temp.path, "nodejs");
     const node = touch(join(nodeDir, "node.exe"));
@@ -146,29 +160,34 @@ test("detección de Codex, Grok y Gemini: sin instalar, sin sesión, con sesión
 
     found.codex = { path: fakeCli(bins, "codex", CODEX), source: "app" };
     found.grok = { path: fakeCli(bins, "grok", GROK), source: "openbot" };
-    found.gemini = { path: fakeCli(bins, "gemini", GEMINI), source: "npm" };
-    status = byId(await detect());
+    const ran = join(temp.path, "antigravity-corrio");
+    found.gemini = { path: fakeCli(join(temp.path, "OpenBot", "antigravity", "1.4.5", "bin"), "agy_acp_server", ANTIGRAVITY), source: "openbot" };
+    status = byId(await detect(cleanEnv({ FAKE_AGY_RAN: ran })));
     assert.equal(status.codex?.loggedIn, false);
     assert.equal(status.codex?.path, found.codex.path);
     assert.match(status.codex?.detail ?? "", /^codex-cli 0\.99\.0 \(de la app de escritorio\), sin sesión: pulsa «Iniciar sesión con ChatGPT»/);
     assert.match(status.grok?.detail ?? "", /^grok 0\.9\.1 \(de la copia de OpenBot\), sin sesión: pulsa «Iniciar sesión con Grok»/);
-    assert.match(status.gemini?.detail ?? "", /^Gemini CLI 0\.66\.0 \(de los programas de npm\), sin sesión: pulsa «Iniciar sesión con Google»/);
-    assert.equal(status.gemini?.canSignOut, false, "Gemini CLI no tiene cómo cerrar la sesión");
+    assert.equal(status.gemini?.detail, "Antigravity 1.4.5 (de la copia de OpenBot), sin sesión: pulsa «Iniciar sesión con Google».");
+    assert.equal(status.gemini?.canSignOut, false, "Antigravity no tiene cómo cerrar la sesión");
+    assert.ok(!existsSync(ran), "Antigravity no se ejecuta para detectarlo");
     for (const id of ["codex", "grok", "gemini"]) {
       assert.equal(status[id]?.available, true, id);
       assert.equal(status[id]?.canSignIn, true, id);
     }
 
-    // Con sesión: Codex lo dice él; Grok deja ~/.grok/auth.json y Gemini guarda el método en su configuración.
-    mkdirSync(join(home, ".grok"));
-    writeFileSync(join(home, ".grok", "auth.json"), "{}");
+    // Lo que dejó Gemini CLI (el método en su configuración) ya no cuenta como sesión.
     mkdirSync(join(home, ".gemini"));
     writeFileSync(join(home, ".gemini", "settings.json"), JSON.stringify({ security: { auth: { selectedType: "oauth-personal" } } }));
-    assert.equal(geminiAuthMethod(home), "oauth-personal");
+    assert.equal(byId(await detect()).gemini?.loggedIn, false);
+
+    // Con sesión: Codex lo dice él; Grok deja ~/.grok/auth.json y Antigravity, su token (también el que dejó OpenBot).
+    mkdirSync(join(home, ".grok"));
+    writeFileSync(join(home, ".grok", "auth.json"), "{}");
+    touch(antigravityTokenPath(home));
     status = byId(await detect(cleanEnv({ FAKE_CODEX_LOGIN: "1" })));
     for (const id of ["codex", "grok", "gemini"]) assert.equal(status[id]?.loggedIn, true, id);
     assert.match(status.codex?.detail ?? "", /Logged in using ChatGPT/);
-    assert.match(status.gemini?.detail ?? "", /sesión iniciada con Google/);
+    assert.equal(status.gemini?.detail, "Antigravity 1.4.5 (de la copia de OpenBot) · sesión iniciada con Google.");
 
     // Una clave en el entorno manda: no hay sesión que abrir desde la app.
     status = byId(await detect(cleanEnv({ XAI_API_KEY: "xai-prueba", GEMINI_API_KEY: "gem-prueba" })));
@@ -220,14 +239,28 @@ test("cada proveedor ve solo sus claves; comandos oficiales para instalar y para
     args: ["install", "-g", "@openai/codex", "--no-fund", "--no-audit"],
     env,
   });
-  assert.deepEqual(installCommand("gemini", { platform: "linux", env, npm: "/usr/bin/npm" }).args, ["install", "-g", "@google/gemini-cli", "--no-fund", "--no-audit"]);
+  // Gemini: el .zip de Antigravity de Google, con el Node de la app, a la carpeta de programas.
+  assert.deepEqual(installCommand("gemini", { platform: "win32", env, nodePath: "C:\\node.exe", installScript: "C:\\app\\install-antigravity.js", programsDir: "C:\\datos\\programas" }), {
+    command: "C:\\node.exe",
+    args: ["C:\\app\\install-antigravity.js", "C:\\datos\\programas"],
+    env,
+  });
+  assert.ok(existsSync(String(installCommand("gemini", { programsDir: "/tmp/x" }).args[0])), "el script de instalación existe junto a la app");
+  assert.throws(() => installCommand("gemini", { env }), /carpeta de programas/);
 
   const grok = signInCommands("grok", "C:\\grok.exe", { env });
   assert.deepEqual(grok.login, { command: "C:\\grok.exe", args: ["--no-auto-update", "login", "--oauth"], env });
   assert.deepEqual(grok.logout, { command: "C:\\grok.exe", args: ["--no-auto-update", "logout"], env });
-  const gemini = signInCommands("gemini", "C:\\npm\\gemini.cmd", { env, nodePath: "C:\\node.exe", acpLoginScript: "C:\\app\\acp-login.js" });
-  assert.deepEqual(gemini.login, { command: "C:\\node.exe", args: ["C:\\app\\acp-login.js", "oauth-personal", "C:\\npm\\gemini.cmd", "--acp"], env });
+  const agy = "C:\\OpenBot\\agy_acp_server.exe";
+  const gemini = signInCommands("gemini", agy, { env, platform: "win32", nodePath: "C:\\node.exe", acpLoginScript: "C:\\app\\acp-login.js", tempRoot: "C:\\datos\\tmp" });
+  // La sesión va a un archivo (así se ve si quedó guardada) y el programa usa una carpeta temporal propia.
+  assert.deepEqual(gemini.login, {
+    command: "C:\\node.exe",
+    args: ["C:\\app\\acp-login.js", "oauth-personal", agy],
+    env: { ...env, AGY_ACP_FORCE_FILE_STORAGE: "1", CLOSEDBOT_AGENT_TEMP: "C:\\datos\\tmp" },
+  });
   assert.equal(gemini.logout, null);
+  assert.deepEqual(signInCommands("gemini", "/x/agy_acp_server.par", { env, platform: "linux" }).login.args.slice(1), ["oauth-personal", "/x/agy_acp_server.par", "--uid="]);
   assert.ok(existsSync(String(signInCommands("gemini", "gemini").login.args[0])), "el script de inicio de sesión existe junto a la app");
   assert.deepEqual(signInCommands("codex", "/bin/codex", { env }).login.args, ["login"]);
 });
@@ -238,12 +271,54 @@ test("métodos de autenticación que ClosedBot pide solo, sin abrir el navegador
     assert.deepEqual(acpAuthMethods("grok", {}, temp.path), ["cached_token"]);
     assert.deepEqual(acpAuthMethods("gemini", {}, temp.path), []);
     assert.deepEqual(acpAuthMethods("gemini", { GEMINI_API_KEY: "g" }, temp.path), ["gemini-api-key"]);
-    mkdirSync(join(temp.path, ".gemini"));
-    // El formato antiguo de la configuración también vale.
-    writeFileSync(join(temp.path, ".gemini", "settings.json"), '{ "selectedAuthType": "oauth-personal" }');
+    // El token que guarda Antigravity (por ejemplo, al entrar desde OpenBot).
+    touch(antigravityTokenPath(temp.path));
     assert.deepEqual(acpAuthMethods("gemini", {}, temp.path), ["oauth-personal"]);
+    assert.deepEqual(acpAuthMethods("gemini", { USERPROFILE: temp.path }), ["oauth-personal"], "por defecto, la carpeta personal del entorno");
   } finally {
     temp.cleanup();
+  }
+});
+
+test("iniciar sesión: solo dice «conectado» si la sesión quedó guardada y deja a la vista por qué falló", async () => {
+  let saved = false;
+  const node = (code: string) => ({ command: process.execPath, args: ["-e", code] });
+  let login = node("process.exit(0)");
+  const h = await createHarness({
+    detectProviders: async () => [
+      { id: "claude", label: "Claude", available: true, loggedIn: true, detail: "prueba" },
+      { id: "gemini", label: "Gemini", available: true, loggedIn: saved, canSignIn: true, canSignOut: false, canInstall: true, detail: saved ? "con sesión" : "sin sesión" },
+      { id: "demo", label: "Demo", available: true, loggedIn: true, detail: "prueba" },
+    ],
+    signInCommands: (provider) => (provider === "gemini" ? { login, logout: null, acceptsCode: false } : null),
+  });
+  const gemini = () => h.service.providers().find((item) => item.id === "gemini") as ProviderStatus;
+  const notices = () => h.events.filter((event): event is Extract<ServiceEvent, { type: "notice" }> => event.type === "notice").map((event) => event.message);
+  try {
+    await waitFor(() => gemini()?.canSignIn === true, 5_000, "detección");
+    // Termina bien pero la sesión no quedó guardada (lo que pasaba con Gemini CLI): no se dice «conectado».
+    h.service.startSignIn("gemini");
+    await waitFor(() => notices().length === 1, 10_000, "aviso");
+    const unsaved = "El inicio de sesión de Gemini terminó, pero la sesión no quedó guardada. Vuelve a pulsar «Iniciar sesión con Google».";
+    assert.deepEqual(notices(), [unsaved]);
+    assert.equal(gemini().problem, unsaved);
+
+    // Falla con lo que respondió Google: queda en la tarjeta (sin repetir «No se pudo iniciar sesión»).
+    login = node(`console.error("Login failed: This client is no longer supported for Gemini Code Assist for individuals."); process.exit(1)`);
+    h.service.startSignIn("gemini");
+    assert.equal(gemini().problem, undefined, "mientras se intenta, no se muestra");
+    await waitFor(() => notices().length === 2, 10_000, "aviso de fallo");
+    assert.equal(gemini().problem, "No se pudo iniciar sesión: This client is no longer supported for Gemini Code Assist for individuals.");
+
+    // Ahora sí queda guardada: se dice y el problema desaparece.
+    saved = true;
+    login = node("process.exit(0)");
+    h.service.startSignIn("gemini");
+    await waitFor(() => notices().includes("Gemini quedó conectado."), 10_000, "conectado");
+    assert.equal(gemini().problem, undefined);
+    assert.equal(gemini().loggedIn, true);
+  } finally {
+    await h.close();
   }
 });
 

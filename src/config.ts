@@ -13,7 +13,7 @@ export interface Config {
   publicDir: string;
   maxHops: number;
   codexBin: string;
-  /** Rutas elegidas a mano para Grok y Gemini CLI (si no, se buscan solas). */
+  /** Rutas elegidas a mano para Grok y para Antigravity, el programa de Gemini (si no, se buscan solas). */
   grokBin: string | null;
   geminiBin: string | null;
   claudeBin: string | null;

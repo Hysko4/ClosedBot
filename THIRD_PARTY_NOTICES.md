@@ -25,8 +25,7 @@
 ## Herramientas externas (no incluidas)
 
 - `codex` (OpenAI Codex CLI) se instala aparte con `npm install -g @openai/codex` (o con «Instalar» en Ajustes).
-- Gemini CLI (`@google/gemini-cli`, Apache-2.0) se instala con npm al pulsar «Instalar» en Ajustes.
+- Para Gemini, el servidor ACP de **Google Antigravity** (`agy_acp_server`, licencia propietaria de Google LLC, términos en https://antigravity.google/terms). ClosedBot no lo incluye: usa la copia que descargó OpenBot o, al pulsar «Instalar» en Ajustes, descarga el `.zip` oficial de `dl.google.com` indicado en el registro de ACP y comprueba su SHA-256.
 - Grok CLI se instala con el instalador oficial de xAI (`https://x.ai/cli`) al pulsar «Instalar» en Ajustes; lo rigen los términos de xAI.
 - Modelo de dictado **Parakeet TDT 0.6B v3** (NVIDIA, CC-BY-4.0), en la versión convertida por el proyecto sherpa-onnx. Se descarga solo si lo pides en Ajustes, a `<datos>/voz`.
-- **ElevenLabs** es un servicio externo opcional: se usa solo con la clave de tu propia cuenta y bajo sus términos.
 - `@playwright/mcp` se descarga con `npx` solo si activas `CLOSEDBOT_PLAYWRIGHT=1`.

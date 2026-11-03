@@ -1,5 +1,5 @@
 // Cliente ACP (Agent Client Protocol, https://agentclientprotocol.com): conecta agentes como Grok o
-// Gemini CLI, que hablan JSON-RPC por stdin/stdout, y los traduce al protocolo tipo app-server de Codex
+// Antigravity (el de Gemini), que hablan JSON-RPC por stdin/stdout, y los traduce al protocolo tipo app-server de Codex
 // que usa el orquestador (thread/start, turn/start, item/agentMessage/delta, turn/completed…).
 // Escrito para ClosedBot a partir de la especificación pública del protocolo.
 
@@ -14,6 +14,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TEAM_NAMESPACE, TEAM_TOOLS } from "../team.js";
 import { VERSION } from "../version.js";
+import { makePrivateTemp, removePrivateTemp, withTemp } from "./antigravity.js";
 import type { AgentClient, ProviderId } from "./client.js";
 import { AppServerError, redactDiagnostic } from "./codex.js";
 import { JsonLineDecoder } from "./jsonl.js";
@@ -59,6 +60,18 @@ export interface AcpClientOptions {
   nodePath?: string;
   /** Si el agente no confirma la cancelación en este tiempo, el turno se da por interrumpido igual. */
   cancelGraceMs?: number;
+  /**
+   * Lo que escribe el agente por stderr cuando no tiene sesión y se queda esperando que alguien entre
+   * (Antigravity espera hasta 5 minutos): al verlo se corta enseguida y se pide entrar desde Ajustes.
+   */
+  signInPrompt?: RegExp;
+  /** Cada proceso recibe una carpeta temporal propia dentro de esta, que se borra al terminar. */
+  tempRoot?: string;
+}
+
+/** El agente pidió entrar con la cuenta: no sirve reintentar ni autenticar con lo guardado. */
+class SignInRequiredError extends AppServerError {
+  override name = "SignInRequiredError";
 }
 
 export interface AcpModel {
@@ -161,6 +174,8 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
   readonly #bridgeTools = new Map<string, McpToolSpec[]>();
   readonly #bridgeThreads = new Map<string, string>();
   #diagnostics = { windowStart: 0, count: 0 };
+  /** Lo último que escribió por stderr, para reconocer el pedido de entrar aunque llegue en trozos. */
+  #stderrTail = "";
 
   constructor(options: AcpClientOptions) {
     super();
@@ -177,14 +192,27 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
     if (this.running) return;
     this.#stopping = false;
     this.#decoder = this.#newDecoder();
+    this.#stderrTail = "";
     const target = spawnTarget(this.#options.command, this.#options.args);
-    const child = spawn(target.file, target.args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: this.#options.env ?? process.env,
-      cwd: this.#options.cwd,
-      shell: target.shell,
-      windowsHide: true,
-    });
+    const temp = this.#options.tempRoot ? makePrivateTemp(this.#options.tempRoot) : null;
+    const env = this.#options.env ?? process.env;
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(target.file, target.args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: temp ? withTemp(env, temp) : env,
+        cwd: this.#options.cwd,
+        shell: target.shell,
+        windowsHide: true,
+      });
+    } catch (error) {
+      if (temp) removePrivateTemp(temp);
+      throw error;
+    }
+    if (temp) {
+      child.once("close", () => removePrivateTemp(temp));
+      child.once("error", () => removePrivateTemp(temp));
+    }
     this.#process = child;
     child.stdout.on("data", (chunk: Buffer) => {
       let messages: RpcMessage[];
@@ -205,8 +233,19 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
       }
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8").trim();
+      const raw = chunk.toString("utf8");
+      const text = raw.trim();
       if (text) this.#diagnostic(text);
+      const prompt = this.#options.signInPrompt;
+      if (!prompt) return;
+      this.#stderrTail = (this.#stderrTail + raw).slice(-2_000);
+      if (prompt.test(this.#stderrTail)) {
+        this.#stderrTail = "";
+        this.#fail(
+          new SignInRequiredError(`${this.#options.label} no tiene la sesión iniciada: entra en Ajustes y pulsa «Iniciar sesión».`, -32000),
+          child,
+        );
+      }
     });
     child.stdin.on("error", () => undefined);
     child.once("error", (error) => this.#fail(new Error(`No se pudo abrir ${this.#options.label}: ${error.message}`), child));
@@ -591,19 +630,19 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
     try {
       return await run();
     } catch (error) {
-      if (!isAuthError(error)) throw error;
+      if (error instanceof SignInRequiredError || !isAuthError(error)) throw error;
       const method = this.#authenticated ? null : (this.#options.authMethods ?? []).find((id) => this.#authMethods.includes(id));
       if (!method) throw this.#signInNeeded(error);
       try {
         await this.#call("authenticate", { methodId: method }, SESSION_TIMEOUT_MS);
       } catch (authError) {
-        throw this.#signInNeeded(authError);
+        throw authError instanceof SignInRequiredError ? authError : this.#signInNeeded(authError);
       }
       this.#authenticated = true;
       try {
         return await run();
       } catch (retryError) {
-        throw isAuthError(retryError) ? this.#signInNeeded(retryError) : retryError;
+        throw isAuthError(retryError) && !(retryError instanceof SignInRequiredError) ? this.#signInNeeded(retryError) : retryError;
       }
     }
   }

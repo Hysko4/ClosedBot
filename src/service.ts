@@ -65,6 +65,8 @@ export const MAX_ROUTINES_PER_AGENT = 20;
 export const MAX_ROUTINES = 100;
 export const ROUTINE_GRACE_MS = 2 * 60 * 60_000;
 const ROUTINE_CHECK_MS = 60_000;
+/** Tiempo máximo de «Instalar» (Antigravity son unos 200 MB). */
+const INSTALL_TIMEOUT_MS = 30 * 60_000;
 /** Tamaño máximo de un archivo adjunto. */
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export const SETTINGS_META = "settings";
@@ -103,7 +105,7 @@ export interface ProviderStatus {
   account?: { email: string | null; plan: string | null } | null;
   /** Se puede iniciar y cerrar sesión desde la app. */
   canSignIn?: boolean;
-  /** Se puede cerrar la sesión desde la app (Gemini CLI no tiene un comando para salir). */
+  /** Se puede cerrar la sesión desde la app (Antigravity, el de Gemini, no tiene un comando para salir). */
   canSignOut?: boolean;
   /** Se puede instalar (o reinstalar) desde la app. */
   canInstall?: boolean;
@@ -113,6 +115,8 @@ export interface ProviderStatus {
   signIn?: SignInView | null;
   /** Instalación en curso. */
   install?: { startedAt: string } | null;
+  /** Por qué falló el último intento de iniciar sesión (lo que respondió el proveedor), mientras siga sin sesión. */
+  problem?: string;
 }
 
 /** Comandos del CLI de un proveedor para iniciar y cerrar sesión con la cuenta de la persona. */
@@ -312,6 +316,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   #mainAgentId: string | null = null;
   readonly #signIns: SignInFlows;
   readonly #installs: SignInFlows;
+  /** Lo que respondió el proveedor en el último inicio de sesión fallido. */
+  readonly #signInProblems = new Map<ProviderId, string>();
   readonly #usage = new Map<ProviderId, UsageView>();
   #usageTimer: NodeJS.Timeout | null = null;
   #usageSoon: NodeJS.Timeout | null = null;
@@ -325,7 +331,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#signIns = new SignInFlows(options.signInTimeoutMs ? { timeoutMs: options.signInTimeoutMs } : {});
     this.#signIns.on("change", () => this.#emit({ type: "providers", providers: this.providers() }));
     this.#signIns.on("settled", (provider, result) => void this.#afterSignIn(provider, result));
-    this.#installs = new SignInFlows({ action: "install", ...(options.installTimeoutMs ? { timeoutMs: options.installTimeoutMs } : {}) });
+    // Antigravity (Gemini) son unos 200 MB: con una conexión lenta tarda más que los 10 minutos de un inicio de sesión.
+    this.#installs = new SignInFlows({ action: "install", timeoutMs: options.installTimeoutMs ?? INSTALL_TIMEOUT_MS });
     this.#installs.on("change", () => this.#emit({ type: "providers", providers: this.providers() }));
     this.#installs.on("settled", (provider, result) => void this.#afterInstall(provider as InstallProvider, result));
   }
@@ -364,6 +371,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (this.#options.detectProviders) {
       try {
         this.#providers = await this.#options.detectProviders();
+        // Un error de inicio de sesión viejo deja de importar si el proveedor ya quedó conectado.
+        for (const status of this.#providers) if (status.loggedIn === true) this.#signInProblems.delete(status.id);
       } catch (error) {
         this.#log("warn", `No se pudo comprobar los proveedores: ${String(error)}`);
       }
@@ -377,8 +386,14 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     return this.#providers.map((status) => {
       const signIn = status.id === "demo" ? null : this.#signIns.view(status.id);
       const installing = status.id === "demo" ? null : this.#installs.view(status.id);
-      if (!signIn && !installing) return status;
-      return { ...status, ...(signIn ? { signIn } : {}), ...(installing ? { install: { startedAt: installing.startedAt } } : {}) };
+      const problem = status.loggedIn === true || signIn ? null : (this.#signInProblems.get(status.id) ?? null);
+      if (!signIn && !installing && !problem) return status;
+      return {
+        ...status,
+        ...(signIn ? { signIn } : {}),
+        ...(installing ? { install: { startedAt: installing.startedAt } } : {}),
+        ...(problem ? { problem } : {}),
+      };
     });
   }
 
@@ -451,22 +466,35 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (!result.ok) {
       if (result.message) {
         this.#log("warn", `El inicio de sesión de ${label} no terminó: ${result.message}`);
+        // Queda a la vista en su tarjeta de Ajustes hasta que se conecte.
+        this.#signInProblems.set(provider, result.message);
         this.#emit({ type: "notice", level: "error", message: result.message });
       }
       this.#emit({ type: "providers", providers: this.providers() });
       return;
     }
-    this.#log("info", `${label} quedó conectado.`);
     // Los procesos que ya estaban abiertos arrancaron sin la sesión nueva.
     await this.#dropClient(provider);
+    this.#signInProblems.delete(provider);
     const providers = await this.refreshProviders();
-    const email = providers.find((status) => status.id === provider)?.account?.email;
+    const status = providers.find((item) => item.id === provider);
+    // Que el programa termine bien no basta: la sesión tiene que haber quedado guardada.
+    if (status?.loggedIn === false) {
+      const message = `El inicio de sesión de ${label} terminó, pero la sesión no quedó guardada. Vuelve a pulsar «${signInButton(provider)}».`;
+      this.#log("warn", message);
+      this.#signInProblems.set(provider, message);
+      this.#emit({ type: "notice", level: "error", message });
+      this.#emit({ type: "providers", providers: this.providers() });
+      return;
+    }
+    this.#log("info", `${label} quedó conectado.`);
+    const email = status?.account?.email;
     this.#emit({ type: "notice", level: "info", message: `${label} quedó conectado${email ? ` como ${email}` : ""}.` });
   }
 
   // ---------- instalación de los proveedores ----------
 
-  /** Instala el programa del proveedor con su instalador oficial (npm para Codex y Gemini CLI). */
+  /** Instala el programa del proveedor con su instalador oficial (npm para Codex, el .zip de Google para Gemini). */
   startInstall(provider: unknown): ProviderStatus[] {
     const id = installProvider(provider);
     const command = this.#options.installCommands?.(id) ?? null;
@@ -1554,7 +1582,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
             clientInfo: { name: "closedbot", title: "ClosedBot", version: VERSION },
             capabilities: { experimentalApi: true, requestAttestation: false },
           },
-          // Gemini CLI y Grok tardan más en arrancar (cargan su configuración y sus extensiones).
+          // Grok y Antigravity tardan más en arrancar (Antigravity descomprime unos 300 MB cada vez).
           provider === "grok" || provider === "gemini" ? 90_000 : 20_000,
         );
         client.notify("initialized", {});
@@ -1580,7 +1608,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     for (const key of [...this.#loadedThreads]) if (key.startsWith(`${provider}:`)) this.#loadedThreads.delete(key);
     for (const [agentId, state] of [...this.#active]) {
       if (state.provider !== provider) continue;
-      this.#notice(agentId, `El proceso de ${providerLabel(provider)} se detuvo: ${error.message}`);
+      // Si se cerró porque le falta la sesión (Antigravity sin entrar), el aviso ya lo explica.
+      this.#notice(agentId, error.name === "SignInRequiredError" ? error.message : `El proceso de ${providerLabel(provider)} se detuvo: ${error.message}`);
       this.#finishTurn(agentId, state.turnId, "failed");
     }
     if (!this.#stopping) this.#log("warn", `${providerLabel(provider)} terminó: ${error.message}`);

@@ -17,7 +17,7 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
 - **Lista de agentes como en una app de chat**: agrupados en secciones, con su último mensaje y un punto en los que tienen novedades. Clic derecho (o mantener presionado en el celular) en un agente: fijar, mover a otra sección, marcar como no leído, cambiar nombre, ocultar y eliminar. Clic derecho en el fondo de la lista: nuevo agente, nueva sección y marcar todo como leído.
 - **Crear un agente en un paso**: el **+** pide solo el nombre, una figura y un color. El agente nuevo te saluda y te pregunta para qué lo quieres. Los que arma Claude Bot no saludan.
 - **Ficha de cada agente** (tocando su nombre arriba del chat): *Detalles* con sus rutinas y el chat de voz, *Biblioteca* con los archivos de su carpeta y de la compartida, y *Computadora* con sus carpetas y su nivel de acceso.
-- **Respuestas en voz alta**: cada agente tiene su voz, velocidad e idioma. Gratis con las voces del sistema (las «Naturales» de Edge suenan casi humanas) u, opcionalmente, con las voces de **ElevenLabs** usando tu propia clave. Lee solo sus respuestas si lo activas, o cuando le hablas con el botón morado.
+- **Respuestas en voz alta**: cada agente tiene su voz, velocidad e idioma. Solo usa voces naturales, que suenan casi humanas y son gratis (las «Online (Natural)» de Edge); las voces robóticas no se usan. Lee solo sus respuestas si lo activas, o cuando le hablas con el botón morado.
 - **Uso del plan de Claude**: un anillo junto a Ajustes muestra el porcentaje semanal. Al tocarlo se ven también las 5 horas y cuánto falta para que se reinicien. Es el uso de toda tu cuenta.
 - **Dictado por voz y adjuntos**: el micrófono escribe lo que dices. En el PC se reconoce en el propio equipo, sin internet (el modelo se descarga una vez); también puede usar el servicio de voz del navegador. Puedes adjuntar archivos, que quedan en la carpeta del agente.
 - **App instalable** (PWA) en Android y iPhone, a través de tu red privada de Tailscale.
@@ -156,10 +156,17 @@ Si el navegador no se abre (o usas la app desde otro equipo), Ajustes muestra un
 
 En **Ajustes → Proveedores**, cada uno tiene dos botones, como en OpenBot:
 
-1. **«Instalar»**, si no está en el equipo: Codex (`@openai/codex`) y Gemini CLI (`@google/gemini-cli`) se instalan con npm para tu usuario; Grok, con su instalador oficial (`https://x.ai/cli`).
-2. **«Iniciar sesión»**: Codex con tu cuenta de ChatGPT, Gemini con tu cuenta de Google y Grok con tu cuenta de X/xAI. Se abre el navegador; al volver, el proveedor queda «Conectado».
+1. **«Instalar»**, si no está en el equipo: Codex (`@openai/codex`) se instala con npm para tu usuario; Grok, con su instalador oficial (`https://x.ai/cli`), y Gemini descarga Antigravity de Google (ver abajo).
+2. **«Iniciar sesión»**: Codex con tu cuenta de ChatGPT, Gemini con tu cuenta de Google y Grok con tu cuenta de X/xAI. Se abre el navegador; al volver, el proveedor queda «Conectado». Si el intento falla, la tarjeta muestra lo que respondió el proveedor.
 
 ClosedBot los busca en el PATH, en las carpetas de npm, en la app de Codex, en la carpeta del instalador de Grok y en la copia de OpenBot. Si están en otro lugar, indica la ruta con `CLOSEDBOT_CODEX_BIN`, `CLOSEDBOT_GEMINI_BIN` o `CLOSEDBOT_GROK_BIN`. Gemini y Grok trabajan por ACP (Agent Client Protocol) y usan las mismas herramientas de equipo que los demás (`list_agents`, `send_message`). Cada proveedor recibe solo sus propias claves de entorno.
+
+**Gemini usa Antigravity, como OpenBot.** Google ya no acepta Gemini CLI con las cuentas personales: al iniciar sesión responde «This client is no longer supported for Gemini Code Assist for individuals». Por eso ClosedBot habla con el servidor ACP de Antigravity (`agy_acp_server`), el programa oficial de Google que publica el registro de ACP:
+
+- Si OpenBot ya lo descargó, ClosedBot usa esa copia. Si no, «Instalar» baja el `.zip` oficial de `dl.google.com` (versión 1.4.5; ocupa unos 200 MB), comprueba su SHA-256 publicado y lo deja en `<datos>/programas/antigravity`.
+- La sesión con Google queda en `~/.gemini/antigravity-acp/acp_token.json` y es la misma de OpenBot: si ya entraste allí, Gemini aparece conectado sin volver a entrar. También sirve `GEMINI_API_KEY`.
+- Cada vez que arranca, Antigravity descomprime unos 300 MB en una carpeta temporal. ClosedBot le da una propia en `<datos>/tmp` y la borra al cerrarlo (y al abrir la app, si quedó alguna).
+- Si le falta la sesión durante un chat, ClosedBot lo corta enseguida y te pide entrar desde Ajustes, en vez de esperar a que se abra el navegador.
 
 ## Uso
 
@@ -175,9 +182,8 @@ ClosedBot los busca en el PATH, en las carpetas de npm, en la app de Codex, en l
 - **Ocultos y fijados**: los fijados van arriba; los ocultos, plegados al final de la lista («Ocultos») y en la búsqueda.
 - **Voz**: el micrófono dicta en el cuadro de texto. Con el cuadro vacío, el botón morado graba y envía al terminar, y la respuesta se lee en voz alta.
   - *Dictado*: en el PC, ClosedBot reconoce la voz en el propio equipo con Parakeet v3 (sherpa-onnx). La primera vez pide descargar el modelo (unos 490 MB, a `<datos>/voz`); después funciona sin internet y tu voz no sale del equipo. En **Ajustes → Dictado por voz** puedes elegir en su lugar el servicio de voz del navegador, que manda el audio a Microsoft o Google.
-  - *Lectura*: en la ficha del agente, *Chat de voz* elige con qué leer, la voz, la velocidad y el idioma, y si lee siempre sus respuestas. Bajo cada respuesta hay un botón para escucharla.
-  - *Voces del sistema* (gratis): las «Naturales» de Edge son las más humanas y usan internet; las demás funcionan sin conexión.
-  - *ElevenLabs* (opcional): en **Ajustes → Voces para leer en voz alta**, «Agregar clave» con una clave de [elevenlabs.io](https://elevenlabs.io/app/settings/api-keys) que tenga acceso a «Text to Speech» y lectura de «Voices» y «User». La clave se prueba antes de guardarla, queda solo en la base de datos de ClosedBot y nunca vuelve a la pantalla. Lo que se lee se envía a ElevenLabs y gasta caracteres de tu plan (el gratis trae 10.000 al mes; el modelo «Rápida y económica» gasta la mitad). Si se acaban o la clave falla, se lee con la voz del sistema y aparece un aviso.
+  - *Lectura*: en la ficha del agente, *Chat de voz* elige la voz (agrupadas por país), la velocidad y el idioma, y si lee siempre sus respuestas. Bajo cada respuesta hay un botón para escucharla.
+  - *Solo voces naturales*: las «Online (Natural)» de Edge (por ejemplo, Catalina o Lorenzo, de Chile) y, en iPhone o Mac, las «Mejorada» o «Premium». Son gratis y las de Edge usan internet. Las voces robóticas del sistema no se usan: si no hay naturales, ClosedBot avisa dónde conseguirlas en vez de leer con una robótica. La app de escritorio ya abre ClosedBot en Edge. **Ajustes → Voces para leer en voz alta** muestra cuántas hay.
 - **Biblioteca**: en la ficha del agente se ven y descargan los archivos de su carpeta y de la compartida. «Subir archivo» los deja en `adjuntos/`. Los archivos se abren en una pestaña aparte, sin permisos sobre la app.
 - **Uso del plan**: lo informa Claude Code (como `/usage`) cada 10 minutos y tras cada turno. Esa lectura es una función experimental del SDK de Claude: si cambia, el anillo desaparece y la app sigue igual.
 - **Adjuntos**: clip, pegar o arrastrar. Hasta 25 MB por archivo; se guardan en `adjuntos/` dentro de la carpeta del agente.
@@ -198,7 +204,7 @@ Se configura con variables de entorno, en `/etc/closedbot.env` si usas systemd. 
 | `CLOSEDBOT_CLAUDE_CONFIG_DIR` | `<datos>/claude` | Sesión de Claude Code de los agentes, aparte de la tuya. |
 | `CLOSEDBOT_MAX_HOPS` | `6` | Máximo de reenvíos seguidos entre agentes. |
 | `CLOSEDBOT_CODEX_BIN` | `codex` | Ruta del ejecutable de Codex. |
-| `CLOSEDBOT_GEMINI_BIN` | — | Ruta de Gemini CLI, si no está donde ClosedBot la busca. |
+| `CLOSEDBOT_GEMINI_BIN` | — | Ruta de `agy_acp_server` (Antigravity, el programa de Gemini), si no está donde ClosedBot lo busca. |
 | `CLOSEDBOT_GROK_BIN` | — | Ruta de Grok CLI, si no está donde ClosedBot la busca. |
 | `CLOSEDBOT_CLAUDE_BIN` | — | Ruta a un `claude` propio. Si no la indicas, se usa el que trae el SDK. |
 | `CLOSEDBOT_PLAYWRIGHT` | `0` | `1` da a los agentes de Claude un navegador sin ventana (Playwright MCP). |
@@ -259,7 +265,7 @@ test/                  pruebas (node:test)
 
 ## Estado y límites conocidos
 
-- Versión 0.6.0. Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini, Grok y ElevenLabs. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
+- Versión 0.6.1. Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
 - Un solo usuario y sin notificaciones push por ahora.
 - Claude Bot crea hasta 8 agentes por pedido y deja de crear cuando ya hay 60 agentes en total.
 - Las preguntas con opciones terminan el turno del agente: tu respuesta le llega como un mensaje nuevo.

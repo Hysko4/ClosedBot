@@ -123,30 +123,16 @@ test("voz por agente: se guarda limpia y lo que no sirve vuelve al valor por def
   const h = await createHarness();
   try {
     const agent = h.service.createAgent({ name: "Voz", provider: "demo" });
-    assert.deepEqual(agent.voice, { name: "", rate: 1, lang: "auto", autoRead: false, engine: "system", elevenVoice: "", elevenName: "" });
+    assert.deepEqual(agent.voice, { name: "", rate: 1, lang: "auto", autoRead: false });
     const updated = h.service.updateAgent(agent.id, { voice: { name: "Microsoft Catalina Online (Natural) - Spanish (Chile)", rate: 1.25, lang: "es-CL", autoRead: true } });
-    assert.deepEqual(updated.voice, {
-      name: "Microsoft Catalina Online (Natural) - Spanish (Chile)",
-      rate: 1.25,
-      lang: "es-CL",
-      autoRead: true,
-      engine: "system",
-      elevenVoice: "",
-      elevenName: "",
-    });
+    assert.deepEqual(updated.voice, { name: "Microsoft Catalina Online (Natural) - Spanish (Chile)", rate: 1.25, lang: "es-CL", autoRead: true });
     const partial = h.service.updateAgent(agent.id, { voice: { rate: 9 } as never });
     assert.equal(partial.voice.rate, 1, "velocidad fuera de rango");
     assert.equal(partial.voice.lang, "es-CL", "lo que no cambia se conserva");
     assert.equal(h.service.updateAgent(agent.id, { voice: { lang: "<script>" } as never }).voice.lang, "auto");
-    // ElevenLabs: el motor y la voz se guardan; un id raro o un motor desconocido no.
-    const eleven = h.service.updateAgent(agent.id, { voice: { engine: "elevenlabs", elevenVoice: "21m00Tcm4TlvDq8ikWAM", elevenName: "  Rachel  " } });
-    assert.equal(eleven.voice.engine, "elevenlabs");
-    assert.equal(eleven.voice.elevenVoice, "21m00Tcm4TlvDq8ikWAM");
-    assert.equal(eleven.voice.elevenName, "Rachel");
-    assert.equal(eleven.voice.rate, 1, "lo demás se conserva");
-    const bad = h.service.updateAgent(agent.id, { voice: { engine: "otra", elevenVoice: "../x" } as never });
-    assert.equal(bad.voice.engine, "system");
-    assert.equal(bad.voice.elevenVoice, "");
+    // Lo que guardó la 0.6.0 con ElevenLabs (ya no existe) se descarta sin romper nada.
+    const old = h.service.updateAgent(agent.id, { voice: { engine: "elevenlabs", elevenVoice: "21m00Tcm4TlvDq8ikWAM" } as never });
+    assert.deepEqual(Object.keys(old.voice).sort(), ["autoRead", "lang", "name", "rate"]);
   } finally {
     await h.close();
   }

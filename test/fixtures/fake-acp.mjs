@@ -9,7 +9,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const log = process.env.FAKE_ACP_LOG;
-/** ok: entra sin más · required: hace falta «authenticate» con la sesión guardada · never: no hay sesión. */
+/**
+ * ok: entra sin más · required: hace falta «authenticate» con la sesión guardada · never: no hay sesión ·
+ * link: como Antigravity sin sesión, escribe el enlace para entrar y se queda esperando.
+ */
 const authMode = process.env.FAKE_ACP_AUTH ?? "ok";
 const noResume = process.env.FAKE_ACP_NO_RESUME === "1";
 let authenticated = authMode === "ok";
@@ -32,6 +35,9 @@ const callClient = (method, params) =>
 const until = async (check) => {
   while (!check()) await new Promise((resolve) => setTimeout(resolve, 10));
 };
+
+// La carpeta temporal con la que arrancó (ClosedBot le da una propia a Antigravity).
+record({ method: "_arranque", temp: process.env.TEMP ?? null, tmp: process.env.TMP ?? null, tmpdir: process.env.TMPDIR ?? null });
 
 // Avisos sueltos, como los de algunos CLI al arrancar: no deben romper el protocolo.
 process.stdout.write("Iniciando el agente falso…\n");
@@ -88,6 +94,12 @@ async function handle(method, params) {
       authenticated = true;
       return {};
     case "session/new": {
+      if (authMode === "link") {
+        // El aviso llega en dos trozos, como puede pasar con stderr.
+        process.stderr.write("Open the following link to ");
+        setTimeout(() => process.stderr.write("authenticate the ACP server:\nhttps://accounts.google.com/o/oauth2/v2/auth?client_id=prueba\n"), 50);
+        await new Promise(() => undefined);
+      }
       if (!authenticated) throw { code: -32000, message: "Authentication required" };
       const sessionId = `sesion-${nextSession++}`;
       await openSession(sessionId, params);

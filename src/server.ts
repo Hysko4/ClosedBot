@@ -5,8 +5,8 @@ import { createApp } from "./app.js";
 import { Auth } from "./auth.js";
 import { prepareConfig, setting } from "./config.js";
 import { Store } from "./db.js";
-import { ElevenLabs } from "./elevenlabs.js";
 import { AcpClient } from "./providers/acp.js";
+import { ANTIGRAVITY_SIGN_IN_PROMPT, antigravityArgs, antigravityEnv, cleanStaleTemps } from "./providers/antigravity.js";
 import { ClaudeAgentClient } from "./providers/claude.js";
 import { claudeEnv, claudeLoginCommand, claudeLogoutCommand, resolveClaudeCli } from "./providers/claude-cli.js";
 import type { AgentClient, ProviderId } from "./providers/client.js";
@@ -14,7 +14,7 @@ import { CodexAppServerClient } from "./providers/codex.js";
 import { DemoAgentClient } from "./providers/demo.js";
 import { detectProviders } from "./providers/detect.js";
 import { type CliName, locateCli } from "./providers/locate.js";
-import { acpAuthMethods, GEMINI_AGENT_ARGS, GROK_AGENT_ARGS, installCommand, providerEnv, signInCommands } from "./providers/presets.js";
+import { acpAuthMethods, GROK_AGENT_ARGS, installCommand, providerEnv, signInCommands } from "./providers/presets.js";
 import { AgentService, VERSION } from "./service.js";
 import { SpeechEngine } from "./speech.js";
 
@@ -70,9 +70,13 @@ async function main(): Promise<void> {
   const geminiEnvironment = providerEnv("gemini");
   if (!claudeCli) log("warn", "No encontré Claude Code (viene con @anthropic-ai/claude-agent-sdk); reinstala las dependencias con «npm ci».");
 
-  // Codex, Grok y Gemini CLI se buscan cada vez: si se instalan con la app abierta, se encuentran solos.
+  // Codex, Grok y Gemini (Antigravity) se buscan cada vez: si se instalan con la app abierta, se encuentran solos.
   const configured: Record<CliName, string | null> = { codex: config.codexBin, grok: config.grokBin, gemini: config.geminiBin };
-  const locate = (name: CliName) => locateCli(name, { configured: configured[name] });
+  // «Instalar» de Gemini deja Antigravity en <datos>/programas; cada proceso suyo usa una carpeta en <datos>/tmp.
+  const programsDir = join(config.dataDir, "programas");
+  const tempRoot = join(config.dataDir, "tmp");
+  cleanStaleTemps(tempRoot);
+  const locate = (name: CliName) => locateCli(name, { configured: configured[name], programsDir });
   const program = (name: CliName) => locate(name)?.path ?? configured[name] ?? name;
 
   const createClient = (provider: ProviderId): AgentClient => {
@@ -102,9 +106,11 @@ async function main(): Promise<void> {
           provider,
           label: "Gemini",
           command: program("gemini"),
-          args: GEMINI_AGENT_ARGS,
-          env: geminiEnvironment,
+          args: antigravityArgs(),
+          env: antigravityEnv(geminiEnvironment, { chat: true }),
           authMethods: acpAuthMethods("gemini", geminiEnvironment),
+          signInPrompt: ANTIGRAVITY_SIGN_IN_PROMPT,
+          tempRoot,
         });
       case "demo":
         return new DemoAgentClient();
@@ -141,10 +147,14 @@ async function main(): Promise<void> {
       }
       const found = locate(provider);
       if (!found) return null;
-      return signInCommands(provider, found.path, { env: environments[provider] });
+      return signInCommands(provider, found.path, { env: environments[provider], tempRoot });
     },
-    // «Instalar» en Ajustes: npm (Codex y Gemini CLI) o el instalador oficial de Grok, para este usuario.
-    installCommands: (provider) => installCommand(provider, { env: envWithout(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "XAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"]) }),
+    // «Instalar» en Ajustes: npm (Codex), el instalador oficial de Grok o el .zip de Antigravity de Google (Gemini).
+    installCommands: (provider) =>
+      installCommand(provider, {
+        env: envWithout(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "XAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"]),
+        programsDir,
+      }),
     log,
   });
   await service.start();
@@ -163,8 +173,6 @@ async function main(): Promise<void> {
     controlToken,
     onShutdown: () => void shutdown("la orden de cierre del lanzador"),
     speech,
-    // Voces de ElevenLabs con la clave del usuario (opcional; la clave queda sólo en este PC).
-    elevenLabs: new ElevenLabs({ store }),
     log,
   });
 

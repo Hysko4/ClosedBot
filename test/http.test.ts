@@ -7,9 +7,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { type AppOptions, createApp } from "../src/app.js";
 import { Auth, hashPassword, PASSWORD_META } from "../src/auth.js";
-import { ElevenLabs } from "../src/elevenlabs.js";
 import { type SpeechModel, SpeechEngine } from "../src/speech.js";
-import { AUDIO, fakeElevenLabs, GOOD_KEY } from "./fake-elevenlabs.js";
 import { createHarness, type Harness, tempDir, waitFor } from "./helpers.js";
 import { toneWav } from "./wav.js";
 
@@ -489,7 +487,7 @@ test("HTTP: agente simple con saludo, menú de la barra, secciones, biblioteca y
     assert.equal((await server.call(`/api/agents/${agent.id}/unread`, { method: "POST" })).json?.agent.unread, true);
     assert.equal((await server.call("/api/read-all", { method: "POST" })).json?.changed, 1);
     const voice = await server.call(`/api/agents/${agent.id}`, { method: "PATCH", body: { voice: { rate: 1.5, lang: "es-CL" } } });
-    assert.deepEqual(voice.json?.agent.voice, { name: "", rate: 1.5, lang: "es-CL", autoRead: false, engine: "system", elevenVoice: "", elevenName: "" });
+    assert.deepEqual(voice.json?.agent.voice, { name: "", rate: 1.5, lang: "es-CL", autoRead: false });
 
     // Secciones.
     assert.deepEqual((await server.call("/api/sections", { method: "POST", body: { name: "Correo" } })).json?.sections, ["Correo"]);
@@ -716,69 +714,6 @@ test("HTTP: canales (crear, escribir, leer, eliminar, restaurar y borrar para si
     assert.equal((await s.call(`/api/channels/${channel.id}`)).status, 404);
     const noCsrf = await s.call("/api/channels", { method: "POST", body: { name: "Sin CSRF", memberIds: [ana.id] }, headers: { "x-cuadrilla": "" } });
     assert.equal(noCsrf.status, 403);
-  } finally {
-    await s.close();
-  }
-});
-
-test("HTTP: voces de ElevenLabs (clave que no vuelve, audio en camino y errores que no cierran la sesión)", async () => {
-  // Sin ElevenLabs en el servidor: 503, no 401.
-  const without = await startServer();
-  try {
-    await without.login();
-    assert.equal((await without.call("/api/voices/elevenlabs")).status, 503);
-    assert.equal((await without.call("/api/tts", { method: "POST", body: { voiceId: "premadeAna0001", text: "Hola" } })).status, 503);
-  } finally {
-    await without.close();
-  }
-
-  const fake = fakeElevenLabs();
-  const s = await startServer((h) => ({ elevenLabs: new ElevenLabs({ store: h.store, fetch: fake.fetch }) }));
-  try {
-    assert.equal((await s.call("/api/voices/elevenlabs")).status, 401, "hace falta la sesión");
-    await s.login();
-    assert.equal((await s.call("/api/voices/elevenlabs", { method: "PUT", body: { key: GOOD_KEY }, headers: { "x-cuadrilla": "" } })).status, 403);
-    assert.equal((await s.call("/api/voices/elevenlabs")).json?.elevenlabs.configured, false);
-    const tooEarly = await s.call("/api/tts", { method: "POST", body: { voiceId: "premadeAna0001", text: "Hola" } });
-    assert.equal(tooEarly.status, 409);
-
-    const bad = await s.call("/api/voices/elevenlabs", { method: "PUT", body: { key: "sk_malo00123456789abcdef0123456789abcdef" } });
-    assert.equal(bad.status, 400);
-    assert.match(bad.json?.error, /rechazó la clave/);
-
-    const saved = await s.call("/api/voices/elevenlabs", { method: "PUT", body: { key: GOOD_KEY } });
-    assert.equal(saved.status, 200);
-    assert.equal(saved.json?.elevenlabs.configured, true);
-    assert.equal(saved.json?.elevenlabs.voices.length, 3);
-    for (const path of ["/api/voices/elevenlabs", "/api/voices/elevenlabs?refresh=1", "/api/state"]) {
-      const response = await s.call(path);
-      assert.equal(response.status, 200);
-      assert.ok(!JSON.stringify(response.json).includes(GOOD_KEY), `la clave no sale por ${path}`);
-    }
-
-    const audio = await fetch(`${s.base}/api/tts`, {
-      method: "POST",
-      headers: { "x-cuadrilla": "1", "content-type": "application/json", cookie: s.cookie },
-      body: JSON.stringify({ voiceId: "premadeAna0001", text: "Hola, soy Ana." }),
-    });
-    assert.equal(audio.status, 200);
-    assert.equal(audio.headers.get("content-type"), "audio/mpeg");
-    assert.equal(audio.headers.get("cache-control"), "private, no-store");
-    assert.deepEqual(new Uint8Array(await audio.arrayBuffer()), AUDIO);
-    assert.deepEqual(fake.calls.at(-1)?.body, { text: "Hola, soy Ana.", model_id: "eleven_flash_v2_5" });
-
-    assert.equal((await s.call("/api/tts", { method: "POST", body: { voiceId: "../x", text: "Hola" } })).status, 400);
-    assert.equal((await s.call("/api/tts", { method: "POST", body: { voiceId: "premadeAna0001", text: "" } })).status, 400);
-    // ElevenLabs responde 401 cuando se acaban los caracteres: aquí llega como 402 y la sesión sigue abierta.
-    const quota = await s.call("/api/tts", { method: "POST", body: { voiceId: "sinCaracteres", text: "Hola" } });
-    assert.equal(quota.status, 402);
-    assert.equal((await s.call("/api/session")).json?.authenticated, true);
-
-    const csp = (await fetch(`${s.base}/`)).headers.get("content-security-policy") ?? "";
-    assert.match(csp, /media-src 'self' blob: data:/);
-
-    const removed = await s.call("/api/voices/elevenlabs", { method: "PUT", body: { key: "" } });
-    assert.equal(removed.json?.elevenlabs.configured, false);
   } finally {
     await s.close();
   }

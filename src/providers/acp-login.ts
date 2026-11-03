@@ -1,8 +1,10 @@
-// Inicio de sesión de un agente ACP sin comando propio para entrar (Gemini CLI): lo arranca, le pide
-// `authenticate` con el método indicado, que abre el navegador para entrar con la cuenta, y termina
+// Inicio de sesión de un agente ACP sin comando propio para entrar (Antigravity, el de Gemini): lo arranca,
+// le pide `authenticate` con el método indicado, que abre el navegador para entrar con la cuenta, y termina
 // (código 0) cuando la sesión queda guardada. Uso: node acp-login.js <método> <programa> [argumentos…]
+// Con CLOSEDBOT_AGENT_TEMP, el agente usa una carpeta temporal propia dentro de esa, que se borra al final.
 
 import { spawn } from "node:child_process";
+import { makePrivateTemp, removePrivateTemp, withTemp } from "./antigravity.js";
 import { JsonLineDecoder } from "./jsonl.js";
 import { isRecord, type RpcMessage } from "./protocol.js";
 import { spawnTarget, stopProcessTree } from "./spawn.js";
@@ -13,8 +15,17 @@ if (!method || !command) {
   process.exit(2);
 }
 
+const tempRoot = process.env.CLOSEDBOT_AGENT_TEMP;
+const temp = tempRoot ? makePrivateTemp(tempRoot) : null;
+const env = { ...process.env };
+delete env.CLOSEDBOT_AGENT_TEMP;
 const target = spawnTarget(command, args);
-const child = spawn(target.file, target.args, { stdio: ["pipe", "pipe", "pipe"], shell: target.shell, windowsHide: true });
+const child = spawn(target.file, target.args, {
+  stdio: ["pipe", "pipe", "pipe"],
+  shell: target.shell,
+  windowsHide: true,
+  env: temp ? withTemp(env, temp) : env,
+});
 // Los avisos sueltos que el agente escriba por stdout se ignoran.
 const decoder = new JsonLineDecoder({ onInvalidLine: () => undefined });
 const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
@@ -54,14 +65,30 @@ function call(name: string, params: unknown): Promise<unknown> {
   });
 }
 
+let finishing = false;
+let exited = false;
+
+/** Cierra el agente, espera a que termine (para poder borrar su carpeta temporal) y sale. */
 function finish(code: number, message?: string): void {
+  if (finishing) return;
+  finishing = true;
   if (message) process.stderr.write(`${message}\n`);
+  const done = () => {
+    if (temp) removePrivateTemp(temp, 1);
+    process.exit(code);
+  };
+  if (exited) return done();
+  child.once("exit", () => setTimeout(done, 200));
   stopProcessTree(child);
-  setTimeout(() => process.exit(code), 300).unref();
+  setTimeout(done, 5_000).unref();
 }
 
-child.once("error", (error) => finish(1, `No pude abrir ${command}: ${error.message}`));
+child.once("error", (error) => {
+  exited = true;
+  finish(1, `Login failed: No pude abrir ${command}: ${error.message}`);
+});
 child.once("exit", (code) => {
+  exited = true;
   for (const entry of pending.values()) entry.reject(new Error(`el programa terminó (código ${code ?? "?"})`));
   pending.clear();
 });
@@ -78,5 +105,6 @@ try {
   process.stdout.write("Sesión iniciada.\n");
   finish(0);
 } catch (error) {
-  finish(1, `No se pudo iniciar sesión: ${error instanceof Error ? error.message : String(error)}`);
+  // «Login failed:» lo quita la app, que antepone su propio «No se pudo iniciar sesión».
+  finish(1, `Login failed: ${error instanceof Error ? error.message : String(error)}`);
 }

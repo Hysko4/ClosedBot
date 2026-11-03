@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -205,6 +206,52 @@ test("ACP: usa la sesión guardada si hace falta y, si no hay, pide iniciarla en
   }
 });
 
+test("ACP: cada proceso usa su carpeta temporal y, si el agente pide entrar por el navegador, se corta enseguida", async () => {
+  const outer = tempDir("closedbot-acp-tmp-");
+  const tempRoot = join(outer.path, "tmp");
+  const signInPrompt = /open the following link to authenticate/i;
+  try {
+    // Con sesión: el agente arranca con su propia carpeta temporal, que se borra al cerrarlo.
+    const ok = await acpHarness({ client: { tempRoot, signInPrompt } });
+    let used = "";
+    try {
+      const grokky = ok.h.service.createAgent({ name: "Grokky", provider: "grok" });
+      const { message } = ok.h.service.sendUserMessage(grokky.id, "hola");
+      await waitFor(() => ok.h.store.getMessage(message.id)?.status === "completed", 15_000, "turno");
+      const start = readLog(ok.log).find((item) => item.method === "_arranque");
+      used = String(start?.temp ?? "");
+      assert.ok(used.startsWith(join(tempRoot, "agente-")), used);
+      assert.equal(start?.tmp, used);
+      assert.equal(start?.tmpdir, used);
+      assert.ok(existsSync(used));
+    } finally {
+      await ok.close();
+    }
+    await waitFor(() => !existsSync(used), 5_000, "carpeta temporal borrada");
+
+    // Sin sesión: Antigravity escribe el enlace para entrar y espera hasta 5 minutos; aquí se corta enseguida.
+    const signedOut = await acpHarness({ env: { FAKE_ACP_AUTH: "link" }, client: { tempRoot, signInPrompt } });
+    try {
+      const grokky = signedOut.h.service.createAgent({ name: "Grokky", provider: "grok" });
+      const started = Date.now();
+      const { message } = signedOut.h.service.sendUserMessage(grokky.id, "hola");
+      await waitFor(() => signedOut.h.store.getMessage(message.id)?.status === "failed", 15_000, "turno sin sesión");
+      assert.ok(Date.now() - started < 10_000, "no espera los 2 minutos de la sesión");
+      const notices = signedOut.h.service
+        .listMessages(grokky.id)
+        .filter((item) => item.role === "notice")
+        .map((item) => item.text);
+      assert.deepEqual(notices, ["Grok no tiene la sesión iniciada: entra en Ajustes y pulsa «Iniciar sesión»."]);
+      assert.equal(readLog(signedOut.log).filter((item) => item.method === "authenticate").length, 0, "no intenta autenticar");
+    } finally {
+      await signedOut.close();
+    }
+    await waitFor(() => readdirSync(tempRoot).length === 0, 5_000, "sin carpetas temporales");
+  } finally {
+    outer.cleanup();
+  }
+});
+
 test("ACP: lista los modelos sin gastar mensajes y retoma la conversación tras reiniciar la app", async () => {
   for (const noResume of [false, true]) {
     const first = await acpHarness({ env: noResume ? { FAKE_ACP_NO_RESUME: "1" } : {} });
@@ -255,4 +302,39 @@ test("ACP: rutas dentro de las carpetas del agente", () => {
   assert.equal(isInside("/datos/agentes/ana", "/datos/agentes/ana-2/a.txt"), false);
   assert.equal(isInside("/datos/agentes/ana", "/datos/agentes/ana/../beto/a.txt"), false);
   assert.equal(isInside("/datos/agentes/ana", "/etc/passwd"), false);
+});
+
+test("ACP: el inicio de sesión de Antigravity usa una carpeta temporal propia y la borra al terminar", async () => {
+  chmodSync(fixture, 0o755);
+  const temp = tempDir("closedbot-acp-login-");
+  try {
+    const script = fileURLToPath(new URL("../src/providers/acp-login.js", import.meta.url));
+    const tempRoot = join(temp.path, "tmp");
+    let command = fixture;
+    if (process.platform === "win32") {
+      command = join(temp.path, "fake-acp.cmd");
+      writeFileSync(command, `@"${process.execPath}" "${fixture}" %*\r\n`);
+    }
+    const run = (method: string, log: string) =>
+      spawnSync(process.execPath, [script, method, command], {
+        encoding: "utf8",
+        env: { ...process.env, FAKE_ACP_LOG: log, CLOSEDBOT_AGENT_TEMP: tempRoot },
+        timeout: 20_000,
+      });
+    const ok = run("cached_token", join(temp.path, "ok.jsonl"));
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(ok.stdout, /Sesión iniciada\./);
+    const start = readLog(join(temp.path, "ok.jsonl")).find((item) => item.method === "_arranque");
+    assert.ok(String(start?.temp ?? "").startsWith(join(tempRoot, "agente-")), String(start?.temp));
+    assert.ok(!("CLOSEDBOT_AGENT_TEMP" in (start ?? {})));
+    assert.deepEqual(readdirSync(tempRoot), [], "la carpeta temporal se borró");
+
+    // Si la cuenta no sirve, se explica en una línea que la app muestra tal cual.
+    const failed = run("oauth-personal", join(temp.path, "mal.jsonl"));
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, /^Login failed: Authentication required$/m);
+    assert.deepEqual(readdirSync(tempRoot), []);
+  } finally {
+    temp.cleanup();
+  }
 });

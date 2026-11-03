@@ -1,7 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { ProviderStatus } from "../service.js";
+import { antigravityTokenPath } from "./antigravity.js";
 import { type ClaudeCli, describeClaudeAuth, readClaudeAuth } from "./claude-cli.js";
 import { redactDiagnostic } from "./codex.js";
 import { describeSource, type LocatedCli, locateCli } from "./locate.js";
@@ -18,7 +19,7 @@ export interface DetectOptions {
   claude?: { cli: ClaudeCli | null; env: NodeJS.ProcessEnv; configDir: string };
   /** Para las pruebas: dónde buscar los programas (por defecto, locateCli). */
   locate?: (name: "codex" | "grok" | "gemini") => LocatedCli | null;
-  /** Carpeta personal donde Grok y Gemini guardan su sesión (por defecto, la del usuario). */
+  /** Carpeta personal donde Grok y Antigravity (Gemini) guardan su sesión (por defecto, la del usuario). */
   home?: string;
 }
 
@@ -130,33 +131,31 @@ async function detectGrok(found: LocatedCli | null, env: NodeJS.ProcessEnv, home
 }
 
 /**
- * Gemini CLI (Google): la cuenta queda en el llavero del sistema, así que se mira el método elegido en
- * ~/.gemini/settings.json (lo guarda al iniciar sesión bien). También sirven GEMINI_API_KEY o GOOGLE_API_KEY.
+ * Gemini por Antigravity (Google): con AGY_ACP_FORCE_FILE_STORAGE=1 la sesión queda en
+ * ~/.gemini/antigravity-acp/acp_token.json. También sirve GEMINI_API_KEY. No se ejecuta el programa para
+ * ver su versión: cada arranque descomprime unos 300 MB; la versión sale de su carpeta.
  */
 async function detectGemini(found: LocatedCli | null, env: NodeJS.ProcessEnv, home: string): Promise<ProviderStatus> {
   const base = { id: "gemini" as const, label: "Gemini", canInstall: true, canSignOut: false };
-  if (!found) return notInstalled(base, "Gemini CLI (de Google, con tu cuenta de Google)");
-  const version = await run(found.path, ["--version"], env, 20_000);
-  if (!version.ok) return broken(base, found, version.output);
-  const versionText = `Gemini CLI ${firstLine(version.output) || ""}`.trim() + where(found);
-  if (env.GEMINI_API_KEY?.trim() || env.GOOGLE_API_KEY?.trim()) {
-    return { ...base, available: true, loggedIn: true, canSignIn: false, path: found.path, detail: `${versionText} · usa tu clave de API de Gemini.` };
+  if (!found) return notInstalled(base, "Gemini (Antigravity, de Google, con tu cuenta de Google)");
+  const version = folderVersion(found.path);
+  const versionText = `Antigravity${version ? ` ${version}` : ""}${where(found)}`;
+  if (env.GEMINI_API_KEY?.trim()) {
+    return { ...base, available: true, loggedIn: true, canSignIn: false, path: found.path, detail: `${versionText} · usa tu clave de API de Gemini (GEMINI_API_KEY).` };
   }
-  const method = geminiAuthMethod(home);
-  if (method === "oauth-personal") {
+  if (existsSync(antigravityTokenPath(home))) {
     return { ...base, available: true, loggedIn: true, canSignIn: true, path: found.path, detail: `${versionText} · sesión iniciada con Google.` };
   }
   return { ...base, available: true, loggedIn: false, canSignIn: true, path: found.path, detail: `${versionText}, sin sesión: pulsa «Iniciar sesión con Google».` };
 }
 
-/** Método de inicio de sesión que Gemini CLI guardó en su configuración (o null). */
-export function geminiAuthMethod(home: string = homedir()): string | null {
-  try {
-    const text = readFileSync(join(home, ".gemini", "settings.json"), "utf8");
-    return /"selected(?:Auth)?Type"\s*:\s*"([^"]+)"/.exec(text)?.[1] ?? null;
-  } catch {
-    return null;
+/** «…/antigravity/1.4.5/agy_acp_server.exe» (de ClosedBot) o «…/1.4.5/bin/agy_acp_server.exe» (de OpenBot) → «1.4.5». */
+function folderVersion(path: string): string | null {
+  for (const dir of [dirname(path), dirname(dirname(path))]) {
+    const name = basename(dir);
+    if (/^\d+\.\d+\.\d+(?:[-+.][\w.-]+)?$/.test(name)) return name;
   }
+  return null;
 }
 
 function notInstalled(base: { id: "codex" | "grok" | "gemini"; label: string }, what: string): ProviderStatus {
@@ -176,7 +175,7 @@ function broken(base: { id: "codex" | "grok" | "gemini"; label: string }, found:
 }
 
 function where(found: LocatedCli): string {
-  return found.source === "path" || found.source === "config" ? "" : ` (de ${describeSource(found.source)})`;
+  return found.source === "path" || found.source === "config" || found.source === "propia" ? "" : ` (de ${describeSource(found.source)})`;
 }
 
 async function run(bin: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs = 10_000): Promise<{ ok: boolean; output: string }> {

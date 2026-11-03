@@ -2420,36 +2420,9 @@ svg {
   color: var(--muted);
 }
 
-.provider .detail[data-tone="bad"] {
-  color: #f28b82;
-}
-
-/* Voces para leer en voz alta (Ajustes) */
-.tts-actions {
-  margin-top: 10px;
-}
-
-.provider .detail + .detail {
+.provider .detail.problem {
   margin-top: 6px;
-}
-
-a.button {
-  text-decoration: none;
-}
-
-/* Una clave pegada se ve tapada (sin ser un campo de contraseña, que el navegador querría autocompletar). */
-.secret-input {
-  -webkit-text-security: disc;
-  font-family: var(--mono);
-}
-
-.prompt-hint {
-  margin: 10px 0 0;
-  line-height: 1.45;
-}
-
-.prompt-hint a {
-  color: var(--link);
+  color: var(--danger);
 }
 
 /* Inicio de sesión con la cuenta del proveedor */
