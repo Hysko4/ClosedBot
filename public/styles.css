@@ -2140,10 +2140,6 @@ svg {
   background: var(--accent);
 }
 
-.speech-engine {
-  margin: 10px 0 4px;
-}
-
 .composer {
   background: var(--card);
   border: 1px solid #252525;

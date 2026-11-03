@@ -7,7 +7,7 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
 ## Qué hace
 
 - **Claude Bot, el bot principal**: va fijo arriba de la barra lateral. Le cuentas qué quieres lograr y arma el equipo de agentes que lo hará: crea cada agente con su nombre, rol e instrucciones, los agrupa en un proyecto, le pasa el primer encargo al líder y te cuenta cómo va. También ajusta equipos que ya existen (rol, instrucciones, proyecto o modelo). No elimina agentes ni cambia sus permisos, y no se puede eliminar.
-- **Varios agentes**, cada uno con su proveedor (Claude, Codex, Gemini, Grok o Demo), modelo, nivel de esfuerzo y nivel de acceso.
+- **Varios agentes**, cada uno con su proveedor (Claude, Codex, Gemini o Grok), modelo, nivel de esfuerzo y nivel de acceso.
 - **Canales**: una conversación con varios agentes a la vez. El encargado del canal responde lo que no nombra a nadie y reparte el trabajo; con `@Nombre` le hablas a un agente en particular y con `@todos` a todos. Se crean con clic derecho en la barra lateral → «Nuevo canal». Los eliminados quedan en «Canales eliminados», desde donde se restauran o se borran para siempre.
 - **Cola por agente**: si le escribes mientras trabaja, el mensaje espera su turno. Puedes quitar mensajes de la cola, pausarla o detener el turno en curso.
 - **Trabajo en equipo**: los agentes se escriben entre sí con las herramientas `list_agents` y `send_message`. Si un compañero termina sin contestar, su resultado vuelve solo a quien se lo pidió. Hay un límite de reenvíos seguidos (6 por defecto) para cortar bucles.
@@ -17,9 +17,9 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
 - **Lista de agentes como en una app de chat**: agrupados en secciones, con su último mensaje y un punto en los que tienen novedades. Clic derecho (o mantener presionado en el celular) en un agente: fijar, mover a otra sección, marcar como no leído, cambiar nombre, ocultar y eliminar. Clic derecho en el fondo de la lista: nuevo agente, nueva sección y marcar todo como leído.
 - **Crear un agente en un paso**: el **+** pide solo el nombre, una figura y un color. El agente nuevo te saluda y te pregunta para qué lo quieres. Los que arma Claude Bot no saludan.
 - **Ficha de cada agente** (tocando su nombre arriba del chat): *Detalles* con sus rutinas y el chat de voz, *Biblioteca* con los archivos de su carpeta y de la compartida, y *Computadora* con sus carpetas y su nivel de acceso.
-- **Respuestas en voz alta**: cada agente tiene su voz, velocidad e idioma. Solo usa voces naturales y gratis: las «Online (Natural)» de Edge y las 10 voces de este PC (Supertonic 3, las mismas de OpenBot, que leen sin internet). Las voces robóticas no se usan. Lee solo sus respuestas si lo activas, o cuando le hablas con el botón morado.
+- **Respuestas en voz alta**: cada agente tiene su voz, velocidad e idioma. Usa solo las 10 voces de OpenBot (Supertonic 3), que leen en el propio PC, gratis y sin internet. Lee solo sus respuestas si lo activas, o cuando le hablas con el botón morado.
 - **Uso del plan de Claude**: un anillo junto a Ajustes muestra el porcentaje semanal. Al tocarlo se ven también las 5 horas y cuánto falta para que se reinicien. Es el uso de toda tu cuenta.
-- **Dictado por voz y adjuntos**: el micrófono escribe lo que dices. En el PC se reconoce en el propio equipo, sin internet (el modelo se descarga una vez); también puede usar el servicio de voz del navegador. Puedes adjuntar archivos, que quedan en la carpeta del agente.
+- **Dictado por voz y adjuntos**: el micrófono escribe lo que dices. Elige el motor por sí solo: en el PC reconoce la voz en el propio equipo, sin internet (el modelo se descarga una vez); donde no puede, usa el del navegador. Puedes adjuntar archivos, que quedan en la carpeta del agente.
 - **App instalable** (PWA) en Android y iPhone, a través de tu red privada de Tailscale.
 - **Conexión con tu cuenta**: en Ajustes, «Iniciar sesión con Claude» abre el navegador para que entres con tu cuenta de Claude, como en OpenBot. No hace falta una clave de API.
 - **Dos niveles de acceso**:
@@ -33,7 +33,7 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
 - **Instálala en una máquina dedicada** (una VM o VPS aparte), nunca en el servidor de Sider4 ni donde guardes credenciales de bancos, exchanges o bots. Los agentes ejecutan comandos de verdad.
 - **No la expongas a Internet.** Por defecto solo escucha en `127.0.0.1`. Al teléfono llega por Tailscale, que es una red privada entre tus dispositivos.
 - El acceso pide una contraseña. La sesión se guarda en una cookie `HttpOnly`, y el login se bloquea tras 10 intentos fallidos en 15 minutos.
-- Cada mensaje a Claude o a Codex consume tu saldo de API o tu plan. El proveedor **Demo** no usa IA y sirve para probar la app gratis.
+- Cada mensaje a un agente consume tu saldo de API o el plan de su proveedor.
 
 ## Requisitos
 
@@ -172,7 +172,7 @@ ClosedBot los busca en el PATH, en las carpetas de npm, en la app de Codex, en l
 ## Uso
 
 - **Armar un equipo**: toca a Claude Bot (arriba en la barra lateral) y cuéntale qué necesitas, por ejemplo: «Arma un equipo para crear un videojuego de plataformas». Cada agente que crea aparece en la lista, dentro de su proyecto y con un punto azul. En su chat verás «Creó a …»; al tocar el nombre se abre la conversación de ese agente. En «Editar a Claude Bot» puedes dejarle tus preferencias para armar equipos (por ejemplo, «máximo 3 agentes» o «usa Sonnet para tareas simples»).
-- **Crear un agente**: botón **+**. Ponle nombre y elige figura y color. Usa Claude si tienes sesión (si no, Demo). El rol, las instrucciones, el modelo, el esfuerzo y el acceso se cambian en su ficha → «Instrucciones y modelo» (con «Acceso total para todos» encendido, el acceso no aparece: todos lo tienen).
+- **Crear un agente**: botón **+**. Ponle nombre y elige figura y color. Usa el primer proveedor con sesión (Claude, si la tienes). El rol, las instrucciones, el modelo, el esfuerzo y el acceso se cambian en su ficha → «Instrucciones y modelo» (con «Acceso total para todos» encendido, el acceso no aparece: todos lo tienen).
 - **Escribir**: en el computador, Enter envía y Mayús+Enter hace un salto de línea. En el teléfono se envía con el botón.
 - **Cola**: si el agente está ocupado, verás «N mensajes esperando turno». Desde ahí puedes quitar mensajes. En su ficha (toca su nombre arriba) puedes pausar la cola, empezar de cero o eliminarlo. «Detener» corta el turno en curso.
 - **Equipo**: pídele a un agente que consulte a otro, por ejemplo: «Pídele a Beto que revise esto». En su chat verás «Enviado a Beto» y después «Respuesta de Beto».
@@ -182,15 +182,14 @@ ClosedBot los busca en el PATH, en las carpetas de npm, en la app de Codex, en l
 - **Secciones**: agrupan a los agentes en la barra lateral. Créalas con clic derecho en el fondo de la lista y mueve agentes con «Mover a». Al eliminar una sección, sus agentes pasan a «Sin asignar». Claude Bot pone en la misma sección a los agentes de un equipo.
 - **Ocultos y fijados**: los fijados van arriba; los ocultos, plegados al final de la lista («Ocultos») y en la búsqueda.
 - **Voz**: el micrófono dicta en el cuadro de texto. Con el cuadro vacío, el botón morado graba y envía al terminar, y la respuesta se lee en voz alta.
-  - *Dictado*: en el PC, ClosedBot reconoce la voz en el propio equipo con Parakeet v3 (sherpa-onnx). La primera vez pide descargar el modelo (unos 490 MB, a `<datos>/voz`); después funciona sin internet y tu voz no sale del equipo. En **Ajustes → Dictado por voz** puedes elegir en su lugar el servicio de voz del navegador, que manda el audio a Microsoft o Google.
-  - *Lectura*: en la ficha del agente, *Chat de voz* elige la voz (agrupadas por país), la velocidad y el idioma, y si lee siempre sus respuestas. Bajo cada respuesta hay un botón para escucharla.
-  - *Solo voces naturales*: las «Online (Natural)» de Edge (por ejemplo, Catalina o Lorenzo, de Chile), sus voces «Multilingual» (Ava, Andrew…, que leen también en español) y, en iPhone o Mac, las «Mejorada» o «Premium». Son gratis y las de Edge usan internet. Las voces robóticas del sistema no se usan: si no hay naturales, ClosedBot avisa dónde conseguirlas en vez de leer con una robótica. La app de escritorio ya abre ClosedBot en Edge. **Ajustes → Voces para leer en voz alta** muestra cuántas hay.
-  - *Voces de este PC*: Supertonic 3, las 10 voces de OpenBot (5 de mujer y 5 de hombre, en 31 idiomas). Corren en el propio equipo con sherpa-onnx, sin internet ni claves. Si OpenBot ya las descargó, ClosedBot usa esa copia; si no, «Descargar» (en Ajustes o en la ficha del agente) baja una vez los archivos de Hugging Face (unos 145 MB, en la revisión que fija OpenBot), comprueba el SHA-256 de cada uno y los deja en `<datos>/voz/voces`.
-  - Las voces de Grok (Ara, Eve, Leo, Rex, Sal), de ChatGPT o de ElevenLabs son de pago y necesitan una clave de API: ClosedBot no las usa.
+  - *Dictado*: siempre en automático. En el PC, ClosedBot reconoce la voz en el propio equipo con Parakeet v3 (sherpa-onnx): la primera vez que tocas el micrófono pide descargar el modelo (unos 490 MB, a `<datos>/voz`), y después funciona sin internet y tu voz no sale del equipo. Donde no se puede grabar el audio, usa el servicio de voz del navegador.
+  - *Lectura*: en la ficha del agente, *Chat de voz* elige la voz, la velocidad y el idioma, y si lee siempre sus respuestas. Bajo cada respuesta hay un botón para escucharla.
+  - *Voces*: solo las 10 de OpenBot (Supertonic 3: 5 de mujer y 5 de hombre, en 31 idiomas). Corren en el propio equipo con sherpa-onnx, sin internet ni claves, y el teléfono recibe el audio desde el PC. Si OpenBot ya las descargó, ClosedBot usa esa copia; si no, «Descargar» (en Ajustes o en la ficha del agente) baja una vez los archivos de Hugging Face (unos 145 MB, en la revisión que fija OpenBot), comprueba el SHA-256 de cada uno y los deja en `<datos>/voz/voces`.
+  - Las voces del navegador (las de Edge) y las de pago (Grok, ChatGPT, ElevenLabs) no se usan.
 - **Biblioteca**: en la ficha del agente se ven y descargan los archivos de su carpeta y de la compartida. «Subir archivo» los deja en `adjuntos/`. Los archivos se abren en una pestaña aparte, sin permisos sobre la app.
 - **Uso del plan**: lo informa Claude Code (como `/usage`) cada 10 minutos y tras cada turno. Esa lectura es una función experimental del SDK de Claude: si cambia, el anillo desaparece y la app sigue igual.
 - **Adjuntos**: clip, pegar o arrastrar. Hasta 25 MB por archivo; se guardan en `adjuntos/` dentro de la carpeta del agente.
-- **Probar sin IA**: con el proveedor Demo, una línea `@Nombre: texto` envía `texto` a ese compañero, `/equipo` lista a los compañeros, `/lento` responde despacio (para probar «Detener»), `/pregunta ¿Texto? | A | B` muestra una tarjeta de opciones y `/rutina 09:00 Nombre` crea una rutina. Si Claude Bot usa la demo, `/crear Nombre | Rol | Proyecto` crea un agente y `/ajustar Nombre | Rol nuevo` le cambia el rol.
+- **Probar sin IA** (solo para desarrollo: Demo ya no aparece en la app): con el proveedor Demo, una línea `@Nombre: texto` envía `texto` a ese compañero, `/equipo` lista a los compañeros, `/lento` responde despacio (para probar «Detener»), `/pregunta ¿Texto? | A | B` muestra una tarjeta de opciones y `/rutina 09:00 Nombre` crea una rutina. Si Claude Bot usa la demo, `/crear Nombre | Rol | Proyecto` crea un agente y `/ajustar Nombre | Rol nuevo` le cambia el rol.
 
 ## Configuración
 
@@ -268,7 +267,7 @@ test/                  pruebas (node:test)
 
 ## Estado y límites conocidos
 
-- Versión 0.6.2. Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. Las voces de este PC se probaron con el modelo real en Windows. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
+- Versión 0.6.3. Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. Las voces de OpenBot se probaron con el modelo real en Windows. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
 - Un solo usuario y sin notificaciones push por ahora.
 - Claude Bot crea hasta 8 agentes por pedido y deja de crear cuando ya hay 60 agentes en total.
 - Las preguntas con opciones terminan el turno del agente: tu respuesta le llega como un mensaje nuevo.

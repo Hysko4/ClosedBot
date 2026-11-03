@@ -8,7 +8,6 @@ const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition |
 const AudioCtx = window.AudioContext || window.webkitAudioContext || null;
 /** Grabar el micrófono para el dictado en este PC (el navegador solo lo permite en localhost o https). */
 const CanRecord = Boolean(window.isSecureContext && navigator.mediaDevices?.getUserMedia && AudioCtx);
-const DICTATION_KEY = "closedbot:dictado";
 const BROWSER_FAILED_KEY = "closedbot:dictado-navegador-falla";
 /** Dictado en este PC (segundos): cortes en las pausas para que el texto aparezca mientras hablas. */
 const LOCAL_DICTATION = {
@@ -23,7 +22,6 @@ const LOCAL_DICTATION = {
   dictateIdle: 45,
   maxTotal: 300,
 };
-const Synth = "speechSynthesis" in window && typeof window.SpeechSynthesisUtterance === "function" ? window.speechSynthesis : null;
 /** Los avatares elegidos a mano se guardan como 10000 + figura × 100 + color (los automáticos son 0, 1, 2…). */
 const AVATAR_CUSTOM_BASE = 10_000;
 const LONG_PRESS_MS = 500;
@@ -36,8 +34,6 @@ const state = {
   routines: [],
   settings: { botName: "ClosedBot", userName: "", fullAccess: false },
   paths: null,
-  version: "",
-  maxHops: 0,
   platform: "",
   currentId: null,
   messages: new Map(), // agentId -> array de mensajes en orden
@@ -217,8 +213,6 @@ async function enterApp() {
   state.routines = data.routines ?? [];
   state.settings = data.settings ?? state.settings;
   state.paths = data.paths;
-  state.version = data.version;
-  state.maxHops = data.maxHops;
   state.platform = data.platform ?? "";
   state.sections = data.sections ?? [];
   state.usage = data.usage ?? [];
@@ -2059,16 +2053,7 @@ async function startDictation(mode) {
   else if (Recognition) startBrowserDictation(mode);
 }
 
-// ---------- dictado: motor elegido ----------
-
-function dictationChoice() {
-  try {
-    const value = localStorage.getItem(DICTATION_KEY);
-    return value === "local" || value === "navegador" ? value : "auto";
-  } catch {
-    return "auto";
-  }
-}
+// ---------- dictado: qué motor se usa ----------
 
 function rememberDictation(key, value) {
   try {
@@ -2097,11 +2082,10 @@ function localDictationPossible() {
   return CanRecord && Boolean(state.speech);
 }
 
+/** Siempre en automático: este PC si ya tiene el reconocimiento (o el del navegador no sirve aquí), si no, el navegador. */
 function useLocalDictation() {
   if (!localDictationPossible()) return false;
   if (!Recognition) return true;
-  const choice = dictationChoice();
-  if (choice !== "auto") return choice === "local";
   return isDesktopEdge() || state.speech.state === "ready" || browserDictationFailed();
 }
 
@@ -2119,7 +2103,7 @@ function updateDictateButton() {
 function startBrowserDictation(mode) {
   // Si el agente está leyendo en voz alta, se calla: el micrófono no debe escucharlo.
   stopSpeaking();
-  primeSpeech();
+  primeAudio();
   const input = $("#composer-input");
   const rec = new Recognition();
   rec.lang = dictationLanguage();
@@ -2199,7 +2183,7 @@ async function startLocalDictation(mode) {
     return;
   }
   stopSpeaking();
-  primeSpeech();
+  primeAudio();
   const session = {
     engine: "local",
     mode,
@@ -2597,7 +2581,6 @@ function applySpeechStatus(status) {
     }
   }
   renderDictationStatus();
-  renderSpeechSettings();
   updateDictateButton();
 }
 
@@ -2633,116 +2616,19 @@ function setDictationLevel(level) {
   $("#dictation-status")?.style.setProperty("--level", level.toFixed(3));
 }
 
-/** Ajustes → Dictado por voz: estado del reconocimiento en este PC y qué motor usar. */
-function renderSpeechSettings() {
-  const list = $("#speech-settings");
-  if (!list) return;
-  list.replaceChildren();
-  const status = state.speech;
-  const item = document.createElement("li");
-  item.className = "provider";
-  const title = document.createElement("div");
-  title.className = "title";
-  const name = document.createElement("span");
-  name.textContent = "Reconocimiento en este PC";
-  const badge = document.createElement("span");
-  badge.className = "state";
-  const detail = document.createElement("div");
-  detail.className = "detail";
-  let action = null;
-  if (!status || !CanRecord) {
-    badge.textContent = "No disponible";
-    badge.dataset.tone = "bad";
-    detail.textContent = !status
-      ? "Este servidor no tiene el dictado local."
-      : "Esta ventana no puede grabar audio (hace falta abrir ClosedBot en este PC o con https).";
-  } else if (status.state === "ready") {
-    badge.textContent = "Listo";
-    badge.dataset.tone = "ok";
-    detail.textContent = `${status.model}. Funciona sin internet y tu voz no sale de este PC.`;
-  } else if (status.state === "downloading" || status.state === "extracting") {
-    badge.textContent = status.state === "downloading" ? `${Math.floor((status.progress ?? 0) * 100)} %` : "Instalando…";
-    badge.dataset.tone = "warn";
-    detail.textContent = `${speechProgressText(status)}. Puedes seguir usando ClosedBot mientras tanto.`;
-  } else {
-    badge.textContent = status.state === "error" ? "Falló" : "Sin descargar";
-    badge.dataset.tone = status.state === "error" ? "bad" : "warn";
-    detail.textContent =
-      status.state === "error" && status.error
-        ? status.error
-        : `${status.model}, ${status.sizeMb} MB. Se descarga una vez; después funciona sin internet y tu voz no sale de este PC.`;
-    action = smallButton(status.state === "error" ? "Reintentar" : "Descargar", "primary");
-    action.addEventListener("click", () => void installLocalModel(action));
-  }
-  title.append(name, badge);
-  item.append(title, detail);
-  if (action) item.append(actionRow(action));
-  if (Recognition && status && CanRecord) {
-    const field = document.createElement("label");
-    field.className = "field speech-engine";
-    const label = document.createElement("span");
-    label.textContent = "Para dictar, usar";
-    const select = document.createElement("select");
-    select.id = "dictation-engine";
-    for (const [value, text] of [
-      ["auto", "Automático"],
-      ["local", "Este PC (privado, sin internet)"],
-      ["navegador", "El servicio de voz del navegador"],
-    ]) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = text;
-      select.append(option);
-    }
-    select.value = dictationChoice();
-    select.addEventListener("change", () => {
-      rememberDictation(DICTATION_KEY, select.value === "auto" ? null : select.value);
-      // Elegir a mano el navegador le da otra oportunidad aunque antes fallara.
-      if (select.value === "navegador") rememberDictation(BROWSER_FAILED_KEY, null);
-      renderSpeechSettings();
-    });
-    field.append(label, select);
-    const hint = document.createElement("div");
-    hint.className = "detail";
-    hint.textContent = useLocalDictation() ? "Ahora dictas con este PC." : "Ahora dictas con el servicio de voz del navegador (manda tu voz a internet).";
-    item.append(field, hint);
-  }
-  list.append(item);
-}
-
 // ---------- voces para leer en voz alta (Ajustes) ----------
 
-/** Ajustes → Voces para leer en voz alta: las naturales del navegador y las de este PC. Las robóticas no se usan. */
+/** Ajustes → Voces para leer en voz alta: las 10 de OpenBot (Supertonic 3), que leen en este PC. */
 function renderTtsSettings() {
   const list = $("#tts-settings");
   if (!list) return;
-  const local = localVoicesItem();
-  list.replaceChildren(...[browserVoicesItem(), local].filter(Boolean));
+  const item = localVoicesItem();
+  list.replaceChildren(...(item ? [item] : []));
+  list.hidden = !item;
+  $("#tts-title").hidden = !item;
 }
 
-function browserVoicesItem() {
-  const count = naturalVoices(speechLanguage()).length;
-  const item = document.createElement("li");
-  item.className = "provider";
-  const title = document.createElement("div");
-  title.className = "title";
-  const name = document.createElement("span");
-  name.textContent = "Voces naturales";
-  const badge = document.createElement("span");
-  badge.className = "state";
-  badge.textContent = !Synth ? "No disponible" : count ? `${count} en español` : "No hay";
-  badge.dataset.tone = count ? "ok" : Synth ? "warn" : "bad";
-  title.append(name, badge);
-  const detail = document.createElement("div");
-  detail.className = "detail";
-  detail.textContent = count
-    ? "Las de Microsoft Edge: suenan casi humanas, son gratis y usan internet. Las voces robóticas no se usan. Cada agente elige la suya en su ficha, en «Chat de voz»."
-    : noNaturalVoicesText();
-  item.append(title, detail);
-  return item;
-}
-
-// ---------- voces de este PC (Supertonic 3, las mismas de OpenBot) ----------
+// ---------- voces de OpenBot (Supertonic 3): leen en este PC ----------
 
 const LOCAL_PREFIX = "local:";
 
@@ -2761,21 +2647,29 @@ function localVoicesFor(lang) {
   return state.localVoices.languages?.includes(base) ? state.localVoices.voices : [];
 }
 
-/** Se puede leer en voz alta: con las voces del navegador o con las de este PC. */
+/** Se puede leer en voz alta: las voces de OpenBot están listas y este navegador puede tocar su audio. */
 function canReadAloud() {
-  return Boolean(Synth) || localVoicesReady();
+  return localVoicesReady();
 }
 
 function applyLocalVoices(status, { quiet = false } = {}) {
   const previous = state.localVoices?.state ?? null;
+  const couldRead = canReadAloud();
   state.localVoices = status ?? null;
   const next = state.localVoices?.state ?? null;
   if (!quiet && previous && next && previous !== next) {
     if (next === "ready" && previous === "downloading") {
-      showToast("Ya están las voces de este PC: elige una en la ficha del agente, en «Chat de voz».");
+      showToast("Ya están las voces: elige una en la ficha del agente, en «Chat de voz».");
     } else if (next === "error") {
       showToast(state.localVoices.error ?? "No se pudieron descargar las voces.", "error");
     }
+  }
+  // Con las voces listas aparece el botón para leer cada respuesta (al conectar se recarga la conversación igual).
+  if (!quiet && couldRead !== canReadAloud() && convKey()) {
+    const scroller = $("#messages");
+    const top = scroller.scrollTop;
+    renderAllMessages();
+    scroller.scrollTop = top;
   }
   if ($("#settings-dialog")?.open) renderTtsSettings();
   renderDetailsIfOpen();
@@ -2797,12 +2691,12 @@ function localVoicesProgressText(status) {
   return `Descargando las voces: ${Math.floor((status.progress ?? 0) * 100)} % de ${status.sizeMb} MB`;
 }
 
-/** Qué son las voces de este PC, para quien todavía no las tiene. */
+/** Qué son las voces, para quien todavía no las tiene. */
 function localVoicesOfferText(status) {
-  return `10 voces naturales (5 de mujer y 5 de hombre), las mismas de OpenBot. Se descargan una vez (${status.sizeMb} MB) y después leen en este PC, gratis y sin internet.`;
+  return `Las 10 voces de OpenBot. Se descargan una vez (${status.sizeMb} MB) y después leen sin internet.`;
 }
 
-/** Ajustes → Voces para leer en voz alta → Voces de este PC. */
+/** Ajustes → Voces para leer en voz alta. */
 function localVoicesItem() {
   const status = state.localVoices;
   if (!status) return null;
@@ -2811,7 +2705,7 @@ function localVoicesItem() {
   const title = document.createElement("div");
   title.className = "title";
   const name = document.createElement("span");
-  name.textContent = `Voces de este PC (${status.model})`;
+  name.textContent = "Voces de OpenBot";
   const badge = document.createElement("span");
   badge.className = "state";
   const detail = document.createElement("div");
@@ -2820,9 +2714,7 @@ function localVoicesItem() {
   if (status.state === "ready") {
     badge.textContent = "Listas";
     badge.dataset.tone = "ok";
-    detail.textContent =
-      `${status.voices.length} voces (5 de mujer y 5 de hombre), las mismas de OpenBot. Leen en este PC, sin internet, en ${status.languages.length} idiomas.` +
-      (status.source === "openbot" ? " Usa la copia que ya descargó OpenBot." : "");
+    detail.textContent = "5 de mujer y 5 de hombre. Leen sin internet.";
   } else if (status.state === "downloading") {
     badge.textContent = `${Math.floor((status.progress ?? 0) * 100)} %`;
     badge.dataset.tone = "warn";
@@ -2834,14 +2726,14 @@ function localVoicesItem() {
     action = smallButton(status.state === "error" ? "Reintentar" : "Descargar", "primary");
     action.addEventListener("click", () => void installLocalVoices(action));
   }
-  if (!AudioCtx) detail.textContent = "Este navegador no puede tocar el audio de las voces de este PC.";
+  if (!AudioCtx) detail.textContent = "Este navegador no puede tocar el audio de las voces.";
   title.append(name, badge);
   item.append(title, detail);
   if (action && AudioCtx) item.append(actionRow(action));
   return item;
 }
 
-/** En la ficha del agente: ofrece descargar las voces de este PC (o muestra cómo va la descarga). */
+/** En la ficha del agente: ofrece descargar las voces (o muestra cómo va la descarga). */
 function renderLocalVoicesOffer() {
   const box = $("#voice-local");
   if (!box) return;
@@ -2854,25 +2746,10 @@ function renderLocalVoicesOffer() {
     ? `${localVoicesProgressText(status)}…`
     : status.state === "error" && status.error
       ? status.error
-      : `¿Más voces? ${localVoicesOfferText(status)}`;
+      : localVoicesOfferText(status);
   const button = $("#voice-local-download");
   button.hidden = downloading;
   button.textContent = status.state === "error" ? "Reintentar" : "Descargar";
-}
-
-/** Dónde conseguir voces naturales cuando este navegador no las tiene. */
-function noNaturalVoicesText() {
-  const local = state.localVoices && AudioCtx && state.localVoices.state !== "ready" ? " También puedes descargar las voces de este PC, que no usan internet." : "";
-  return browserVoicesText() + local;
-}
-
-function browserVoicesText() {
-  if (!Synth) return "Este navegador no puede leer en voz alta.";
-  const apple = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-  if (apple) {
-    return "En este equipo no hay voces naturales: descarga una voz «Mejorada» en Ajustes → Accesibilidad → Contenido leído → Voces → Español.";
-  }
-  return "En este navegador no hay voces naturales para leer en voz alta: abre ClosedBot en Microsoft Edge (la app del escritorio ya lo usa) y revisa que haya internet.";
 }
 
 function stopDictation({ cancel = false } = {}) {
@@ -4018,9 +3895,9 @@ async function openAgentDialog(agent = null) {
   if (!coarsePointer) form.elements.name.focus();
 }
 
-/** Proveedor para un agente nuevo: el primero con IA instalado y con sesión; si no hay, Demo. */
+/** Proveedor para un agente nuevo: el primero con IA instalado y con sesión; si no hay, Claude (pedirá entrar). */
 function preferredProvider() {
-  return state.providers.find((provider) => provider.id !== "demo" && provider.available && provider.loggedIn !== false)?.id ?? "demo";
+  return state.providers.find((provider) => provider.id !== "demo" && provider.available && provider.loggedIn !== false)?.id ?? "claude";
 }
 
 function fillProviders(selected) {
@@ -4028,9 +3905,11 @@ function fillProviders(selected) {
   select.replaceChildren();
   const preferred = selected ?? preferredProvider();
   for (const provider of state.providers) {
+    // Demo no usa IA y no se ofrece: solo figura en un agente que ya lo tenía.
+    if (provider.id === "demo" && selected !== "demo") continue;
     const option = document.createElement("option");
     option.value = provider.id;
-    const suffix = !provider.available ? " (no instalado)" : provider.loggedIn === false ? " (sin sesión)" : provider.id === "demo" ? " (sin IA)" : "";
+    const suffix = !provider.available ? " (no instalado)" : provider.loggedIn === false ? " (sin sesión)" : "";
     option.textContent = `${provider.label}${suffix}`;
     select.append(option);
   }
@@ -4538,9 +4417,7 @@ function openSettings({ focusName = false } = {}) {
     dd.textContent = value ?? "—";
     paths.append(dt, dd);
   }
-  $("#version").textContent = `ClosedBot ${state.version} · límite de ${state.maxHops} reenvíos seguidos entre agentes.`;
   renderPermissions();
-  renderSpeechSettings();
   renderTtsSettings();
   openDialog($("#settings-dialog"));
   if (focusName) names.elements.userName.focus();
@@ -4608,6 +4485,7 @@ function renderProviders() {
   const focusKey = list.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
   list.replaceChildren();
   for (const provider of state.providers) {
+    if (provider.id === "demo") continue; // No usa IA: no se muestra.
     const item = document.createElement("li");
     item.className = "provider";
     const title = document.createElement("div");
@@ -5045,22 +4923,15 @@ function miniRoutine(routine) {
 function renderVoiceSettings(agent) {
   const voice = { ...DEFAULT_VOICE, ...(agent.voice ?? {}) };
   const lang = voice.lang === "auto" ? speechLanguage() : voice.lang;
-  const natural = naturalVoices(lang);
-  const multilingual = multilingualVoices(lang);
   const local = localVoicesFor(lang);
-  const canSpeak = (Boolean(Synth) && natural.length + multilingual.length > 0) || local.length > 0;
-  $("#voice-unsupported").hidden = canReadAloud();
-  const quality = $("#voice-quality-hint");
-  quality.hidden = canSpeak || !canReadAloud();
-  quality.textContent = canSpeak ? "" : noNaturalVoicesText();
+  const canSpeak = local.length > 0;
+  $("#voice-unsupported").hidden = Boolean(AudioCtx);
   const select = $("#voice-name");
-  const key = `${agent.id}|${voices.length}|${lang}|${voice.name}|${local.length}`;
+  const key = `${agent.id}|${lang}|${voice.name}|${local.length}`;
   if (select.dataset.key !== key && document.activeElement !== select) {
-    select.replaceChildren(...voiceOptions({ natural, multilingual, local }, lang));
-    // Una voz robótica elegida antes ya no se usa: queda «Automática».
-    const known =
-      [...natural, ...multilingual].some((item) => item.name === voice.name) || local.some((item) => `${LOCAL_PREFIX}${item.id}` === voice.name);
-    select.value = known ? voice.name : "";
+    select.replaceChildren(new Option("Automática", ""), ...local.map((item) => new Option(item.label, `${LOCAL_PREFIX}${item.id}`)));
+    // Una voz de Edge elegida antes ya no se usa: queda «Automática».
+    select.value = local.some((item) => `${LOCAL_PREFIX}${item.id}` === voice.name) ? voice.name : "";
     select.dataset.key = key;
   }
   select.disabled = !canSpeak;
@@ -5082,91 +4953,8 @@ function renderVoiceSettings(agent) {
   renderLocalVoicesOffer();
 }
 
-/**
- * «Automática», las voces de este PC, las naturales del idioma por país (primero el del idioma elegido) y las
- * multilingües de Edge.
- */
-function voiceOptions({ natural, multilingual, local }, lang) {
-  const any = natural.length + multilingual.length + local.length > 0;
-  const options = [new Option(any ? "Automática (la mejor para el idioma)" : "No hay voces naturales", "")];
-  if (local.length) {
-    options.push(optionGroup("En este PC, sin internet", local.map((item) => new Option(item.label, `${LOCAL_PREFIX}${item.id}`))));
-  }
-  const sorted = [...natural].sort(
-    (a, b) =>
-      voiceScore(b, lang) - voiceScore(a, lang) ||
-      voiceRegion(a).localeCompare(voiceRegion(b), "es") ||
-      voiceLabel(a).localeCompare(voiceLabel(b), "es"),
-  );
-  const groups = new Map();
-  for (const item of sorted) {
-    const region = voiceRegion(item);
-    if (!groups.has(region)) groups.set(region, []);
-    groups.get(region).push(new Option(voiceLabel(item), item.name));
-  }
-  for (const [region, items] of groups) options.push(optionGroup(region, items));
-  if (multilingual.length) {
-    const items = [...multilingual].sort((a, b) => voiceLabel(a).localeCompare(voiceLabel(b), "es"));
-    options.push(optionGroup("Multilingües (leen varios idiomas)", items.map((item) => new Option(voiceLabel(item), item.name))));
-  }
-  return options;
-}
-
-function optionGroup(label, options) {
-  const group = document.createElement("optgroup");
-  group.label = label;
-  group.append(...options);
-  return group;
-}
-
-/** Las voces que suenan humanas: «Natural» en Edge, «Mejorada» o «Premium» en Apple. Las demás no se usan. */
-function isNaturalVoice(voice) {
-  return /\b(natural|neural|premium|enhanced|mejorada)\b/i.test(String(voice.name));
-}
-
-function naturalVoices(lang) {
-  const base = String(lang).split("-")[0].toLowerCase();
-  return voices.filter((item) => normalizeLang(item.lang).split("-")[0] === base && isNaturalVoice(item));
-}
-
-function isMultilingualVoice(voice) {
-  return /multilingual/i.test(String(voice.name));
-}
-
-/** Voces «Multilingual» de Edge de otro idioma: figuran en inglés (u otro), pero también leen este. */
-function multilingualVoices(lang) {
-  const base = String(lang).split("-")[0].toLowerCase();
-  return voices.filter((item) => isNaturalVoice(item) && isMultilingualVoice(item) && normalizeLang(item.lang).split("-")[0] !== base);
-}
-
-let regionNames = null;
-
-/** País de una voz («es-CL» → «Chile»). */
-function voiceRegion(voice) {
-  const code = normalizeLang(voice.lang).split("-")[1]?.toUpperCase() ?? "";
-  if (!code) return "Otras";
-  try {
-    regionNames ??= new Intl.DisplayNames(["es"], { type: "region" });
-    return regionNames.of(code) ?? code;
-  } catch {
-    return code;
-  }
-}
-
 function formatRate(value) {
   return `${(Number.isFinite(value) ? value : 1).toLocaleString("es", { minimumFractionDigits: 1, maximumFractionDigits: 2 })}×`;
-}
-
-/** Nombre corto de una voz: «Microsoft Catalina Online (Natural) - Spanish (Chile)» → «Catalina». */
-function voiceLabel(voice) {
-  const name = String(voice.name)
-    .replace(/^(Microsoft|Google|Apple)\s+/i, "")
-    .replace(/\s+-\s+[^-]+$/, "")
-    .replace(/\s*\((natural|neural|premium|enhanced|mejorada)\)/gi, "")
-    .replace(/\s+online\b/i, "")
-    .replace(/\s*multilingual\b/i, "")
-    .trim();
-  return name || String(voice.name);
 }
 
 /** Cambia el chat de voz del agente: se ve enseguida y el servidor lo guarda. */
@@ -5180,21 +4968,14 @@ async function saveVoice(patch) {
 
 function onVoiceLangChange(value) {
   const agent = findAgent(details.agentId);
-  const name = agent?.voice?.name ?? "";
-  const current = name ? voices.find((item) => item.name === name) : null;
-  const target = value === "auto" ? speechLanguage() : value;
-  // Una voz elegida para otro idioma ya no sirve: se vuelve a la automática. Las de este PC y las multilingües
-  // leen varios idiomas.
-  const keepVoice =
-    (isLocalVoice(name) && localVoicesFor(target).length > 0) ||
-    (current && (isMultilingualVoice(current) || normalizeLang(current.lang).split("-")[0] === target.split("-")[0].toLowerCase()));
-  void saveVoice(keepVoice ? { lang: value } : { lang: value, name: "" });
+  // Las voces de OpenBot leen todos estos idiomas: la elegida se queda. Una de Edge de antes vuelve a «Automática».
+  void saveVoice(isLocalVoice(agent?.voice?.name) ? { lang: value } : { lang: value, name: "" });
 }
 
 function testVoice() {
   const agent = findAgent(details.agentId);
   if (!agent || !canReadAloud()) return;
-  primeSpeech();
+  primeAudio();
   if (speech.current?.messageId === "voice-test") {
     stopSpeaking();
     return;
@@ -5425,16 +5206,12 @@ async function copyText(text) {
 
 // ---------- lectura en voz alta ----------
 
-let voices = [];
 /** Lo que se está leyendo (`current`) y lo que espera su turno (`queue`); `token` invalida lo que se canceló. */
 const speech = {
   current: null,
   queue: [],
   token: 0,
-  primed: false,
-  stoppedAt: 0,
-  voicesWaited: false,
-  /** Voces de este PC: el AudioContext, la parte que suena y las descargas en curso. */
+  /** El AudioContext, la parte que suena y las descargas en curso. */
   audio: null,
   source: null,
   abort: null,
@@ -5448,23 +5225,6 @@ const LANGUAGE_WORDS = {
   pt: "o os um uma com em mais muito também quando olá obrigado obrigada e é são mas seu sua há não você isso então já do da dos das na ao".split(" "),
 };
 const LANGUAGE_SETS = Object.fromEntries(Object.entries(LANGUAGE_WORDS).map(([lang, words]) => [lang, new Set(words)]));
-
-function loadVoices() {
-  if (!Synth) return;
-  try {
-    voices = Synth.getVoices() ?? [];
-  } catch {
-    voices = [];
-  }
-  renderDetailsIfOpen();
-  if ($("#settings-dialog").open) renderTtsSettings();
-}
-
-function normalizeLang(value) {
-  return String(value || "")
-    .replace(/_/g, "-")
-    .toLowerCase();
-}
 
 /** Idioma de un texto, por sus palabras más comunes. Ante la duda, el español del navegador. */
 function detectLanguage(text) {
@@ -5482,54 +5242,12 @@ function detectLanguage(text) {
   return best === "en" ? "en-US" : best === "pt" ? "pt-BR" : speechLanguage();
 }
 
-function voiceScore(voice, lang) {
-  const wanted = lang.toLowerCase();
-  const own = normalizeLang(voice.lang);
-  let score = 0;
-  if (own === wanted) score += 8;
-  // Sin voz de Chile, mejor una latinoamericana que una de España.
-  else if (wanted.startsWith("es-") && wanted !== "es-es" && own !== "es-es") score += 2;
-  if (/natural|neural|online|premium|enhanced|mejorada/i.test(voice.name)) score += 4;
-  if (voice.default) score += 1;
-  return score;
-}
-
-function sortVoices(list, lang) {
-  return [...list].sort((a, b) => voiceScore(b, lang) - voiceScore(a, lang) || String(a.name).localeCompare(String(b.name)));
-}
-
-/**
- * La voz elegida o la mejor para el idioma: una natural del navegador; si no hay, una de este PC
- * (`{ local: "F1" }`) o una multilingüe. null si no hay ninguna (las robóticas no se usan).
- */
+/** La voz elegida o, en «Automática», la primera (`{ local: "F1" }`). null si no hay voces para ese idioma. */
 function pickVoice(name, lang) {
-  if (Synth && !voices.length) loadVoices();
   const local = localVoicesFor(lang);
-  if (isLocalVoice(name)) {
-    const id = name.slice(LOCAL_PREFIX.length);
-    if (local.some((item) => item.id === id)) return { local: id };
-  } else if (name) {
-    const chosen = voices.find((voice) => voice.name === name && isNaturalVoice(voice));
-    if (chosen) return chosen;
-  }
-  const best = sortVoices(naturalVoices(lang), lang)[0];
-  if (best) return best;
-  if (local.length) return { local: local[0].id };
-  return multilingualVoices(lang)[0] ?? null;
-}
-
-/** Espera a que el navegador termine de cargar sus voces (Edge entrega las naturales un poco después). */
-function waitForVoices(ms) {
-  return new Promise((resolve) => {
-    const done = () => {
-      clearTimeout(timer);
-      Synth.removeEventListener?.("voiceschanged", done);
-      loadVoices();
-      resolve();
-    };
-    const timer = setTimeout(done, ms);
-    Synth.addEventListener?.("voiceschanged", done);
-  });
+  if (!local.length) return null;
+  const id = isLocalVoice(name) ? name.slice(LOCAL_PREFIX.length) : "";
+  return { local: local.some((item) => item.id === id) ? id : local[0].id };
 }
 
 /** El texto de un mensaje tal como se lee: sin código, enlaces ni marcas de Markdown. */
@@ -5550,51 +5268,7 @@ function speakableText(text) {
     .trim();
 }
 
-/** Trozos cortos (por frases): los navegadores cortan las lecturas muy largas. */
-function chunkText(text, max = 220) {
-  const pieces = text.match(/[^]*?(?:[.!?…;:]+(?=\s|$)|\n+|$)/gu) ?? [];
-  const chunks = [];
-  let current = "";
-  for (const piece of pieces) {
-    let clean = piece.replace(/\s+/g, " ").trim();
-    if (!clean) continue;
-    // Un título o un punto de una lista termina en un salto de línea: se le da la pausa de un punto.
-    if (/\n\s*$/.test(piece) && !/[.!?…;:,]$/.test(clean)) clean += ".";
-    if (current && current.length + clean.length + 1 > max) {
-      chunks.push(current);
-      current = "";
-    }
-    if (clean.length <= max) {
-      current = current ? `${current} ${clean}` : clean;
-      continue;
-    }
-    for (const word of clean.split(" ")) {
-      if (current && current.length + word.length + 1 > max) {
-        chunks.push(current);
-        current = "";
-      }
-      current = current ? `${current} ${word}` : word;
-    }
-  }
-  if (current) chunks.push(current);
-  return chunks;
-}
-
-/** Algunos navegadores (Safari) solo dejan hablar después de un toque: se «despierta» la voz con el primero. */
-function primeSpeech() {
-  primeAudio();
-  if (!Synth || speech.primed) return;
-  speech.primed = true;
-  try {
-    const utterance = new SpeechSynthesisUtterance(" ");
-    utterance.volume = 0;
-    Synth.speak(utterance);
-  } catch {
-    // Sin voz: no pasa nada.
-  }
-}
-
-/** El audio de las voces de este PC solo suena si se activó con un toque: se crea o se despierta aquí. */
+/** El audio solo suena si se activó con un toque (Safari, Chrome): se crea o se despierta aquí. */
 function primeAudio() {
   if (!AudioCtx || !localVoicesReady()) return;
   try {
@@ -5606,16 +5280,10 @@ function primeAudio() {
 }
 
 function stopSpeaking() {
-  const browser = Boolean(Synth) && (Synth.speaking || Synth.pending);
-  const active = speech.current !== null || speech.queue.length > 0 || browser;
   speech.token += 1;
   speech.queue = [];
   speech.current = null;
   stopLocalAudio();
-  if (active && Synth) {
-    Synth.cancel();
-    speech.stoppedAt = performance.now();
-  }
   updateSpeakButtons();
 }
 
@@ -5634,9 +5302,8 @@ function stopLocalAudio() {
 }
 
 /**
- * Lee un texto con la voz natural del agente. Con `queue`, espera a que termine lo que se está leyendo.
- * Devuelve false si no había nada que leer. Sin voces naturales no lee (las robóticas no se usan) y,
- * salvo con `quiet`, avisa dónde conseguirlas.
+ * Lee un texto con la voz del agente. Con `queue`, espera a que termine lo que se está leyendo.
+ * Devuelve false si no había nada que leer o las voces no están listas.
  */
 function speak(text, agent, { messageId = null, queue = false, quiet = false } = {}) {
   if (!canReadAloud()) return false;
@@ -5646,17 +5313,11 @@ function speak(text, agent, { messageId = null, queue = false, quiet = false } =
   const lang = settings.lang !== "auto" ? settings.lang : detectLanguage(clean);
   const voice = pickVoice(settings.name, lang);
   if (!voice) {
-    // Edge entrega sus voces naturales un momento después de abrir: se espera una vez antes de avisar.
-    if (!speech.voicesWaited && Synth) {
-      speech.voicesWaited = true;
-      void waitForVoices(2_500).then(() => speak(text, agent, { messageId, queue, quiet }));
-    } else if (!quiet) {
-      showToast(noNaturalVoicesText());
-    }
+    if (!quiet) showToast("Las voces no leen ese idioma.");
     return true;
   }
   const job = { messageId, agentId: agent?.id ?? null, text: clean, rate: settings.rate, lang, voice };
-  if (!queue && (speech.current || speech.queue.length || Synth?.speaking || Synth?.pending)) stopSpeaking();
+  if (!queue && (speech.current || speech.queue.length)) stopSpeaking();
   speech.queue.push(job);
   if (speech.current) updateSpeakButtons();
   else nextSpeech();
@@ -5675,56 +5336,12 @@ function nextSpeech() {
   });
 }
 
-/** Lee en trozos cortos (los navegadores cortan las lecturas largas). */
+/** Lee en partes: pide cada una al servidor (que la genera en este PC) y la toca mientras se genera la siguiente. */
 function playSpeech(job, token, finish) {
-  if (job.voice.local) {
-    playLocalSpeech(job, token, finish);
-    return;
-  }
-  const utterances = chunkText(job.text).map((chunk) => {
-    const utterance = new SpeechSynthesisUtterance(chunk);
-    // Una voz multilingüe lee en el idioma del texto, no en el suyo.
-    utterance.lang = isMultilingualVoice(job.voice) ? job.lang : job.voice.lang || job.lang;
-    utterance.voice = job.voice;
-    utterance.rate = job.rate;
-    return utterance;
-  });
-  if (!utterances.length) {
-    finish();
-    return;
-  }
-  let left = utterances.length;
-  let warned = false;
-  const done = (event) => {
-    if (token !== speech.token) return;
-    // Las voces naturales se generan por internet: si fallan, se avisa una vez.
-    if (event?.type === "error" && !warned && !["interrupted", "canceled"].includes(event.error)) {
-      warned = true;
-      showToast("No se pudo leer en voz alta: las voces naturales necesitan internet. Revisa la conexión y vuelve a intentarlo.");
-    }
-    left -= 1;
-    if (left === 0) finish();
-  };
-  for (const utterance of utterances) {
-    utterance.onend = done;
-    utterance.onerror = done;
-  }
-  const start = () => {
-    if (token !== speech.token || speech.current !== job) return;
-    for (const utterance of utterances) Synth.speak(utterance);
-  };
-  // Chrome y Edge a veces no hablan si se pide justo después de cancelar.
-  const wait = 80 - (performance.now() - speech.stoppedAt);
-  if (wait > 0) setTimeout(start, wait);
-  else start();
-}
-
-/** Lee con una voz de este PC: pide cada parte al servidor y la toca mientras se genera la siguiente. */
-function playLocalSpeech(job, token, finish) {
   primeAudio();
   const context = speech.audio;
   if (!context) {
-    showToast("Este navegador no puede tocar el audio de las voces de este PC.", "error");
+    showToast("Este navegador no puede tocar el audio de las voces.", "error");
     finish();
     return;
   }
@@ -5746,7 +5363,7 @@ function playLocalSpeech(job, token, finish) {
       buffer = await next;
     } catch (error) {
       if (token !== speech.token) return;
-      showToast(`No se pudo leer con la voz de este PC: ${error.message}`, "error");
+      showToast(`No se pudo leer en voz alta: ${error.message}`, "error");
       finish();
       return;
     }
@@ -5856,7 +5473,7 @@ function updateSpeakButtons() {
 }
 
 function toggleSpeakMessage(key, messageId) {
-  primeSpeech();
+  primeAudio();
   if (speech.current?.messageId === messageId) {
     stopSpeaking();
     return;
@@ -5864,7 +5481,7 @@ function toggleSpeakMessage(key, messageId) {
   const message = (state.messages.get(key) ?? []).find((item) => item.id === messageId);
   // En un canal, cada respuesta se lee con la voz de quien la escribió.
   if (message && speak(message.text, findAgent(message.agentId), { messageId })) return;
-  showToast(canReadAloud() ? "No hay nada que leer en ese mensaje." : "Este navegador no puede leer en voz alta.");
+  showToast(canReadAloud() ? "No hay nada que leer en ese mensaje." : "Las voces todavía no están listas: descárgalas en Ajustes.");
 }
 
 /** Lee sola una respuesta recién terminada si el agente lo tiene activado o si le hablaste con el botón de voz. */
@@ -6123,7 +5740,7 @@ function bindUi() {
       const target = event.target instanceof Element ? event.target : null;
       if (menuState && !target?.closest("#context-menu, #context-submenu")) closeContextMenu();
       if (!$("#usage-popover").hidden && !target?.closest("#usage-popover, #usage-button")) closeUsage();
-      primeSpeech();
+      primeAudio();
     },
     true,
   );
@@ -6177,7 +5794,7 @@ function bindUi() {
   $("#voice-rate").addEventListener("change", (event) => void saveVoice({ rate: Number(event.target.value) }));
   $("#voice-lang").addEventListener("change", (event) => onVoiceLangChange(event.target.value));
   $("#voice-auto").addEventListener("click", () => {
-    primeSpeech();
+    primeAudio();
     const agent = findAgent(details.agentId);
     if (agent) void saveVoice({ autoRead: !agent.voice?.autoRead });
   });
@@ -6211,12 +5828,6 @@ function bindUi() {
   $("#usage-button").addEventListener("click", toggleUsage);
   $("#usage-refresh").addEventListener("click", () => void refreshUsage());
 
-  // Voces para leer en voz alta (algunos navegadores las cargan tarde).
-  if (Synth) {
-    loadVoices();
-    Synth.addEventListener?.("voiceschanged", loadVoices);
-    setTimeout(loadVoices, 600);
-  }
   $("#queue-toggle").addEventListener("click", () => {
     state.queueOpen = !state.queueOpen;
     renderQueue();
