@@ -56,6 +56,7 @@ import {
   TOOL_UPDATE_AGENT,
   type UpdateAgentArgs,
 } from "./team.js";
+import { describeChanges, describeTeam, parseTeamSnapshot, snapshotAgent, snapshotChannel, snapshotTeam, type TeamSnapshot } from "./team-state.js";
 import { VERSION } from "./version.js";
 
 export { CHANNEL_LIMITS, MAX_CHANNEL_MEMBERS, VERSION };
@@ -78,6 +79,8 @@ export const DEFAULT_BOT_NAME = "ClosedBot";
 export const MAIN_AGENT_META = "main_agent";
 export const MAIN_AGENT_NAME = "Claude Bot";
 export const MAIN_AGENT_ROLE = "Bot principal: arma y coordina tus equipos de agentes";
+/** Lo último que se le contó al bot principal de los agentes y canales (ver team-state.ts). */
+export const MAIN_KNOWN_META = "main_known";
 /** Topes para los agentes que crea el bot principal: en total y en un mismo turno. */
 export const MAX_AGENTS = 60;
 export const MAX_AGENTS_PER_TURN = 8;
@@ -97,6 +100,10 @@ const USAGE_INTERVAL_MS = 10 * 60_000;
 const USAGE_MIN_GAP_MS = 60_000;
 const USAGE_AFTER_TURN_MS = 2 * 60_000;
 const USAGE_FIRST_MS = 20_000;
+/** Última lectura del uso del plan: se guarda para verla al abrir la app (Gemini solo se lee con Antigravity en marcha). */
+export const USAGE_META = "usage";
+/** Proveedores con uso del plan, en el orden en que se muestran. */
+const USAGE_PROVIDERS = ["claude", "codex", "grok", "gemini"] as const satisfies readonly ProviderId[];
 /** Al eliminar un agente que está trabajando: cuánto se espera a que su turno se detenga. */
 const STOP_WAIT_MS = 10_000;
 
@@ -341,6 +348,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   #usageSoon: NodeJS.Timeout | null = null;
   #usageRefresh: Promise<UsageView[]> | null = null;
   #usageReadAt = 0;
+  /** Procesos abiertos solo para leer el uso: se cierran al terminar si ningún agente los empezó a usar. */
+  readonly #usageOnly = new Set<ProviderId>();
 
   constructor(options: ServiceOptions) {
     super();
@@ -366,6 +375,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     }
     for (const agentId of this.#store.agentsWithQueuedWork()) this.#scheduleDrain(agentId);
     this.#armRoutines();
+    this.#loadUsage();
     void this.refreshProviders().then(() => this.#armUsage());
   }
 
@@ -926,7 +936,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   // ---------- uso del plan ----------
 
   usage(): UsageView[] {
-    return [...this.#usage.values()];
+    return USAGE_PROVIDERS.map((provider) => this.#usage.get(provider)).filter((entry): entry is UsageView => entry !== undefined);
   }
 
   /**
@@ -944,39 +954,117 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 
   async #readUsage(): Promise<UsageView[]> {
     this.#usageReadAt = Date.now();
-    for (const provider of ["claude", "codex"] as const) {
-      const status = this.#providers.find((item) => item.id === provider);
-      // Solo con la sesión confirmada (con la detección apagada no se sabe y no se arranca nada).
-      // Codex, además, solo si ya está en marcha: leer el uso no debe arrancar su proceso.
-      const ready =
-        Boolean(status?.available) && status?.loggedIn === true && (provider === "claude" || Boolean(this.#clients.get("codex")?.running));
-      if (!ready) {
-        if (status?.loggedIn === false) this.#usage.delete(provider);
-        continue;
-      }
-      try {
-        const client = await this.#getClient(provider);
-        const response = await client.request<unknown>("account/rateLimits/read", {}, 30_000);
-        const parsed = parseUsage(provider, response);
-        if (parsed) this.#usage.set(provider, parsed);
-        else this.#usage.delete(provider);
-      } catch (error) {
-        const previous = this.#usage.get(provider);
-        const message = errorText(error);
-        if (/no implementa|not implemented|unknown method/i.test(message)) continue;
-        this.#usage.set(provider, {
-          provider,
-          label: providerLabel(provider),
-          plan: previous?.plan ?? null,
-          windows: previous?.windows ?? [],
-          updatedAt: previous?.updatedAt ?? Date.now(),
-          error: `No se pudo leer el uso: ${message}`,
-        });
-      }
-    }
+    // A la vez: Gemini puede tardar (abre su propia sesión la primera vez) y los demás no lo esperan.
+    await Promise.all(USAGE_PROVIDERS.map((provider) => this.#readProviderUsage(provider)));
     const usage = this.usage();
+    this.#saveUsage();
     this.#emit({ type: "usage", usage });
     return usage;
+  }
+
+  async #readProviderUsage(provider: (typeof USAGE_PROVIDERS)[number]): Promise<void> {
+    const status = this.#providers.find((item) => item.id === provider);
+    if (status?.loggedIn === false) {
+      this.#usage.delete(provider);
+      return;
+    }
+    // Solo con la sesión confirmada: con la detección apagada no se sabe, y no se arranca nada.
+    if (!status?.available || status.loggedIn !== true) return;
+    // Antigravity (Gemini) tarda en arrancar y descomprime unos 300 MB: no se abre solo para esto. Se lee
+    // cuando ya está en marcha porque un agente lo usa; mientras, queda la última lectura.
+    if (provider === "gemini" && !this.#clients.get("gemini")?.running) return;
+    // Codex y Grok arrancan en un momento: se abren para leer y se cierran si ningún agente los está usando.
+    const opened = provider !== "claude" && !this.#clientReady.has(provider);
+    if (opened) this.#usageOnly.add(provider);
+    try {
+      const client = await this.#getClient(provider, "usage");
+      const response = await client.request<unknown>("account/rateLimits/read", {}, provider === "gemini" ? 150_000 : 30_000);
+      const parsed = parseUsage(provider, response);
+      if (parsed) this.#usage.set(provider, parsed);
+      else this.#usage.delete(provider);
+    } catch (error) {
+      const previous = this.#usage.get(provider);
+      const message = errorText(error);
+      if (/no implementa|not implemented|unknown method|method not found/i.test(message)) return;
+      this.#usage.set(provider, {
+        provider,
+        label: providerLabel(provider),
+        plan: previous?.plan ?? null,
+        windows: previous?.windows ?? [],
+        updatedAt: previous?.updatedAt ?? Date.now(),
+        error: `No se pudo leer el uso: ${message}`,
+      });
+    } finally {
+      if (opened && this.#usageOnly.has(provider)) await this.#releaseClient(provider);
+      this.#usageOnly.delete(provider);
+    }
+    this.#emit({ type: "usage", usage: this.usage() });
+  }
+
+  /** Codex avisa cuando cambia el uso (al terminar un turno): se toma sin volver a preguntar. */
+  #usageUpdated(provider: ProviderId, params: unknown): void {
+    const parsed = parseUsage(provider, params);
+    if (!parsed) return;
+    const previous = this.#usage.get(provider);
+    const windows = [...parsed.windows, ...(previous?.windows ?? []).filter((window) => !parsed.windows.some((item) => item.id === window.id))];
+    // Como en parseUsage: primero la semanal (la que muestra el anillo).
+    windows.sort((a, b) => Number(b.label === "Semanal") - Number(a.label === "Semanal"));
+    this.#usage.set(provider, { ...parsed, plan: parsed.plan ?? previous?.plan ?? null, windows });
+    this.#saveUsage();
+    this.#emit({ type: "usage", usage: this.usage() });
+  }
+
+  #saveUsage(): void {
+    const saved = this.usage()
+      .filter((entry) => entry.windows.length)
+      .map((entry) => ({ provider: entry.provider, plan: entry.plan, windows: entry.windows, updatedAt: entry.updatedAt }));
+    this.#store.setMeta(USAGE_META, JSON.stringify(saved));
+  }
+
+  /** La última lectura guardada, para mostrarla al abrir la app mientras se vuelve a leer. */
+  #loadUsage(): void {
+    let saved: unknown;
+    try {
+      saved = JSON.parse(this.#store.getMeta(USAGE_META) ?? "[]");
+    } catch {
+      return;
+    }
+    if (!Array.isArray(saved)) return;
+    for (const entry of saved.filter(isRecord)) {
+      const provider = entry.provider;
+      if (typeof provider !== "string" || !(USAGE_PROVIDERS as readonly string[]).includes(provider) || !isProviderId(provider)) continue;
+      const windows = getArray(entry, "windows")
+        .filter(isRecord)
+        .map((window) => ({
+          id: String(window.id ?? ""),
+          label: String(window.label ?? ""),
+          percent: Number(window.percent),
+          resetsAt: typeof window.resetsAt === "number" && Number.isFinite(window.resetsAt) ? window.resetsAt : null,
+        }))
+        .filter((window) => window.label && Number.isFinite(window.percent));
+      if (!windows.length) continue;
+      this.#usage.set(provider, {
+        provider,
+        label: providerLabel(provider),
+        plan: typeof entry.plan === "string" ? entry.plan : null,
+        windows,
+        updatedAt: typeof entry.updatedAt === "number" ? entry.updatedAt : 0,
+        error: null,
+      });
+    }
+  }
+
+  /** Cierra un proceso que se abrió solo para leer el uso, si ningún agente lo está usando. */
+  async #releaseClient(provider: ProviderId): Promise<void> {
+    if (this.#stopping) return;
+    if ([...this.#active.values()].some((state) => state.provider === provider)) return;
+    if ([...this.#loadedThreads].some((key) => key.startsWith(`${provider}:`))) return;
+    const client = this.#clients.get(provider);
+    if (!client) return;
+    this.#clients.delete(provider);
+    this.#clientReady.delete(provider);
+    client.removeAllListeners();
+    await client.stop().catch(() => undefined);
   }
 
   #armUsage(): void {
@@ -1066,6 +1154,33 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 
   #isMain(agent: AgentRecord): boolean {
     return agent.id === this.#mainAgentId;
+  }
+
+  /** Agentes (sin el bot principal) y canales, también los eliminados, como los conoce el bot principal. */
+  #teamSnapshot(threadId: string | null): TeamSnapshot {
+    const agents = this.#store.listAgents().filter((agent) => !this.#isMain(agent));
+    return snapshotTeam(threadId, agents, [...this.#store.listChannels(), ...this.#store.listChannels({ deleted: true })]);
+  }
+
+  /**
+   * Nota para el bot principal: lo que cambió desde su último mensaje o, si su conversación es nueva
+   * (o nunca se le contó), cómo está todo. Devuelve también la foto que hay que guardar.
+   */
+  #teamNote(threadId: string): { note: string | null; saved: string; previous: string | null } {
+    const previous = this.#store.getMeta(MAIN_KNOWN_META);
+    const known = parseTeamSnapshot(previous);
+    const now = this.#teamSnapshot(threadId);
+    const label = (provider: string) => (isProviderId(provider) ? providerLabel(provider) : provider);
+    const note = known && known.threadId === threadId ? describeChanges(known, now, label) : describeTeam(now, label);
+    return { note, saved: JSON.stringify(now), previous };
+  }
+
+  /** Lo que hizo el propio bot principal con sus herramientas ya lo sabe: se suma a lo que se le contó. */
+  #absorbKnown(update: (known: TeamSnapshot) => void): void {
+    const known = parseTeamSnapshot(this.#store.getMeta(MAIN_KNOWN_META));
+    if (!known) return;
+    update(known);
+    this.#store.setMeta(MAIN_KNOWN_META, JSON.stringify(known));
   }
 
   // ---------- ajustes ----------
@@ -1602,12 +1717,17 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 
   // ---------- internos: clientes ----------
 
-  async #getClient(provider: ProviderId): Promise<AgentClient> {
+  /** `usage`: solo para leer el uso del plan (no cuenta como que un agente empezó a usar el proceso). */
+  async #getClient(provider: ProviderId, purpose: "work" | "usage" = "work"): Promise<AgentClient> {
+    if (purpose === "work") this.#usageOnly.delete(provider);
     const existing = this.#clientReady.get(provider);
     if (existing) return existing;
     const ready = (async () => {
       const client = this.#options.createClient(provider);
-      client.on("notification", (notification) => this.#handleNotification(notification));
+      client.on("notification", (notification) => {
+        if (notification.method === "account/rateLimits/updated") this.#usageUpdated(provider, notification.params);
+        else this.#handleNotification(notification);
+      });
       client.on("request", (request) => void this.#handleServerRequest(client, request));
       client.on("diagnostic", (message) => this.#log("info", `[${provider}] ${message}`));
       client.once("exit", (error) => this.#handleClientExit(provider, client, error));
@@ -1760,6 +1880,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#emitQueue(agent.id);
     this.#emitAgents();
     if (channel) this.#emitChannels();
+    let known: { note: string | null; saved: string; previous: string | null } | null = null;
     try {
       const client = await this.#getClient(agent.provider);
       const fresh = this.#requireAgent(agent.id);
@@ -1768,7 +1889,14 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       const sender = delivery.senderAgentId ? this.#store.getAgent(delivery.senderAgentId) : null;
       const original = delivery.replyTo ? this.#store.getMessage(delivery.replyTo) : null;
       const body = composeDeliveryInput(delivery, sender ? { id: sender.id, name: sender.name } : null, original?.text ?? null);
-      const text = channel ? this.#channelInput(channel, fresh, delivery, body) : body;
+      let text = channel ? this.#channelInput(channel, fresh, delivery, body) : body;
+      if (this.#isMain(fresh)) {
+        // Antes de cada mensaje, el bot principal se entera de lo que cambió el usuario en agentes y canales.
+        known = this.#teamNote(threadId);
+        if (known.note) text = `${known.note}\n\n${text}`;
+        // Se guarda antes de empezar: lo que haga el propio bot en este turno se suma a lo que ya sabe.
+        this.#store.setMeta(MAIN_KNOWN_META, known.saved);
+      }
       const response = await client.request<TurnResponse>(
         "turn/start",
         {
@@ -1797,6 +1925,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       this.#store.updateDelivery(delivery.id, { status: "running", turnId: state.turnId });
       this.#emitQueue(agent.id);
     } catch (error) {
+      // No alcanzó a leer la nota: se le cuenta en el próximo mensaje.
+      if (known && this.#store.getMeta(MAIN_KNOWN_META) === known.saved) this.#store.setMeta(MAIN_KNOWN_META, known.previous ?? "");
       if (this.#stopping || this.#active.get(agent.id) !== state) return;
       this.#active.delete(agent.id);
       this.#store.updateDelivery(delivery.id, { status: "failed", error: errorText(error), finishedAt: Date.now() });
@@ -2185,6 +2315,12 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       throw error;
     }
     if (state) state.createdAgents += 1;
+    const record = this.#store.getAgent(agent.id);
+    if (record) {
+      this.#absorbKnown((known) => {
+        known.agents[record.id] = snapshotAgent(record);
+      });
+    }
     const activity = this.#store.insertMessage({
       agentId: mainId,
       role: "activity",
@@ -2233,6 +2369,12 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       throw new Error(errorText(error));
     }
     if (state) state.createdChannels += 1;
+    const record = this.#store.getChannel(channel.id);
+    if (record) {
+      this.#absorbKnown((known) => {
+        known.channels[record.id] = snapshotChannel(record);
+      });
+    }
     const names = this.#channelNames(channel);
     const activity = this.#store.insertMessage({
       agentId: mainId,
@@ -2285,6 +2427,12 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       updated = this.updateAgent(target.id, patch);
     } catch (error) {
       throw new Error(errorText(error));
+    }
+    const record = this.#store.getAgent(updated.id);
+    if (record) {
+      this.#absorbKnown((known) => {
+        known.agents[record.id] = snapshotAgent(record);
+      });
     }
     const list = changes.join(", ");
     const activity = this.#store.insertMessage({
@@ -2653,7 +2801,8 @@ export function parseUsage(provider: ProviderId, response: unknown): UsageView |
   return {
     provider,
     label: providerLabel(provider),
-    plan: typeof limits.plan === "string" && limits.plan ? limits.plan : null,
+    // Codex lo llama planType («plus», «pro»…).
+    plan: typeof limits.plan === "string" && limits.plan ? limits.plan : typeof limits.planType === "string" && limits.planType ? limits.planType : null,
     windows,
     updatedAt: Date.now(),
     error: null,

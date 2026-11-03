@@ -1,8 +1,29 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildInstructions, MAIN_AGENT_GUIDE } from "../src/instructions.js";
+import type { AgentClient } from "../src/providers/client.js";
+import { DemoAgentClient } from "../src/providers/demo.js";
 import { MAIN_AGENT_NAME, MAIN_AGENT_ROLE, MAX_AGENTS_PER_TURN, ServiceError } from "../src/service.js";
 import { createHarness, tempDir, waitFor, type Harness } from "./helpers.js";
+
+/** Demo que guarda lo que recibe en cada turno (para ver la nota de ClosedBot); con `fail`, el próximo turno no empieza. */
+function recordingClient(inputs: string[], fail: { next: boolean } = { next: false }): () => AgentClient {
+  return () => {
+    const client = new DemoAgentClient({ wordDelayMs: 0 });
+    const request = client.request.bind(client);
+    client.request = (async (method: string, params: unknown) => {
+      if (method === "turn/start") {
+        inputs.push((params as { input: Array<{ text: string }> }).input[0]?.text ?? "");
+        if (fail.next) {
+          fail.next = false;
+          throw new Error("falla de prueba");
+        }
+      }
+      return request(method, params);
+    }) as AgentClient["request"];
+    return client;
+  };
+}
 
 /** Envía un mensaje a un agente, espera a que termine ese turno y devuelve su respuesta. */
 async function talk(h: Harness, agentId: string, text: string): Promise<string> {
@@ -181,6 +202,122 @@ test("Claude Bot crea el canal del equipo: con el líder de encargado, sin inclu
     const refused = await talk(h, ana.id, "/canal Intrusos | | Ana");
     assert.match(refused, /No pude crear el canal «Intrusos»: Solo el bot principal puede crear o cambiar agentes y crear canales/);
     assert.equal(h.service.listChannels().length, 2);
+  } finally {
+    await h.close();
+  }
+});
+
+test("Claude Bot se entera de lo que cambia el usuario en agentes y canales, y no de lo que hizo él", async () => {
+  const inputs: string[] = [];
+  const h = await createHarness({ mainAgent: true, createClient: recordingClient(inputs) });
+  try {
+    const mainId = h.service.mainAgentId() as string;
+    const last = () => inputs[inputs.length - 1] ?? "";
+
+    // Conversación nueva: cómo está todo.
+    await talk(h, mainId, "hola");
+    assert.equal(last(), "[ClosedBot · así están ahora los agentes y canales del usuario; esto manda sobre lo que recuerdes de la conversación]\n- No hay otros agentes ni canales.\n\nhola");
+    // Sin cambios no hay nota.
+    await talk(h, mainId, "¿sigues?");
+    assert.equal(last(), "¿sigues?");
+
+    // Lo que hace él mismo con sus herramientas ya lo sabe.
+    await talk(
+      h,
+      mainId,
+      [
+        "/crear Directora | Coordina el equipo | Creación de Juegos",
+        "/crear Programador | Escribe el código | Creación de Juegos",
+        "/canal Creación de Juegos | Directora | Directora, Programador",
+        "/ajustar Programador | Programa el juego",
+      ].join("\n"),
+    );
+    await talk(h, mainId, "¿listo?");
+    assert.equal(last(), "¿listo?");
+
+    // El usuario elimina el equipo desde la barra lateral (los agentes y su canal vacío) y crea a otra agente.
+    const directora = h.store.findAgentByName("Directora");
+    const programador = h.store.findAgentByName("Programador");
+    assert.ok(directora && programador);
+    const channel = h.service.listChannels()[0];
+    assert.ok(channel);
+    await h.service.deleteAgent(directora.id, { stop: true });
+    await h.service.deleteAgent(programador.id, { stop: true });
+    h.service.deleteChannel(channel.id);
+    const ana = h.service.createAgent({ name: "Ana", role: "Investiga", provider: "demo", project: "Investigación" });
+    const reply = await talk(h, mainId, "crea nuevamente un equipo para creacion de juegos");
+    assert.equal(
+      last(),
+      [
+        "[ClosedBot · cambios que hizo el usuario en sus agentes y canales desde tu último mensaje; esto manda sobre lo que recuerdes]",
+        "- Eliminó a «Directora» y «Programador» (de la sección «Creación de Juegos»).",
+        "- Creó a «Ana» (Investiga) en la sección «Investigación».",
+        "- Eliminó el canal «Creación de Juegos»: quedó en «Canales eliminados» y ya no se usa.",
+        "",
+        "crea nuevamente un equipo para creacion de juegos",
+      ].join("\n"),
+    );
+    assert.match(reply, /ClosedBot me contó cómo están tus agentes:\n- Eliminó a «Directora» y «Programador»/);
+    // En la conversación se ve solo lo que escribió el usuario.
+    const shown = h.service.listMessages(mainId).filter((item) => item.role === "user");
+    assert.equal(shown[shown.length - 1]?.text, "crea nuevamente un equipo para creacion de juegos");
+
+    // Nombre, sección renombrada, rol, instrucciones, modelo, pausa y un canal nuevo.
+    const beto = h.service.createAgent({ name: "Beto", provider: "demo", project: "Investigación" });
+    await talk(h, mainId, "ok");
+    h.service.renameSection("Investigación", "Estudios");
+    h.service.updateAgent(ana.id, { name: "Ana María", role: "Investiga mercados", instructions: "Compara precios.", model: "rápido" });
+    h.service.setPaused(beto.id, true);
+    h.service.createChannel({ name: "Estudios", memberIds: [ana.id, beto.id], leadId: ana.id });
+    await talk(h, mainId, "¿qué cambió?");
+    assert.deepEqual(last().split("\n").slice(1, -2), [
+      "- Cambió el nombre de «Ana» a «Ana María».",
+      "- Cambió el rol de «Ana María»: «Investiga mercados».",
+      "- Cambió las instrucciones de «Ana María» (léelas con list_agents).",
+      "- Cambió el modelo de «Ana María» a rápido.",
+      "- Pausó la cola de «Beto»: no atiende mensajes hasta que la reanude.",
+      "- Cambió el nombre de la sección «Investigación» a «Estudios» (con «Ana María» y «Beto»).",
+      "- Creó el canal «Estudios» («Ana María» y «Beto»; encargado: «Ana María»).",
+    ]);
+
+    // «Empezar de cero»: en la conversación nueva se le cuenta todo otra vez.
+    await h.service.resetConversation(mainId);
+    await talk(h, mainId, "hola de nuevo");
+    assert.equal(
+      last(),
+      [
+        "[ClosedBot · así están ahora los agentes y canales del usuario; esto manda sobre lo que recuerdes de la conversación]",
+        "- Sección «Estudios»: «Ana María» (Investiga mercados; Demo), «Beto» (Demo; cola en pausa).",
+        "- Canales: «Estudios» («Ana María» y «Beto»; encargado: «Ana María»).",
+        "- En «Canales eliminados»: «Creación de Juegos».",
+        "",
+        "hola de nuevo",
+      ].join("\n"),
+    );
+    // Los demás agentes no reciben la nota.
+    await talk(h, ana.id, "hola Ana");
+    assert.equal(last(), "hola Ana");
+  } finally {
+    await h.close();
+  }
+});
+
+test("si el turno de Claude Bot no llega a empezar, lo que cambió se le cuenta en el siguiente", async () => {
+  const inputs: string[] = [];
+  const fail = { next: false };
+  const h = await createHarness({ mainAgent: true, createClient: recordingClient(inputs, fail) });
+  try {
+    const mainId = h.service.mainAgentId() as string;
+    await talk(h, mainId, "hola");
+    h.service.createAgent({ name: "Ana", role: "Investiga", provider: "demo" });
+    fail.next = true;
+    await talk(h, mainId, "primero");
+    assert.match(inputs[inputs.length - 1] ?? "", /- Creó a «Ana» \(Investiga\) sin sección\.\n\nprimero$/);
+    assert.equal(h.service.listMessages(mainId).filter((item) => item.role === "user").pop()?.status, "failed");
+    await talk(h, mainId, "segundo");
+    assert.match(inputs[inputs.length - 1] ?? "", /- Creó a «Ana» \(Investiga\) sin sección\.\n\nsegundo$/);
+    await talk(h, mainId, "tercero");
+    assert.equal(inputs[inputs.length - 1], "tercero");
   } finally {
     await h.close();
   }

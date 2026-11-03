@@ -5773,6 +5773,8 @@ function noteVoiceTurn() {
 // ---------- uso del plan ----------
 
 let usageTicker = null;
+/** Desde cuándo una lectura del uso se marca como vieja en el detalle. */
+const USAGE_STALE_MS = 20 * 60_000;
 
 function usageEntries() {
   return state.usage.filter((entry) => entry.windows?.length || entry.error);
@@ -5810,6 +5812,13 @@ function renderUsagePopover() {
     title.className = "usage-provider-title";
     title.textContent = entry.plan ? `${entry.label} · ${planLabel(entry.plan)}` : entry.label;
     block.append(title);
+    // Una lectura vieja (Gemini solo se lee cuando un agente lo está usando): se dice de cuándo es.
+    if (entry.updatedAt && Date.now() - entry.updatedAt > USAGE_STALE_MS) {
+      const stale = document.createElement("div");
+      stale.className = "usage-stale";
+      stale.textContent = `Leído ${formatAgo(entry.updatedAt)}${entry.provider === "gemini" ? " · se actualiza cuando un agente usa Gemini" : ""}`;
+      block.append(stale);
+    }
     for (const window of entry.windows) {
       const row = document.createElement("div");
       row.className = "usage-window";
@@ -5844,7 +5853,7 @@ function renderUsagePopover() {
     list.append(block);
   }
   const updated = Math.max(0, ...state.usage.map((entry) => entry.updatedAt || 0));
-  $("#usage-foot").textContent = `${updated ? `Actualizado ${formatAgo(updated)}. ` : ""}Es el uso de toda tu cuenta, también fuera de ClosedBot.`;
+  $("#usage-foot").textContent = `${updated ? `Actualizado ${formatAgo(updated)}. ` : ""}Es el uso de cada cuenta, también fuera de ClosedBot.`;
 }
 
 function planLabel(plan) {

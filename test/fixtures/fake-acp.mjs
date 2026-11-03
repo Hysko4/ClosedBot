@@ -14,6 +14,31 @@ const log = process.env.FAKE_ACP_LOG;
  * link: como Antigravity sin sesión, escribe el enlace para entrar y se queda esperando.
  */
 const authMode = process.env.FAKE_ACP_AUTH ?? "ok";
+/**
+ * FAKE_ACP_USAGE=antigravity: contesta «/usage» como Antigravity 1.4.5 (sin pasar por el modelo);
+ * model: como una versión que no lo conoce (el mensaje va al modelo). FAKE_ACP_BILLING: lo que devuelve
+ * `_x.ai/billing` de Grok (sin la variable, el método no existe).
+ */
+const usageMode = process.env.FAKE_ACP_USAGE ?? "";
+const billing = process.env.FAKE_ACP_BILLING ?? "";
+// Texto exacto que devolvió Antigravity 1.4.5 en el PC del usuario.
+const USAGE_TEXT = [
+  "### Session Usage",
+  "- **Session total:** data not available yet",
+  "",
+  "### Quota Limits",
+  "- **Gemini Models**",
+  "  *(Models within this group: Gemini Flash, Gemini Pro)*",
+  "  - **Weekly Limit Remaining:** 96% remaining (resets Nov 09, 2026, 02:22 UTC)",
+  "  - **Five Hour Limit Remaining:** 100% remaining (resets Nov 03, 2026, 21:00 UTC)",
+  "- **Claude and GPT models**",
+  "  *(Models within this group: Claude Opus, Claude Sonnet, GPT-OSS)*",
+  "  - **Weekly Limit Remaining:** 100% remaining (resets Nov 08, 2026, 04:39 UTC)",
+  "  - **Five Hour Limit Remaining:** 100% remaining (resets Nov 03, 2026, 21:00 UTC)",
+  "- **Gemini 4 Argon**",
+  "  *(For paid Pro plans, Argon quota is separate. Higher Argon quota (included as part of the larger Gemini quota bucket) is available on Ultra plans.)*",
+  "  - **Gemini 4 Argon Weekly Limit:** 27% remaining (resets Nov 08, 2026, 18:22 UTC)",
+].join("\n");
 const noResume = process.env.FAKE_ACP_NO_RESUME === "1";
 let authenticated = authMode === "ok";
 const sessions = new Map();
@@ -158,6 +183,10 @@ async function handle(method, params) {
     }
     case "session/prompt":
       return runPrompt(params);
+    case "_x.ai/billing":
+      if (!billing) throw { code: -32601, message: "Method not found" };
+      if (!authenticated) throw { code: -32000, message: "Authentication required" };
+      return JSON.parse(billing);
     default:
       throw { code: -32601, message: `Método desconocido: ${method}` };
   }
@@ -174,6 +203,11 @@ async function runPrompt({ sessionId, prompt }) {
   session.cancelled = false;
   const text = prompt.map((block) => block.text ?? "").join("\n");
   const say = (chunk) => update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: chunk } });
+  if (text === "/usage" && usageMode === "antigravity") {
+    // Local, sin pensar ni herramientas: un solo trozo de texto.
+    say(USAGE_TEXT);
+    return { stopReason: "end_turn" };
+  }
   if (text.includes("@espera")) {
     say("Pensando…");
     await until(() => session.cancelled);

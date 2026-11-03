@@ -347,6 +347,81 @@ test("ACP: Gemini por Antigravity, con «Modelo» y «Esfuerzo» por separado (c
   }
 });
 
+test("ACP: uso del plan de Grok con su sesión guardada; ClosedBot abre Grok para leerlo y lo cierra", async () => {
+  const billing = {
+    config: {
+      creditUsagePercent: 51,
+      currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", start: "2026-11-01T07:53:13.535+00:00", end: "2026-11-08T07:53:13.535+00:00" },
+      prepaidBalance: { val: 0 },
+      isUnifiedBillingUser: true,
+    },
+    subscription_tier: "SUBSCRIPTION_TIER_SUPER_GROK",
+  };
+  const { h, log, clients, close } = await acpHarness({ env: { FAKE_ACP_AUTH: "required", FAKE_ACP_BILLING: JSON.stringify(billing) }, client: { usage: "grok" } });
+  try {
+    const usage = await h.service.refreshUsage(true);
+    assert.deepEqual(
+      usage.map((entry) => [entry.provider, entry.plan, entry.windows.map((window) => [window.label, window.percent, window.resetsAt])]),
+      [["grok", "SuperGrok", [["Semanal", 51, Date.parse("2026-11-08T07:53:13.535Z")]]]],
+    );
+    const methods = readLog(log).map((item) => item.method);
+    assert.ok(methods.indexOf("authenticate") >= 0 && methods.indexOf("authenticate") < methods.indexOf("_x.ai/billing"), "entra con lo guardado antes de preguntar");
+    assert.ok(!methods.includes("session/new"), "sin abrir sesiones ni gastar mensajes");
+    assert.equal(clients.length, 1);
+    assert.equal(clients[0]?.running, false, "ningún agente lo usaba: se cerró");
+  } finally {
+    await close();
+  }
+});
+
+test("ACP: uso del plan de Gemini con «/usage» en una sesión aparte; si la versión no lo conoce, no se insiste", async () => {
+  chmodSync(fixture, 0o755);
+  const temp = tempDir("closedbot-acp-uso-");
+  const log = join(temp.path, "acp.jsonl");
+  let command = fixture;
+  if (process.platform === "win32") {
+    command = join(temp.path, "fake-acp.cmd");
+    writeFileSync(command, `@"${process.execPath}" "${fixture}" %*\r\n`);
+  }
+  const make = (mode: string) =>
+    new AcpClient({ provider: "gemini", label: "Gemini", command, args: [], env: { ...process.env, FAKE_ACP_LOG: log, FAKE_ACP_USAGE: mode }, usage: "antigravity" });
+  const prompts = () =>
+    readLog(log)
+      .filter((item) => item.method === "session/prompt")
+      .map((item) => (item.params?.prompt as Array<{ text: string }>)[0]?.text);
+  const client = make("antigravity");
+  const old = make("model");
+  try {
+    client.start();
+    await client.request("initialize", {});
+    const first = await client.request<{ rateLimits: unknown }>("account/rateLimits/read", {});
+    assert.deepEqual(first.rateLimits, {
+      available: true,
+      plan: null,
+      windows: [
+        { id: "seven_day", label: "Semanal", usedPercent: 4, resetsAt: "2026-11-09T02:22:00.000Z" },
+        { id: "five_hour", label: "5 horas", usedPercent: 0, resetsAt: "2026-11-03T21:00:00.000Z" },
+        { id: "model:Gemini 4 Argon:seven_day", label: "Semanal · Gemini 4 Argon", usedPercent: 73, resetsAt: "2026-11-08T18:22:00.000Z" },
+      ],
+    });
+    await client.request("account/rateLimits/read", {});
+    assert.equal(readLog(log).filter((item) => item.method === "session/new").length, 1, "la misma sesión aparte las dos veces");
+    assert.deepEqual(prompts(), ["/usage", "/usage"]);
+
+    // Una versión que no conoce «/usage» se lo pasa al modelo: se cancela al verlo pensar y no se vuelve a pedir.
+    old.start();
+    await old.request("initialize", {});
+    await assert.rejects(old.request("account/rateLimits/read", {}), /no implementa/);
+    await assert.rejects(old.request("account/rateLimits/read", {}), /no implementa/);
+    assert.deepEqual(prompts(), ["/usage", "/usage", "/usage"]);
+    await waitFor(() => readLog(log).some((item) => item.method === "session/cancel"), 5_000, "cancelación de «/usage»");
+  } finally {
+    await client.stop();
+    await old.stop();
+    temp.cleanup();
+  }
+});
+
 test("ACP: modelos de la lista vieja, de las opciones de la sesión (agrupadas) y variantes por nivel", () => {
   assert.deepEqual(effortVariant("Gemini 3 Pro (High)"), { base: "Gemini 3 Pro", effort: "high" });
   assert.deepEqual(effortVariant("GPT-OSS 120B (Extra-High)"), { base: "GPT-OSS 120B", effort: "xhigh" });

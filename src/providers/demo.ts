@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { GREETING_MARKER } from "../instructions.js";
+import { splitTeamNote } from "../team-state.js";
 import {
   TEAM_NAMESPACE,
   TOOL_ASK_USER,
@@ -137,6 +138,10 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
   async #runTurn(threadId: string, state: { turnId: string; interrupted: boolean }, input: string): Promise<void> {
     const notes: string[] = [];
     try {
+      // La nota de ClosedBot para el bot principal (lo que cambió el usuario) va antes del mensaje.
+      const team = splitTeamNote(input);
+      if (team.note) notes.push(`ClosedBot me contó cómo están tus agentes:\n${team.note.split("\n").slice(1).join("\n")}`);
+      input = team.rest;
       const { channel, inner } = splitChannel(input);
       const body = extractBody(inner);
       if (/(^|\s)\/equipo(\s|$)/.test(body)) {

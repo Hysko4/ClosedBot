@@ -55,6 +55,8 @@ async function teamToolNames(options: Options): Promise<string[]> {
   await client.connect(clientTransport);
   const { tools } = await client.listTools();
   await client.close();
+  // Siempre cargadas: sin esto, Claude las esconde tras ToolSearch y el bot se salta list_agents.
+  assert.ok(tools.every((entry) => entry._meta?.["anthropic/alwaysLoad"] === true), "herramientas del equipo siempre cargadas");
   return tools.map((entry) => entry.name).sort();
 }
 
@@ -271,6 +273,9 @@ test("Claude: solo Claude Bot recibe las herramientas para crear y ajustar agent
     assert.deepEqual(await teamToolNames(claraOptions), base);
     assert.match((mainOptions.systemPrompt as { append: string }).append, /Eres el bot principal de ClosedBot/);
     assert.doesNotMatch((claraOptions.systemPrompt as { append: string }).append, /bot principal/);
+    // Su primer mensaje lleva cómo están los agentes; el de Clara, no.
+    assert.match(recorder.prompts[0] ?? "", /^\[ClosedBot · así están ahora los agentes y canales del usuario[^\n]*\]\n- Sin sección: «Clara»\.\n\nhola$/);
+    assert.equal(recorder.prompts[1], "hola");
 
     // Claude Bot crea un agente con su herramienta, como lo haría el modelo.
     const created = JSON.parse(
@@ -285,6 +290,7 @@ test("Claude: solo Claude Bot recibe las herramientas para crear y ajustar agent
     const again = h.service.sendUserMessage(mainId, "sigue");
     await waitFor(() => h.store.getMessage(again.message.id)?.status === "completed", 5_000, "turno reanudado");
     const resumed = recorder.options.at(-1) as Options;
+    assert.equal(recorder.prompts.at(-1), "sigue", "lo que creó él mismo no se le cuenta");
     assert.notEqual(resumed, mainOptions, "reinició la sesión con el acceso nuevo");
     assert.equal(resumed.permissionMode, "bypassPermissions");
     assert.ok((await teamToolNames(resumed)).includes("create_agent"));

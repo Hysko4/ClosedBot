@@ -6,7 +6,7 @@ import { Auth } from "./auth.js";
 import { prepareConfig, setting } from "./config.js";
 import { Store } from "./db.js";
 import { AcpClient } from "./providers/acp.js";
-import { ANTIGRAVITY_SIGN_IN_PROMPT, antigravityArgs, antigravityEnv, cleanStaleTemps } from "./providers/antigravity.js";
+import { ANTIGRAVITY_SIGN_IN_PROMPT, antigravityArgs, antigravityEnv, antigravityHasUsage, antigravityVersion, cleanStaleTemps } from "./providers/antigravity.js";
 import { ClaudeAgentClient } from "./providers/claude.js";
 import { claudeEnv, claudeLoginCommand, claudeLogoutCommand, resolveClaudeCli } from "./providers/claude-cli.js";
 import type { AgentClient, ProviderId } from "./providers/client.js";
@@ -101,18 +101,23 @@ async function main(): Promise<void> {
           args: GROK_AGENT_ARGS,
           env: grokEnvironment,
           authMethods: acpAuthMethods("grok", grokEnvironment),
+          usage: "grok",
         });
-      case "gemini":
+      case "gemini": {
+        const command = program("gemini");
         return new AcpClient({
           provider,
           label: "Gemini",
-          command: program("gemini"),
+          command,
           args: antigravityArgs(),
           env: antigravityEnv(geminiEnvironment, { chat: true }),
           authMethods: acpAuthMethods("gemini", geminiEnvironment),
           signInPrompt: ANTIGRAVITY_SIGN_IN_PROMPT,
           tempRoot,
+          // El uso del plan con «/usage», si la versión lo contesta sin pasar por el modelo.
+          ...(antigravityHasUsage(antigravityVersion(command)) ? { usage: "antigravity" as const } : {}),
         });
+      }
       case "demo":
         return new DemoAgentClient();
     }

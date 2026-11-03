@@ -6,7 +6,7 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
 
 ## Qué hace
 
-- **Claude Bot, el bot principal**: va fijo arriba de la barra lateral. Le cuentas qué quieres lograr y arma el equipo de agentes que lo hará: crea cada agente con su nombre, rol e instrucciones, los agrupa en un proyecto, les crea un canal con el líder de encargado, le pasa el primer encargo al líder y te cuenta cómo va. También ajusta equipos que ya existen (rol, instrucciones, proyecto o modelo) y les crea el canal si no lo tienen. No elimina agentes ni cambia sus permisos, y no se puede eliminar.
+- **Claude Bot, el bot principal**: va fijo arriba de la barra lateral. Le cuentas qué quieres lograr y arma el equipo de agentes que lo hará: crea cada agente con su nombre, rol e instrucciones, los agrupa en un proyecto, les crea un canal con el líder de encargado, le pasa el primer encargo al líder y te cuenta cómo va. También ajusta equipos que ya existen (rol, instrucciones, proyecto o modelo) y les crea el canal si no lo tienen. Antes de cada mensaje se entera de lo que cambiaste tú en agentes, secciones y canales (por ejemplo, si eliminaste un equipo), así no se queda con lo que recordaba. No elimina agentes ni cambia sus permisos, y no se puede eliminar.
 - **Varios agentes**, cada uno con su proveedor (Claude, Codex, Gemini o Grok), modelo, nivel de esfuerzo y nivel de acceso.
 - **Canales**: una conversación con varios agentes a la vez. El encargado del canal responde lo que no nombra a nadie y reparte el trabajo; con `@Nombre` le hablas a un agente en particular y con `@todos` a todos. Se crean con clic derecho en la barra lateral → «Nuevo canal». Los eliminados quedan en «Canales eliminados», desde donde se restauran o se borran para siempre.
 - **Cola por agente**: si le escribes mientras trabaja, el mensaje espera su turno. Puedes quitar mensajes de la cola, pausarla o detener el turno en curso.
@@ -19,7 +19,7 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
 - **Crear un agente en un paso**: el **+** pide solo el nombre, una figura y un color. El agente nuevo te saluda y te pregunta para qué lo quieres. Los que arma Claude Bot no saludan.
 - **Ficha de cada agente** (tocando su nombre arriba del chat): *Detalles* con sus rutinas y el chat de voz, *Biblioteca* con los archivos de su carpeta y de la compartida, y *Computadora* con sus carpetas y su nivel de acceso.
 - **Respuestas en voz alta**: cada agente tiene su voz, velocidad e idioma. Usa solo las 10 voces de OpenBot (Supertonic 3), que leen en el propio PC, gratis y sin internet. Lee solo sus respuestas si lo activas, o cuando le hablas con el botón morado.
-- **Uso del plan de Claude**: un anillo junto a Ajustes muestra el porcentaje semanal. Al tocarlo se ven también las 5 horas y cuánto falta para que se reinicien. Es el uso de toda tu cuenta.
+- **Uso del plan de cada cuenta**: un anillo junto a Ajustes muestra el porcentaje semanal de Claude. Al tocarlo se ven también Codex, Grok y Gemini (con sus ventanas, como «5 horas» o «Semanal · Gemini 4 Argon») y cuánto falta para que se reinicien. Es el uso de cada cuenta, también fuera de ClosedBot.
 - **Dictado por voz y adjuntos**: el micrófono escribe lo que dices. Elige el motor por sí solo: en el PC reconoce la voz en el propio equipo, sin internet (el modelo se descarga una vez); donde no puede, usa el del navegador. Puedes adjuntar archivos, que quedan en la carpeta del agente.
 - **App instalable** (PWA) en Android y iPhone, a través de tu red privada de Tailscale.
 - **Conexión con tu cuenta**: en Ajustes, «Iniciar sesión con Claude» abre el navegador para que entres con tu cuenta de Claude, como en OpenBot. No hace falta una clave de API.
@@ -188,7 +188,7 @@ ClosedBot los busca en el PATH, en las carpetas de npm, en la app de Codex, en l
   - *Voces*: solo las 10 de OpenBot (Supertonic 3: 5 de mujer y 5 de hombre, en 31 idiomas). Corren en el propio equipo con sherpa-onnx, sin internet ni claves, y el teléfono recibe el audio desde el PC. Si OpenBot ya las descargó, ClosedBot usa esa copia; si no, «Descargar» (en Ajustes o en la ficha del agente) baja una vez los archivos de Hugging Face (unos 145 MB, en la revisión que fija OpenBot), comprueba el SHA-256 de cada uno y los deja en `<datos>/voz/voces`.
   - Las voces del navegador (las de Edge) y las de pago (Grok, ChatGPT, ElevenLabs) no se usan.
 - **Biblioteca**: en la ficha del agente se ven y descargan los archivos de su carpeta y de la compartida. «Subir archivo» los deja en `adjuntos/`. Los archivos se abren en una pestaña aparte, sin permisos sobre la app.
-- **Uso del plan**: lo informa Claude Code (como `/usage`) cada 10 minutos y tras cada turno. Esa lectura es una función experimental del SDK de Claude: si cambia, el anillo desaparece y la app sigue igual.
+- **Uso del plan**: se lee cada 10 minutos y tras cada turno, solo de las cuentas con sesión. Claude lo informa Claude Code (como `/usage`); Codex, su `app-server`; Grok, su CLI; y Gemini, Antigravity con «/usage» (desde la 1.4.1, sin pasar por el modelo). Codex y Grok se abren un momento para leerlo y se cierran si ningún agente los usa. Antigravity no se abre solo para esto: Gemini se actualiza cuando un agente lo está usando y, mientras, se ve la última lectura con su hora. Si una de esas lecturas cambia, esa cuenta desaparece del detalle y la app sigue igual.
 - **Adjuntos**: clip, pegar o arrastrar. Hasta 25 MB por archivo; se guardan en `adjuntos/` dentro de la carpeta del agente.
 - **Probar sin IA** (solo para desarrollo: Demo ya no aparece en la app): con el proveedor Demo, una línea `@Nombre: texto` envía `texto` a ese compañero, `/equipo` lista a los compañeros, `/lento` responde despacio (para probar «Detener»), `/pregunta ¿Texto? | A | B` muestra una tarjeta de opciones y `/rutina 09:00 Nombre` crea una rutina. Si Claude Bot usa la demo, `/crear Nombre | Rol | Proyecto` crea un agente, `/ajustar Nombre | Rol nuevo` le cambia el rol y `/canal Nombre | Encargado | Ana, Beto` crea un canal.
 
@@ -244,7 +244,7 @@ npm ci
 npm test        # compila y corre las pruebas
 ```
 
-Las pruebas usan el proveedor Demo y simulaciones del SDK de Claude y del `codex app-server`, así que no gastan créditos. Cubren a Claude Bot (crear, proteger y sus herramientas para armar equipos), la cola, los mensajes entre agentes, el límite de reenvíos, la interrupción, el reinicio, el login, la protección CSRF, los eventos en vivo, las preguntas con opciones, las rutinas y sus horarios, los adjuntos, el control del lanzador de escritorio, el inicio de sesión con la cuenta (con un Claude Code falso) y la mudanza de `~/.cuadrilla` a `~/.closedbot`.
+Las pruebas usan el proveedor Demo y simulaciones del SDK de Claude y del `codex app-server`, así que no gastan créditos. Cubren a Claude Bot (crear, proteger, sus herramientas para armar equipos y la nota con lo que cambiaste), el uso del plan de cada proveedor, la cola, los mensajes entre agentes, el límite de reenvíos, la interrupción, el reinicio, el login, la protección CSRF, los eventos en vivo, las preguntas con opciones, las rutinas y sus horarios, los adjuntos, el control del lanzador de escritorio, el inicio de sesión con la cuenta (con un Claude Code falso) y la mudanza de `~/.cuadrilla` a `~/.closedbot`.
 
 ```
 src/
@@ -255,9 +255,10 @@ src/
   db.ts                SQLite (node:sqlite)
   instructions.ts      instrucciones de sistema de cada agente
   team.ts              herramientas del equipo: mensajes, preguntas, rutinas y las de Claude Bot
+  team-state.ts        lo que sabe Claude Bot de agentes y canales, y la nota con lo que cambió
   schedule.ts          horarios de las rutinas
   version.ts           versión de la app
-  providers/           Claude (Agent SDK), Codex (app-server), Demo, detección
+  providers/           Claude (Agent SDK), Codex (app-server), Grok y Gemini (ACP), Demo, detección y uso del plan
   cli/password.ts      npm run password
   cli/access.ts        npm run access (acceso total para todos, sin abrir la app)
 public/                interfaz web (sin dependencias ni compilación)
@@ -268,7 +269,7 @@ test/                  pruebas (node:test)
 
 ## Estado y límites conocidos
 
-- Versión 0.6.5. Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. Las voces de OpenBot se probaron con el modelo real en Windows. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
+- Versión 0.6.6. Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. Las voces de OpenBot se probaron con el modelo real en Windows. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
 - Un solo usuario y sin notificaciones push por ahora.
 - Claude Bot crea hasta 8 agentes por pedido y deja de crear cuando ya hay 60 agentes en total.
 - Las preguntas con opciones terminan el turno del agente: tu respuesta le llega como un mensaje nuevo.

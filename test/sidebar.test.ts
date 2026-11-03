@@ -7,7 +7,7 @@ import { composeGreeting, GREETING_MARKER } from "../src/instructions.js";
 import type { ProviderId } from "../src/providers/client.js";
 import { DemoAgentClient } from "../src/providers/demo.js";
 import { parseUsage, ServiceError } from "../src/service.js";
-import { createHarness, TEST_PROVIDERS, waitFor } from "./helpers.js";
+import { createHarness, tempDir, waitFor } from "./helpers.js";
 
 test("agente creado a mano: figura y color elegidos, y los automáticos siguen su propia numeración", async () => {
   const h = await createHarness();
@@ -247,52 +247,99 @@ test("uso del plan: se normaliza la respuesta de Claude y la de Codex", () => {
   assert.ok(resetsAt >= before + 3_600_000 && resetsAt <= Date.now() + 3_600_000);
 });
 
-test("uso del plan: el servicio lo lee de los proveedores con sesión y lo emite", async () => {
+test("uso del plan: el servicio lo lee de todos los proveedores con sesión, lo emite y lo guarda", async () => {
+  const PERCENT: Record<string, number> = { claude: 62, codex: 40, grok: 51, gemini: 4 };
   class UsageClient extends DemoAgentClient {
     calls = 0;
+    constructor(readonly kind: ProviderId) {
+      super({ wordDelayMs: 0 });
+    }
     override async request<T>(method: string, params: unknown): Promise<T> {
       if (method === "account/rateLimits/read") {
         this.calls += 1;
-        return { rateLimits: { available: true, plan: "pro", windows: [{ id: "seven_day", usedPercent: 62, resetsAt: null }] } } as T;
+        const plan = this.kind === "codex" ? { planType: "plus" } : { plan: "pro" };
+        return { rateLimits: { available: true, ...plan, windows: [{ id: "seven_day", usedPercent: PERCENT[this.kind], resetsAt: null }] } } as T;
       }
       return super.request<T>(method, params);
     }
   }
-  const clients = new Map<ProviderId, UsageClient>();
+  const clients: UsageClient[] = [];
+  const createClient = (provider: ProviderId) => {
+    const client = new UsageClient(provider);
+    clients.push(client);
+    return client;
+  };
+  const last = (provider: ProviderId) => clients.filter((client) => client.kind === provider).pop();
   // Sin sesión confirmada (p. ej. con CLOSEDBOT_DETECT=0) no se lee nada ni se arranca Claude.
-  const unconfirmed = await createHarness({
-    createClient: (provider) => {
-      const client = new UsageClient({ wordDelayMs: 0 });
-      clients.set(provider, client);
-      return client;
-    },
-  });
+  const unconfirmed = await createHarness({ createClient });
   try {
     assert.deepEqual(await unconfirmed.service.refreshUsage(true), []);
-    assert.equal(clients.size, 0);
+    assert.equal(clients.length, 0);
   } finally {
     await unconfirmed.close();
   }
-  const h = await createHarness({
-    createClient: (provider) => {
-      const client = new UsageClient({ wordDelayMs: 0 });
-      clients.set(provider, client);
-      return client;
-    },
-    detectProviders: async () => TEST_PROVIDERS.map((status) => (status.id === "demo" ? status : { ...status, loggedIn: true })),
-  });
+  const temp = tempDir();
+  const providers = (["claude", "codex", "grok", "gemini", "demo"] as const).map((id) => ({ id, label: id, available: true, loggedIn: true, detail: "prueba" }));
+  let h = await createHarness({ dir: temp.path, keepDir: true, createClient, detectProviders: async () => providers });
   try {
     const usage = await h.service.refreshUsage(true);
     assert.deepEqual(
-      usage.map((entry) => [entry.provider, entry.windows[0]?.percent]),
-      [["claude", 62]],
-      "Codex no se lee si su proceso no está en marcha",
+      usage.map((entry) => [entry.provider, entry.plan, entry.windows[0]?.percent]),
+      [
+        ["claude", "pro", 62],
+        ["codex", "plus", 40],
+        ["grok", "pro", 51],
+      ],
+      "Gemini no se lee si Antigravity no está en marcha",
     );
+    assert.equal(last("gemini"), undefined, "no se abre Antigravity solo para leer el uso");
+    assert.equal(last("codex")?.running, false, "Codex se abrió para leer y se cerró");
+    assert.equal(last("grok")?.running, false, "Grok también");
     assert.ok(h.events.some((event) => event.type === "usage"));
     // Sin `force`, una segunda lectura enseguida devuelve lo guardado.
     await h.service.refreshUsage(false);
-    assert.equal(clients.get("claude")?.calls, 1);
+    assert.equal(last("claude")?.calls, 1);
+
+    // Con un agente de Gemini y otro de Codex trabajando, sus procesos siguen abiertos: se leen y no se cierran.
+    for (const provider of ["gemini", "codex"] as const) {
+      const agent = h.service.createAgent({ name: `Con ${provider}`, provider });
+      const { message } = h.service.sendUserMessage(agent.id, "hola");
+      await waitFor(() => h.store.getMessage(message.id)?.status === "completed", 5_000, `turno con ${provider}`);
+    }
+    const all = await h.service.refreshUsage(true);
+    assert.deepEqual(
+      all.map((entry) => entry.provider),
+      ["claude", "codex", "grok", "gemini"],
+    );
+    assert.equal(last("gemini")?.running, true);
+    assert.equal(last("codex")?.running, true);
+    // Codex avisa que cambió el uso al terminar un turno: se toma sin volver a preguntar.
+    last("codex")?.emit("notification", {
+      method: "account/rateLimits/updated",
+      params: { rateLimits: { primary: { usedPercent: 45, windowDurationMins: 300, resetsAt: 1_793_700_000 } } },
+    });
+    assert.deepEqual(
+      h.service.usage().find((entry) => entry.provider === "codex")?.windows.map((window) => [window.label, window.percent]),
+      [
+        ["Semanal", 40],
+        ["5 horas", 45],
+      ],
+    );
+    await h.close();
+
+    // Al volver a abrir la app se ve la última lectura (Gemini incluido) mientras se vuelve a leer.
+    h = await createHarness({ dir: temp.path, keepDir: true, createClient, detectProviders: async () => providers });
+    assert.deepEqual(
+      h.service.usage().map((entry) => [entry.provider, entry.windows.map((window) => window.percent)]),
+      [
+        ["claude", [62]],
+        ["codex", [40, 45]],
+        ["grok", [51]],
+        ["gemini", [4]],
+      ],
+    );
   } finally {
     await h.close();
+    temp.cleanup();
   }
 });

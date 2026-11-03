@@ -691,7 +691,8 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
       ),
     ];
     const allowed = new Set(names);
-    return createSdkMcpServer({ name: TEAM_NAMESPACE, version: VERSION, tools: tools.filter((entry) => allowed.has(entry.name)) });
+    // Siempre cargadas (sin pasar por ToolSearch): son pocas y el agente las necesita en cada turno.
+    return createSdkMcpServer({ name: TEAM_NAMESPACE, version: VERSION, alwaysLoad: true, tools: tools.filter((entry) => allowed.has(entry.name)) });
   }
 
   async #callDynamicTool(threadId: string, name: string, args: unknown): Promise<CallToolResult> {

@@ -40,6 +40,7 @@ import {
   type RpcMessage,
 } from "./protocol.js";
 import { spawnTarget, stopProcessTree } from "./spawn.js";
+import { antigravityUsage, grokUsage } from "./usage.js";
 
 interface ClientEvents {
   notification: [notification: AppServerNotification];
@@ -77,6 +78,11 @@ export interface AcpClientOptions {
   signInPrompt?: RegExp;
   /** Cada proceso recibe una carpeta temporal propia dentro de esta, que se borra al terminar. */
   tempRoot?: string;
+  /**
+   * Cómo se lee el uso del plan: «grok», con su método `_x.ai/billing`; «antigravity», con el comando
+   * «/usage» en una sesión aparte (Antigravity 1.4.1 o más nuevo lo contesta sin pasar por el modelo).
+   */
+  usage?: "grok" | "antigravity";
 }
 
 /** El agente pidió entrar con la cuenta: no sirve reintentar ni autenticar con lo guardado. */
@@ -149,6 +155,8 @@ interface McpToolSpec {
 
 const DEFAULT_BRIDGE = fileURLToPath(new URL("./team-bridge.js", import.meta.url));
 const SESSION_TIMEOUT_MS = 120_000;
+/** Leer el uso del plan: lo que se espera a la respuesta. */
+const USAGE_TIMEOUT_MS = 30_000;
 const DIAGNOSTIC_BURST = 30;
 const DIAGNOSTIC_WINDOW_MS = 60_000;
 /** Variables que el puente MCP necesita para arrancar en cualquier sistema; ninguna es secreta. */
@@ -180,6 +188,11 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
   #diagnostics = { windowStart: 0, count: 0 };
   /** Lo último que escribió por stderr, para reconocer el pedido de entrar aunque llegue en trozos. */
   #stderrTail = "";
+  /** Sesión aparte donde se pide «/usage» (Antigravity), y lo que va respondiendo mientras tanto. */
+  #usageSession: Promise<string> | null = null;
+  readonly #usageReplies = new Map<string, { text: string; modelTurn: boolean }>();
+  /** Si «/usage» no sirvió en este proceso, por qué: no se vuelve a pedir hasta que arranque otro. */
+  #usageUnsupported: string | null = null;
 
   constructor(options: AcpClientOptions) {
     super();
@@ -197,6 +210,9 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
     this.#stopping = false;
     this.#decoder = this.#newDecoder();
     this.#stderrTail = "";
+    this.#usageSession = null;
+    this.#usageReplies.clear();
+    this.#usageUnsupported = null;
     const target = spawnTarget(this.#options.command, this.#options.args);
     const temp = this.#options.tempRoot ? makePrivateTemp(this.#options.tempRoot) : null;
     const env = this.#options.env ?? process.env;
@@ -344,6 +360,8 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
         return this.#startTurn(params);
       case "turn/interrupt":
         return this.#interrupt(params);
+      case "account/rateLimits/read":
+        return this.#readUsage();
       default:
         throw new AppServerError(`${this.#options.label} no implementa ${method}.`, -32601);
     }
@@ -617,6 +635,87 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
     this.#models = mergeSessionModels(this.#models, response, options);
   }
 
+  // ---------- uso del plan ----------
+
+  async #readUsage(): Promise<unknown> {
+    const unsupported = () => new AppServerError(`${this.#options.label} no implementa account/rateLimits/read.`, -32601);
+    if (this.#options.usage === "grok") {
+      // Como al abrir una sesión: con la sesión guardada de «grok login», sin abrir el navegador.
+      await this.#authenticateQuietly().catch(() => undefined);
+      try {
+        return { rateLimits: grokUsage(await this.#withAuth(() => this.#call("_x.ai/billing", {}, USAGE_TIMEOUT_MS))) };
+      } catch (error) {
+        if (error instanceof AppServerError && error.code === -32601) throw unsupported();
+        throw error;
+      }
+    }
+    if (this.#options.usage !== "antigravity" || this.#usageUnsupported) throw unsupported();
+    if (!this.#usageSession) {
+      const opening = this.#openUsageSession();
+      this.#usageSession = opening;
+      opening.catch(() => {
+        if (this.#usageSession === opening) this.#usageSession = null;
+      });
+    }
+    const sessionId = await this.#usageSession;
+    const reply = { text: "", modelTurn: false };
+    this.#usageReplies.set(sessionId, reply);
+    try {
+      await this.#call("session/prompt", { sessionId, prompt: [{ type: "text", text: "/usage" }] }, USAGE_TIMEOUT_MS);
+    } catch (error) {
+      // La próxima lectura abre otra sesión (esta pudo quedar ocupada o cerrarse).
+      this.#usageSession = null;
+      throw error;
+    } finally {
+      this.#usageReplies.delete(sessionId);
+    }
+    const limits = antigravityUsage(reply.text);
+    if (reply.modelTurn || !limits.available) {
+      // Esta versión no conoce «/usage» (o lo mandó al modelo): no se vuelve a pedir en este proceso.
+      this.#usageUnsupported = reply.modelTurn ? "«/usage» pasó por el modelo" : "respuesta de «/usage» desconocida";
+      this.#diagnostic(`No pude leer el uso del plan: ${this.#usageUnsupported}.`);
+      throw unsupported();
+    }
+    return { rateLimits: limits };
+  }
+
+  async #openUsageSession(): Promise<string> {
+    const cwd = join(tmpdir(), `closedbot-${this.provider}-uso`);
+    mkdirSync(cwd, { recursive: true });
+    const response = await this.#withAuth(() => this.#call("session/new", { cwd, mcpServers: [] }, SESSION_TIMEOUT_MS));
+    const sessionId = getString(response, "sessionId");
+    if (!sessionId) throw new AppServerError(`${this.#options.label} no devolvió una sesión.`, -32603);
+    return sessionId;
+  }
+
+  /** Lo que llega de la sesión de «/usage»: el texto, y si en vez de contestarlo solo pasó al modelo. */
+  #collectUsage(sessionId: string, reply: { text: string; modelTurn: boolean }, update: Record<string, unknown> | null): void {
+    switch (getString(update, "sessionUpdate")) {
+      case "agent_message_chunk":
+        reply.text += contentText(getRecord(update, "content"));
+        return;
+      case "agent_thought_chunk":
+      case "tool_call":
+        if (reply.modelTurn) return;
+        reply.modelTurn = true;
+        try {
+          this.#send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
+        } catch {
+          // El proceso ya no está.
+        }
+        return;
+    }
+  }
+
+  /** Se autentica con lo guardado (sin abrir el navegador), si todavía no lo hizo y hay cómo. */
+  async #authenticateQuietly(): Promise<void> {
+    if (this.#authenticated) return;
+    const method = (this.#options.authMethods ?? []).find((id) => this.#authMethods.includes(id));
+    if (!method) return;
+    await this.#call("authenticate", { methodId: method }, SESSION_TIMEOUT_MS);
+    this.#authenticated = true;
+  }
+
   #canClose(): boolean {
     return Boolean(getRecord(getRecord(this.#capabilities, "sessionCapabilities"), "close"));
   }
@@ -682,7 +781,13 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
   }
 
   #handleUpdate(params: unknown): void {
-    const thread = this.#threads.get(getString(params, "sessionId") ?? "");
+    const sessionId = getString(params, "sessionId") ?? "";
+    const usage = this.#usageReplies.get(sessionId);
+    if (usage) {
+      this.#collectUsage(sessionId, usage, getRecord(params, "update"));
+      return;
+    }
+    const thread = this.#threads.get(sessionId);
     const update = getRecord(params, "update");
     if (!thread || !update || thread.replaying) return;
     if (getString(update, "sessionUpdate") === "config_option_update") {
@@ -1011,6 +1116,8 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
     this.#threads.clear();
     this.#bridgeThreads.clear();
     this.#bridgeTools.clear();
+    this.#usageSession = null;
+    this.#usageReplies.clear();
     this.#closeBridge();
     if (child.exitCode === null) stopProcessTree(child);
     if (!this.#stopping) this.emit("exit", error);

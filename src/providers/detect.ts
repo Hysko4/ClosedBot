@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ProviderStatus } from "../service.js";
-import { antigravityTokenPath } from "./antigravity.js";
+import { antigravityTokenPath, antigravityVersion } from "./antigravity.js";
 import { type ClaudeCli, describeClaudeAuth, readClaudeAuth } from "./claude-cli.js";
 import { redactDiagnostic } from "./codex.js";
 import { describeSource, type LocatedCli, locateCli } from "./locate.js";
@@ -138,7 +138,7 @@ async function detectGrok(found: LocatedCli | null, env: NodeJS.ProcessEnv, home
 async function detectGemini(found: LocatedCli | null, env: NodeJS.ProcessEnv, home: string): Promise<ProviderStatus> {
   const base = { id: "gemini" as const, label: "Gemini", canInstall: true, canSignOut: false };
   if (!found) return notInstalled(base, "Gemini (Antigravity, de Google, con tu cuenta de Google)");
-  const version = folderVersion(found.path);
+  const version = antigravityVersion(found.path);
   const versionText = `Antigravity${version ? ` ${version}` : ""}${where(found)}`;
   if (env.GEMINI_API_KEY?.trim()) {
     return { ...base, available: true, loggedIn: true, canSignIn: false, path: found.path, detail: `${versionText} · usa tu clave de API de Gemini (GEMINI_API_KEY).` };
@@ -149,14 +149,6 @@ async function detectGemini(found: LocatedCli | null, env: NodeJS.ProcessEnv, ho
   return { ...base, available: true, loggedIn: false, canSignIn: true, path: found.path, detail: `${versionText}, sin sesión: pulsa «Iniciar sesión con Google».` };
 }
 
-/** «…/antigravity/1.4.5/agy_acp_server.exe» (de ClosedBot) o «…/1.4.5/bin/agy_acp_server.exe» (de OpenBot) → «1.4.5». */
-function folderVersion(path: string): string | null {
-  for (const dir of [dirname(path), dirname(dirname(path))]) {
-    const name = basename(dir);
-    if (/^\d+\.\d+\.\d+(?:[-+.][\w.-]+)?$/.test(name)) return name;
-  }
-  return null;
-}
 
 function notInstalled(base: { id: "codex" | "grok" | "gemini"; label: string }, what: string): ProviderStatus {
   return { ...base, available: false, loggedIn: null, canSignIn: false, canInstall: true, detail: `No está instalado en este equipo. Pulsa «Instalar» para agregar ${what}.` };

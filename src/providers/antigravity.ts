@@ -7,7 +7,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, createWriteStream, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 export interface AntigravityBuild {
   /** .zip oficial de Google. */
@@ -296,4 +296,20 @@ function lastLine(text: string): string {
       .filter((line) => line.trim())
       .pop() ?? ""
   ).slice(0, 300);
+}
+
+/** «…/antigravity/1.4.5/agy_acp_server.exe» (de ClosedBot) o «…/1.4.5/bin/agy_acp_server.exe» (de OpenBot) → «1.4.5». */
+export function antigravityVersion(path: string): string | null {
+  for (const dir of [dirname(path), dirname(dirname(path))]) {
+    const name = basename(dir);
+    if (/^\d+\.\d+\.\d+(?:[-+.][\w.-]+)?$/.test(name)) return name;
+  }
+  return null;
+}
+
+/** Desde la 1.4.1, Antigravity contesta «/usage» sin pasar por el modelo: así se lee el uso del plan. */
+export function antigravityHasUsage(version: string | null): boolean {
+  if (!version) return false;
+  const [major = 0, minor = 0, patch = 0] = version.split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
+  return major !== 1 ? major > 1 : minor !== 4 ? minor > 4 : patch >= 1;
 }
