@@ -47,8 +47,8 @@ export async function createHarness(options: {
   installCommands?: ServiceOptions["installCommands"];
   /** Crea el bot principal (Claude Bot) como en la app; por defecto no, para que las cuentas de agentes sean simples. */
   mainAgent?: boolean;
-  /** Cuánto espera una ronda de Claude Bot antes de cerrarse con lo que haya. */
-  roundTimeoutMs?: number;
+  /** Encargos seguidos que puede hacer Claude Bot en un pedido. */
+  mainMaxSteps?: number;
 } = {}): Promise<Harness> {
   const temp = options.dir ? { path: options.dir, cleanup: () => undefined } : tempDir();
   const store = new Store(join(temp.path, "closedbot.db"));
@@ -64,7 +64,7 @@ export async function createHarness(options: {
     ...(options.signInTimeoutMs ? { signInTimeoutMs: options.signInTimeoutMs } : {}),
     ...(options.installCommands ? { installCommands: options.installCommands } : {}),
     ...(options.mainAgent ? { mainAgent: true } : {}),
-    ...(options.roundTimeoutMs ? { roundTimeoutMs: options.roundTimeoutMs } : {}),
+    ...(options.mainMaxSteps ? { mainMaxSteps: options.mainMaxSteps } : {}),
   });
   service.on("event", (event) => events.push(event));
   await service.start();

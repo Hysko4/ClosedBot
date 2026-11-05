@@ -200,6 +200,45 @@ test("adjuntos: se guardan con un nombre seguro dentro de la carpeta del agente"
   }
 });
 
+test("Store: una base de la 0.8.0 pierde la tabla de las rondas y sus entregas reciben los encargos de Claude Bot", () => {
+  const temp = tempDir();
+  try {
+    const path = join(temp.path, "closedbot.db");
+    new Store(path).close();
+    const old = new DatabaseSync(path);
+    old.exec(`
+      ALTER TABLE deliveries DROP COLUMN steps;
+      CREATE TABLE rounds (id TEXT PRIMARY KEY, mode TEXT NOT NULL, question TEXT NOT NULL, participants TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL, request_id TEXT NOT NULL, request_mode TEXT NOT NULL DEFAULT 'corta', hops INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL, closed_at INTEGER);
+      CREATE INDEX rounds_status ON rounds(status, created_at);
+      CREATE INDEX rounds_request ON rounds(request_id, mode);
+      INSERT INTO rounds (id, mode, question, status, request_id, created_at) VALUES ('r1', 'propuestas', '¿Quién lo hace?', 'closed', 'm1', 1);
+      INSERT INTO agents (id, name, provider, workspace, created_at, updated_at) VALUES ('a1', 'Ana', 'demo', '/tmp/ana', 1, 1);
+      INSERT INTO messages (id, agent_id, role, text, status, created_at, updated_at) VALUES ('m1', 'a1', 'user', 'pendiente', 'queued', 5, 5);
+      INSERT INTO deliveries (id, agent_id, message_id, sender_kind, text, hops, status, created_at) VALUES ('d1', 'a1', 'm1', 'user', 'pendiente', 2, 'queued', 5);
+      UPDATE meta SET value = '6' WHERE key = 'schema_version';
+    `);
+    old.close();
+    const store = new Store(path);
+    try {
+      assert.equal(store.getMeta("schema_version"), "7");
+      assert.deepEqual([store.getDelivery("d1")?.hops, store.getDelivery("d1")?.steps], [2, 0]);
+      assert.equal(store.countQueued("a1"), 1, "la cola sigue igual");
+    } finally {
+      store.close();
+    }
+    const check = new DatabaseSync(path);
+    try {
+      assert.deepEqual(check.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'rounds%'").all(), []);
+    } finally {
+      check.close();
+    }
+  } finally {
+    temp.cleanup();
+  }
+});
+
 test("Store: una base de la 0.5 recibe los canales sin perder la cola", () => {
   const temp = tempDir();
   try {
@@ -224,8 +263,8 @@ test("Store: una base de la 0.5 recibe los canales sin perder la cola", () => {
     old.close();
     const store = new Store(path);
     try {
-      assert.equal(store.getMeta("schema_version"), "6");
-      assert.deepEqual(store.listRounds(), [], "y la tabla de las rondas de Claude Bot");
+      assert.equal(store.getMeta("schema_version"), "7");
+      assert.equal(store.getDelivery("d1")?.steps, 0, "las entregas viejas empiezan sin encargos de Claude Bot");
       assert.equal(store.getDelivery("d1")?.channelId, null);
       assert.equal(store.countQueued("a1"), 1, "la cola sigue igual");
       assert.deepEqual(
@@ -288,7 +327,7 @@ test("Store: una base de la versión 0.1 se actualiza sin perder datos", () => {
       });
       assert.equal(carla.avatar, 2);
       assert.equal(store.getMessage("m1")?.payload, null);
-      assert.equal(store.getMeta("schema_version"), "6");
+      assert.equal(store.getMeta("schema_version"), "7");
       assert.equal(store.getMessage("m1")?.channelId, null, "los mensajes viejos no son de ningún canal");
       assert.deepEqual(store.listChannels(), []);
       assert.deepEqual(store.listRoutines(), []);

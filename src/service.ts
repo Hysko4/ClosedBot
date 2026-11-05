@@ -18,7 +18,8 @@ import {
   writeInstructions,
   writeSkill,
 } from "./agent-files.js";
-import { CHANNEL_LIMITS, composeChannelInput, findMentions, MAX_CHANNEL_MEMBERS, mentionsEveryone, uniqueName } from "./channels.js";
+import { boardSection } from "./board.js";
+import { CHANNEL_LIMITS, composeChannelInput, findMentions, MAX_CHANNEL_MEMBERS, uniqueName } from "./channels.js";
 import {
   type AgentRecord,
   AVATAR_MAX,
@@ -34,6 +35,7 @@ import {
   toVoice,
   type VoiceSettings,
 } from "./db.js";
+import { type SavedImage, saveGeneratedImage, withImages } from "./images.js";
 import { buildInstructions, composeDeliveryInput, composeGreeting, GREETING_MARKER } from "./instructions.js";
 import { cleanMemory, describeMemories, MEMORY_LIMITS, searchMemories } from "./memories.js";
 import { type AccessLevel, type AgentClient, isProviderId, PROVIDER_IDS, type ProviderId } from "./providers/client.js";
@@ -52,21 +54,6 @@ import {
 } from "./providers/protocol.js";
 import { type SignInProvider, SignInFlows, type SignInResult, type SignInView } from "./providers/signin.js";
 import { type CliCommand, runCli } from "./providers/spawn.js";
-import {
-  boardSection,
-  composeRoundInput,
-  composeRoundResult,
-  composeTodosNote,
-  isRequestMode,
-  type RequestMode,
-  ROUND_LABELS,
-  ROUND_LIMITS,
-  ROUND_RESULT_PREFIX,
-  ROUND_TIMEOUT_MS,
-  type RoundMode,
-  type RoundParticipant,
-  type RoundRecord,
-} from "./rounds.js";
 import { describeSchedule, nextRun, normalizeSchedule } from "./schedule.js";
 import {
   type AskUserArgs,
@@ -83,7 +70,6 @@ import {
   parseRoutineIdArgs,
   parseSearchMemoriesArgs,
   parseSendMessageArgs,
-  parseStartRoundArgs,
   parseUpdateAgentArgs,
   parseUpdateBoardArgs,
   type QuestionOption,
@@ -103,10 +89,8 @@ import {
   TOOL_SEARCH_MEMORIES,
   TOOL_SEND_MESSAGE,
   TOOL_SET_MEMORY_INCLUSION,
-  TOOL_START_ROUND,
   TOOL_UPDATE_AGENT,
   TOOL_UPDATE_BOARD,
-  type StartRoundArgs,
   type UpdateAgentArgs,
 } from "./team.js";
 import { describeChanges, describeTeam, parseTeamSnapshot, snapshotAgent, snapshotChannel, snapshotTeam, type TeamSnapshot } from "./team-state.js";
@@ -134,11 +118,16 @@ export const MAIN_AGENT_NAME = "Claude Bot";
 export const MAIN_AGENT_ROLE = "Bot principal: arma y coordina tus equipos de agentes";
 /** Lo último que se le contó al bot principal de los agentes y canales (ver team-state.ts). */
 export const MAIN_KNOWN_META = "main_known";
-/** La pizarra del trabajo que lleva Claude Bot: la reciben los agentes cuando él les escribe o los consulta. */
+/** La pizarra del trabajo que lleva Claude Bot: la reciben los agentes cuando él les escribe. */
 export const BOARD_META = "main_board";
 /** Topes para los agentes que crea el bot principal: en total y en un mismo turno. */
 export const MAX_AGENTS = 60;
 export const MAX_AGENTS_PER_TURN = 8;
+/**
+ * Encargos seguidos que puede hacer Claude Bot en un mismo pedido del usuario (cada send_message cuenta uno, a uno
+ * o a varios agentes). Cuando él escribe, la cuenta de reenvíos entre agentes (MAX_HOPS) vuelve a empezar.
+ */
+export const MAIN_MAX_STEPS = 20;
 const OPTION_LETTERS = "ABCD";
 /** Secciones de la barra lateral creadas a mano (pueden quedar vacías); las demás salen del proyecto de cada agente. */
 export const SECTIONS_META = "sections";
@@ -223,19 +212,6 @@ export interface AgentView extends AgentRecord {
   notify: NotifyLevel;
   /** Largo de sus instrucciones: `instructions` trae solo el comienzo (las completas, en /instructions). */
   instructionsLength: number;
-  /** Solo Claude Bot: la ronda abierta en su chat, si hay una. */
-  round?: RoundView | null;
-}
-
-/** Una ronda abierta en el chat de Claude Bot, tal como la ve la interfaz. */
-export interface RoundView {
-  id: string;
-  mode: RoundMode;
-  label: string;
-  total: number;
-  /** Los que todavía no responden. */
-  waiting: Array<{ id: string; name: string }>;
-  createdAt: number;
 }
 
 /** Un recuerdo tal como lo ve la interfaz. */
@@ -348,8 +324,8 @@ export interface ServiceOptions {
   installTimeoutMs?: number;
   /** Crea el bot principal (Claude Bot) al arrancar si aún no existe. */
   mainAgent?: boolean;
-  /** Tiempo máximo de una ronda de Claude Bot (15 minutos por defecto). */
-  roundTimeoutMs?: number;
+  /** Encargos seguidos que puede hacer Claude Bot en un pedido (MAIN_MAX_STEPS por defecto). */
+  mainMaxSteps?: number;
   log?: (level: "info" | "warn" | "error", message: string) => void;
 }
 
@@ -398,11 +374,10 @@ interface TurnState {
   createdChannels: number;
   /** Canal del encargo: lo que escriba el agente se publica allí. */
   channelId: string | null;
-  /** Solo Claude Bot: el pedido del usuario que atiende y cómo lo pidió (ronda corta o que opinen todos). */
-  request: { id: string; mode: RequestMode } | null;
-  /** La ronda que responde el agente en este turno, y lo que respondió con send_message (si lo usó). */
-  roundId: string | null;
-  roundAnswer: string | null;
+  /** Encargos que lleva Claude Bot en la cadena de este pedido (ver MAIN_MAX_STEPS). */
+  steps: number;
+  /** Imágenes que generó en este turno, ya en la carpeta compartida; `sent` cuando ya se le pasaron a alguien. */
+  images: Array<SavedImage & { sent: boolean }>;
 }
 
 export class ServiceError extends Error {
@@ -459,8 +434,6 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   #usageReadAt = 0;
   /** Procesos abiertos solo para leer el uso: se cierran al terminar si ningún agente los empezó a usar. */
   readonly #usageOnly = new Set<ProviderId>();
-  /** Cierre por tiempo de cada ronda abierta. */
-  readonly #roundTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(options: ServiceOptions) {
     super();
@@ -485,8 +458,6 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     for (const delivery of this.#store.reconcileUnfinished()) {
       this.#notice(delivery.agentId, "La app se reinició mientras este agente trabajaba; ese turno quedó interrumpido.");
     }
-    // Las rondas que quedaron abiertas: los turnos cortados por el reinicio ya no responderán.
-    this.#resumeRounds();
     for (const agentId of this.#store.agentsWithQueuedWork()) this.#scheduleDrain(agentId);
     this.#armRoutines();
     this.#loadUsage();
@@ -499,8 +470,6 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#installs.stopAll();
     if (this.#routineTimer) clearTimeout(this.#routineTimer);
     this.#routineTimer = null;
-    for (const timer of this.#roundTimers.values()) clearTimeout(timer);
-    this.#roundTimers.clear();
     if (this.#usageTimer) clearInterval(this.#usageTimer);
     if (this.#usageSoon) clearTimeout(this.#usageSoon);
     this.#usageTimer = null;
@@ -768,7 +737,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     return this.#view(created);
   }
 
-  updateAgent(id: string, patch: Partial<AgentInput>): AgentView {
+  /** `by`: quién hizo el cambio, si no fue el usuario (Claude Bot), para el aviso en el chat del agente. */
+  updateAgent(id: string, patch: Partial<AgentInput>, options: { by?: string } = {}): AgentView {
     const agent = this.#requireAgent(id);
     const next: Parameters<Store["updateAgent"]>[1] = {};
     if (patch.name !== undefined) {
@@ -805,7 +775,10 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (agent.threadId) this.#loadedThreads.delete(`${agent.provider}:${agent.threadId}`);
     if (next.provider) {
       void this.#closeThread(agent);
-      this.#notice(id, `Cambiaste el proveedor a ${providerLabel(updated.provider)}: la próxima respuesta empieza una conversación nueva.`);
+      this.#notice(
+        id,
+        `${options.by ? `${options.by} cambió` : "Cambiaste"} el proveedor a ${providerLabel(updated.provider)}: la próxima respuesta empieza una conversación nueva.`,
+      );
     }
     this.#emitAgents();
     return this.#view(updated);
@@ -821,8 +794,6 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (this.#active.has(id) && !options.stop) throw new ServiceError("Detén el turno en curso antes de eliminar el agente.", 409);
     this.#deleting.add(id);
     try {
-      // Si estaba en una ronda de Claude Bot, ya no responderá.
-      this.#roundAgentGone(id, "se eliminó");
       this.#store.cancelQueuedForAgent(id);
       if (this.#active.has(id)) await this.#stopTurn(id);
       // Mientras trabajaba pudo estrenar su hilo: se cierra el que tiene ahora.
@@ -851,11 +822,6 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   async resetConversation(id: string): Promise<AgentView> {
     const agent = this.#requireAgent(id);
     if (this.#active.has(id)) throw new ServiceError("Detén el turno en curso antes de empezar de cero.", 409);
-    if (this.#isMain(agent)) {
-      const rounds = this.#cancelRounds("empezaste de cero la conversación");
-      for (const participantId of rounds.running) await this.interrupt(participantId).catch(() => false);
-    }
-    this.#roundAgentGone(id, "empezó de cero");
     this.#store.cancelQueuedForAgent(id);
     await this.#closeThread(agent);
     this.#store.deleteMessagesForAgent(id);
@@ -867,8 +833,6 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 
   setPaused(id: string, paused: boolean): AgentView {
     this.#requireAgent(id);
-    // Una consulta de una ronda que espera turno no se responderá mientras esté en pausa: se cancela.
-    if (paused) this.#roundAgentGone(id, "está en pausa", { queuedOnly: true });
     const updated = this.#store.updateAgent(id, { paused });
     this.#emitAgents();
     if (!paused) this.#scheduleDrain(id);
@@ -1977,28 +1941,16 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 
   /** La cola tal como la ve la interfaz: el pedido del saludo inicial no se muestra. */
   #queueView(agentId: string): DeliveryRecord[] {
-    return this.#store.listQueue(agentId).map((delivery) =>
-      delivery.text.startsWith(GREETING_MARKER)
-        ? { ...delivery, text: "Saludo inicial" }
-        : delivery.text.startsWith(ROUND_RESULT_PREFIX)
-          ? { ...delivery, text: "Respuestas de la ronda" }
-          : delivery,
-    );
+    return this.#store.listQueue(agentId).map((delivery) => (delivery.text.startsWith(GREETING_MARKER) ? { ...delivery, text: "Saludo inicial" } : delivery));
   }
 
-  /**
-   * Mensaje del usuario a un agente. A Claude Bot se le puede pedir con `mode` «todos» (o escribiendo
-   * @todos) que opinen todos los agentes antes de repartir; si no, usa la ronda corta.
-   */
-  sendUserMessage(agentId: string, text: string, options: { mode?: unknown } = {}): { message: MessageRecord; delivery: DeliveryRecord } {
-    const agent = this.#requireAgent(agentId);
+  sendUserMessage(agentId: string, text: string): { message: MessageRecord; delivery: DeliveryRecord } {
+    this.#requireAgent(agentId);
     const body = text.trim();
     if (!body) throw new ServiceError("El mensaje está vacío.");
     if (body.length > 100_000) throw new ServiceError("El mensaje supera los 100.000 caracteres.");
-    if (options.mode !== undefined && options.mode !== null && !isRequestMode(options.mode)) throw new ServiceError("Modo desconocido: usa «corta» o «todos».");
-    const todos = this.#isMain(agent) && (options.mode === "todos" || mentionsEveryone(body));
     const result = this.#store.transaction(() => {
-      const message = this.#store.insertMessage({ agentId, role: "user", text: body, status: "queued", payload: todos ? { mode: "todos" } : null });
+      const message = this.#store.insertMessage({ agentId, role: "user", text: body, status: "queued" });
       const { delivery } = this.#store.enqueueDelivery({ agentId, messageId: message.id, senderKind: "user", text: body });
       const linked = this.#store.updateMessage(message.id, { deliveryId: delivery.id }) as MessageRecord;
       return { message: linked, delivery };
@@ -2017,18 +1969,14 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#store.updateDelivery(deliveryId, { status: "cancelled", finishedAt: Date.now() });
     const message = this.#store.updateMessage(delivery.messageId, { status: "cancelled" });
     if (message) this.#emit({ type: "message", agentId, message });
-    this.#roundDeliveryGone(deliveryId, "se canceló su turno");
     this.#emitQueue(agentId);
     this.#emitAgents();
   }
 
   async interrupt(agentId: string): Promise<boolean> {
-    const agent = this.#requireAgent(agentId);
-    // «Detener» en el chat de Claude Bot también detiene la ronda abierta (las consultas a los demás).
-    const rounds = this.#isMain(agent) ? this.#cancelRounds("la detuviste") : { cancelled: 0, running: [] };
-    for (const participantId of rounds.running) await this.interrupt(participantId).catch(() => false);
+    this.#requireAgent(agentId);
     const state = this.#active.get(agentId);
-    if (!state) return rounds.cancelled > 0;
+    if (!state) return false;
     const client = this.#clients.get(state.provider);
     if (!state.turnId || !state.threadId || !client) {
       this.#finishTurn(agentId, state.turnId, "interrupted");
@@ -2201,9 +2149,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       createdAgents: 0,
       createdChannels: 0,
       channelId: delivery.channelId,
-      request: null,
-      roundId: null,
-      roundAnswer: null,
+      steps: delivery.steps,
+      images: [],
     };
     // Un encargo de un canal que se movió a «Canales eliminados» ya no se atiende.
     const channel = delivery.channelId ? this.#store.getChannel(delivery.channelId) : null;
@@ -2213,16 +2160,6 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       this.#scheduleDrain(agent.id);
       return;
     }
-    // Una consulta de una ronda que ya se cerró (por tiempo o porque el usuario la detuvo) tampoco.
-    const round = this.#roundOfDelivery(delivery);
-    if (round === "closed") {
-      this.#store.updateDelivery(delivery.id, { status: "cancelled", finishedAt: Date.now() });
-      this.#updateMessageStatus(agent.id, delivery.messageId, "cancelled");
-      this.#emitQueue(agent.id);
-      this.#scheduleDrain(agent.id);
-      return;
-    }
-    if (round) state.roundId = round.id;
     this.#active.set(agent.id, state);
     this.#store.updateDelivery(delivery.id, { status: "starting", startedAt: Date.now() });
     this.#updateMessageStatus(agent.id, delivery.messageId, "running");
@@ -2238,21 +2175,11 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       state.threadId = threadId;
       const sender = delivery.senderAgentId ? this.#store.getAgent(delivery.senderAgentId) : null;
       const original = delivery.replyTo ? this.#store.getMessage(delivery.replyTo) : null;
-      let body: string;
-      if (round) {
-        // La consulta de una ronda: quién más está, la pizarra y cómo responder.
-        body = this.#roundInput(round, fresh);
-      } else {
-        // Lo que le escribe Claude Bot a un agente lleva la pizarra del trabajo.
-        const board = sender && this.#isMain(sender) && !this.#isMain(fresh) ? boardSection(this.#board(), sender.name) : null;
-        body = composeDeliveryInput(delivery, sender ? { id: sender.id, name: sender.name } : null, original?.text ?? null, board);
-      }
+      // Lo que le escribe Claude Bot a un agente lleva la pizarra del trabajo.
+      const board = sender && this.#isMain(sender) && !this.#isMain(fresh) ? boardSection(this.#board(), sender.name) : null;
+      const body = composeDeliveryInput(delivery, sender ? { id: sender.id, name: sender.name } : null, original?.text ?? null, board);
       let text = channel ? this.#channelInput(channel, fresh, delivery, body) : body;
       if (this.#isMain(fresh)) {
-        // El pedido que atiende: el mensaje del usuario o, si es una respuesta, el pedido de donde viene.
-        state.request = this.#mainRequest(delivery);
-        // «Que opinen todos»: los pasos van antes del mensaje del usuario.
-        if (state.request.mode === "todos" && state.request.id === delivery.messageId) text = `${composeTodosNote()}\n\n${text}`;
         // Antes de cada mensaje, el bot principal se entera de lo que cambió el usuario en agentes y canales.
         known = this.#teamNote(threadId);
         if (known.note) text = `${known.note}\n\n${text}`;
@@ -2295,7 +2222,6 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       this.#updateMessageStatus(agent.id, delivery.messageId, "failed");
       this.#notice(agent.id, `No se pudo entregar el mensaje${channel ? ` a ${agent.name}` : ""}: ${errorText(error)}`, delivery.channelId);
       this.#alert(agent.id, "error", `No pudo empezar: ${errorText(error)}`, delivery.channelId);
-      if (state.roundId) this.#roundTurnEnded(state, "failed", "no pudo empezar");
       this.#emitQueue(agent.id);
       this.#emitAgents();
       if (channel) this.#emitChannels();
@@ -2317,8 +2243,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (record) this.#syncInstructions(record);
     // «Avisarme»: la pregunta ya avisó al hacerse; aquí, lo que respondió o que no pudo terminar.
     if (terminal === "failed") this.#alert(agentId, "error", "No pudo terminar. Abre la conversación para ver qué pasó.", state.channelId);
-    else if (terminal === "completed" && !state.askedQuestion && !state.roundId && state.lastAssistantText.trim()) {
-      // (La respuesta a una ronda no avisa: se ve en la sala y Claude Bot avisa al recibirlas todas.)
+    else if (terminal === "completed" && !state.askedQuestion && state.lastAssistantText.trim()) {
       this.#alert(agentId, "reply", state.lastAssistantText, state.channelId);
     }
     for (const messageId of state.assistantMessageIds) {
@@ -2339,31 +2264,33 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (delivery && this.#store.listRoutines(agentId).some((routine) => routine.lastDeliveryId === delivery.id)) this.#emitRoutines();
     if (state.provider !== "demo") this.#usageAfterTurn();
 
-    if (state.roundId) {
-      // La respuesta a una ronda va a la ronda: Claude Bot las recibe todas juntas.
-      this.#roundTurnEnded(state, terminal);
-    } else if (
+    if (
       terminal === "completed" &&
       delivery?.senderKind === "agent" &&
       delivery.senderAgentId &&
       !delivery.replyTo &&
       !state.sentTo.has(delivery.senderAgentId) &&
-      state.lastAssistantText.trim()
+      (state.lastAssistantText.trim() || state.images.some((image) => !image.sent))
     ) {
-      // El compañero no contestó con send_message: le hacemos llegar su resultado igual. En un canal
-      // su respuesta ya se ve, así que no se repite como aviso (y si el canal se eliminó, no sigue).
+      // El compañero no contestó con send_message: le hacemos llegar su resultado igual, con las imágenes
+      // que generó. En un canal su respuesta ya se ve, así que no se repite como aviso (y si el canal se
+      // eliminó, no sigue).
       try {
         if (!delivery.channelId || (channel && !channel.deletedAt)) {
+          const images = state.images.filter((image) => !image.sent);
           this.#sendTeammateMessage({
             fromAgentId: agentId,
             to: [delivery.senderAgentId],
-            text: state.lastAssistantText.trim(),
+            text: withImages(state.lastAssistantText, images),
             replyTo: delivery.messageId,
             hops: delivery.hops + 1,
+            steps: delivery.steps,
             idempotencyKey: `auto:${delivery.id}`,
             channelId: delivery.channelId,
             quiet: Boolean(delivery.channelId),
+            images,
           });
+          for (const image of images) image.sent = true;
         }
       } catch (error) {
         this.#notice(agentId, `No se pudo devolver el resultado al remitente: ${errorText(error)}`, delivery.channelId);
@@ -2421,6 +2348,10 @@ export class AgentService extends EventEmitter<ServiceEvents> {
             const state = this.#active.get(agentId);
             if (state && message.text.trim()) state.lastAssistantText = message.text;
           }
+          return;
+        }
+        if (type === "imageGeneration") {
+          this.#imageGenerated(agentId, item, getString(params, "turnId"));
           return;
         }
         if (type && ACTIVITY_ITEM_TYPES.has(type)) {
@@ -2577,26 +2508,27 @@ export class AgentService extends EventEmitter<ServiceEvents> {
             return { nombre: channel.name, encargado: names.lead, miembros: names.members };
           })
         : null;
-      // Cuánto plan le queda a cada cuenta, la pizarra y la ronda abierta: para repartir sin agotar una cuenta.
+      // Cuánto plan le queda a cada cuenta y la pizarra: para repartir sin agotar una cuenta.
       const usage = forMain ? this.#usageForMain() : null;
       const board = forMain ? this.#board() : "";
-      const open = forMain ? this.#openRound() : null;
       return toolResult({
         agentes: agents,
         ...(ready ? { proveedoresListos: ready } : {}),
         ...(usage && usage.length ? { usoDelPlan: usage } : {}),
         ...(channels ? { canales: channels } : {}),
         ...(board ? { pizarra: board } : {}),
-        ...(open ? { rondaAbierta: { modo: open.mode, faltan: this.#roundView(open).waiting.map((item) => item.name) } } : {}),
       });
     }
-    if (params.tool === TOOL_READ_AGENT || params.tool === TOOL_START_ROUND || params.tool === TOOL_UPDATE_BOARD) {
+    if (params.tool === TOOL_READ_AGENT || params.tool === TOOL_UPDATE_BOARD) {
       if (senderId !== this.#mainAgentId) {
-        throw new Error("Solo el bot principal puede leer fichas, abrir rondas y llevar la pizarra. Si hace falta, pídeselo a él con send_message.");
+        throw new Error("Solo el bot principal puede leer fichas y llevar la pizarra. Si hace falta, pídeselo a él con send_message.");
       }
       if (params.tool === TOOL_READ_AGENT) return this.#readAgent(parseReadAgentArgs(params.arguments));
-      if (params.tool === TOOL_UPDATE_BOARD) return this.#updateBoard(senderId, parseUpdateBoardArgs(params.arguments).text, params.turnId);
-      return this.#startRound(senderId, parseStartRoundArgs(params.arguments), params);
+      return this.#updateBoard(senderId, parseUpdateBoardArgs(params.arguments).text, params.turnId);
+    }
+    if (params.tool === RETIRED_ROUND_TOOL) {
+      // Un hilo de Codex de la 0.8.0 todavía la tiene: Codex fija sus herramientas al crear el hilo.
+      throw new Error("Las rondas ya no existen: decide tú quién hace cada parte y encárgasela con send_message.");
     }
     if (params.tool === TOOL_CREATE_AGENT || params.tool === TOOL_UPDATE_AGENT || params.tool === TOOL_CREATE_CHANNEL) {
       if (senderId !== this.#mainAgentId) {
@@ -2642,28 +2574,25 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (params.tool !== TOOL_SEND_MESSAGE) throw new Error(`Herramienta desconocida: ${params.tool}`);
     const args = parseSendMessageArgs(params.arguments);
     const state = this.#active.get(senderId);
-    if (state?.roundId && this.#mainAgentId) {
-      // En una ronda, lo que se le escribe a Claude Bot es la respuesta: va con las de los demás.
-      const targets = args.to.map((ref) => this.#resolveAgentRef(ref));
-      if (targets.some((agent) => agent.id === this.#mainAgentId)) {
-        state.roundAnswer = args.text;
-        args.to = args.to.filter((_, index) => targets[index]?.id !== this.#mainAgentId);
-        if (!args.to.length) {
-          return toolResult({ enviado: true, nota: "Tu respuesta quedó en la ronda: Claude Bot la recibirá junto a las de los demás. Termina tu turno." });
-        }
-      }
-    }
+    // Claude Bot decide cada paso: cuando él escribe, la cuenta de reenvíos entre agentes vuelve a empezar y
+    // lo que se limita es cuántos encargos seguidos hace en un mismo pedido.
+    const main = senderId === this.#mainAgentId;
+    // Las imágenes que generó en este turno van con el mensaje (con su ruta en la carpeta compartida).
+    const images = state ? state.images.filter((image) => !image.sent) : [];
     const receipt = this.#sendTeammateMessage({
       fromAgentId: senderId,
       to: args.to,
-      text: args.text,
+      text: withImages(args.text, images),
       replyTo: args.replyToMessageId,
-      hops: (state?.hops ?? 0) + 1,
+      hops: main ? 1 : (state?.hops ?? 0) + 1,
+      steps: (state?.steps ?? 0) + (main ? 1 : 0),
       idempotencyKey: `${params.threadId}:${params.turnId}:${params.callId}`,
       channelId: state?.channelId ?? null,
-      request: senderId === this.#mainAgentId ? (state?.request ?? null) : null,
+      images,
     });
     for (const recipient of receipt.recipients) state?.sentTo.add(recipient.id);
+    for (const image of images) image.sent = true;
+    if (main && state) state.steps += 1;
     return toolResult(receipt);
   }
 
@@ -2741,14 +2670,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       text: args.question,
       status: "completed",
       turnId,
-      payload: {
-        options: args.options,
-        recommended: args.recommended,
-        answer: null,
-        answeredAt: null,
-        // Claude Bot: la respuesta sigue siendo parte del mismo pedido (y de su modo).
-        ...(this.#active.get(agentId)?.request ? { request: this.#active.get(agentId)?.request } : {}),
-      },
+      payload: { options: args.options, recommended: args.recommended, answer: null, answeredAt: null },
       channelId: this.#active.get(agentId)?.channelId ?? null,
     });
     const state = this.#active.get(agentId);
@@ -2907,14 +2829,27 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       patch.project = args.project;
       changes.push("proyecto");
     }
-    if (args.model !== undefined && args.model !== target.model) {
+    if (args.provider !== undefined && args.provider !== target.provider) {
+      // Por ejemplo, para que haga imágenes (Claude no las genera): con otro proveedor empieza una conversación
+      // nueva, con sus mismas instrucciones y recuerdos.
+      const status = this.#providers.find((item) => item.id === args.provider);
+      if (status && !status.available) throw new Error(`${providerLabel(args.provider)} no está disponible en este equipo: elige otro de proveedoresListos.`);
+      if (status?.loggedIn === false) {
+        throw new Error(`${providerLabel(args.provider)} no tiene la sesión iniciada (el usuario puede entrar en Ajustes): elige otro de proveedoresListos.`);
+      }
+      if (this.#active.has(target.id)) throw new Error(`${target.name} está trabajando: cámbiale el proveedor cuando termine su turno.`);
+      patch.provider = args.provider;
+      changes.push("proveedor");
+    }
+    // El modelo es de cada proveedor: si cambia el proveedor y no se indica, vuelve al predeterminado.
+    if (args.model !== undefined && (args.model !== target.model || patch.provider !== undefined)) {
       patch.model = args.model;
-      changes.push("modelo");
+      if (args.model !== target.model) changes.push("modelo");
     }
     if (!changes.length) return toolResult({ actualizado: false, nota: "No había nada distinto que cambiar." });
     let updated: AgentView;
     try {
-      updated = this.updateAgent(target.id, patch);
+      updated = this.updateAgent(target.id, patch, { by: main.name });
     } catch (error) {
       throw new Error(errorText(error));
     }
@@ -2936,7 +2871,15 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#emit({ type: "message", agentId: mainId, message: activity });
     this.#notice(updated.id, `${main.name} ajustó este agente: ${list}.`);
     this.#emitAgents();
-    return toolResult({ actualizado: true, id: updated.id, nombre: updated.name, proyecto: updated.project || null, cambios: changes });
+    return toolResult({
+      actualizado: true,
+      id: updated.id,
+      nombre: updated.name,
+      proyecto: updated.project || null,
+      proveedor: updated.provider,
+      modelo: updated.model ?? "predeterminado",
+      cambios: changes,
+    });
   }
 
   #fireRoutine(routine: RoutineRecord, scheduledAt: number, manual: boolean): void {
@@ -3023,10 +2966,19 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     channelId?: string | null;
     /** Sin el aviso «Enviado a…» (cuando el texto ya se ve en el canal). */
     quiet?: boolean;
-    /** Solo de Claude Bot: el pedido del usuario del que es parte (la respuesta vuelve a ese pedido). */
-    request?: { id: string; mode: RequestMode } | null;
+    /** Encargos de Claude Bot en esta cadena (las respuestas lo heredan). */
+    steps?: number;
+    /** Imágenes que generó el remitente en su turno: se ven en el chat de quien las recibe. */
+    images?: ReadonlyArray<Pick<SavedImage, "relativePath">>;
   }): { enviado: true; recipients: Array<{ id: string; name: string; messageId: string }> } {
     const sender = this.#requireAgent(input.fromAgentId);
+    const steps = input.steps ?? 0;
+    const maxSteps = this.#options.mainMaxSteps ?? MAIN_MAX_STEPS;
+    if (steps > maxSteps) {
+      throw new Error(
+        `Ya hiciste ${maxSteps} encargos seguidos en este pedido, el máximo. Cuéntale al usuario cómo va el trabajo y qué falta; si te pide seguir, sigues.`,
+      );
+    }
     if (input.hops > this.#options.maxHops) {
       throw new Error(
         `Se alcanzó el límite de ${this.#options.maxHops} reenvíos seguidos entre agentes. Termina la tarea tú mismo y responde al usuario.`,
@@ -3051,7 +3003,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
           fromAgentId: sender.id,
           replyTo: input.replyTo,
           channelId: input.channelId ?? null,
-          payload: input.request ? { request: input.request } : null,
+          payload: input.images?.length ? { images: input.images.map((image) => image.relativePath) } : null,
         });
         const { delivery } = this.#store.enqueueDelivery({
           agentId: recipient.id,
@@ -3061,6 +3013,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
           text: input.text,
           replyTo: input.replyTo,
           hops: input.hops,
+          steps,
           idempotencyKey: key,
           channelId: input.channelId ?? null,
         });
@@ -3092,7 +3045,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     };
   }
 
-  // ---------- la sala de Claude Bot: fichas, rondas y pizarra ----------
+  // ---------- Claude Bot: fichas y pizarra ----------
 
   /** La pizarra del trabajo (vacía si no hay). */
   #board(): string {
@@ -3107,7 +3060,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     return toolResult({
       guardada: true,
       caracteres: text.length,
-      nota: text ? "Los agentes la recibirán cuando les escribas o los consultes." : "La pizarra quedó vacía.",
+      nota: text ? "Los agentes la recibirán cuando les escribas." : "La pizarra quedó vacía.",
     });
   }
 
@@ -3178,457 +3131,40 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     });
   }
 
-  /** La ronda abierta (hay una a la vez), o null. */
-  #openRound(): RoundRecord | null {
-    return this.#store.listRounds("open")[0] ?? null;
-  }
-
-  #roundViewOrNull(): RoundView | null {
-    const round = this.#openRound();
-    return round ? this.#roundView(round) : null;
-  }
-
-  #roundView(round: RoundRecord): RoundView {
-    return {
-      id: round.id,
-      mode: round.mode,
-      label: ROUND_LABELS[round.mode],
-      total: round.participants.length,
-      waiting: round.participants
-        .filter((participant) => participant.status === "waiting")
-        .map((participant) => ({ id: participant.agentId, name: this.#store.getAgent(participant.agentId)?.name ?? participant.name })),
-      createdAt: round.createdAt,
-    };
-  }
-
-  #roundTimeout(): number {
-    return this.#options.roundTimeoutMs ?? ROUND_TIMEOUT_MS;
-  }
-
-  /** La ronda a la que responde una entrega (una consulta de Claude Bot); "closed" si ya no espera esa respuesta. */
-  #roundOfDelivery(delivery: DeliveryRecord): RoundRecord | "closed" | null {
-    if (delivery.senderKind !== "agent" || !delivery.senderAgentId || delivery.senderAgentId !== this.#mainAgentId) return null;
-    const payload = this.#store.getMessage(delivery.messageId)?.payload;
-    const roundId = payload?.kind === "round-question" ? payload.roundId : null;
-    if (typeof roundId !== "string") return null;
-    const round = this.#store.getRound(roundId);
-    if (!round || round.status !== "open") return "closed";
-    const participant = round.participants.find((item) => item.deliveryId === delivery.id);
-    return participant?.status === "waiting" ? round : "closed";
-  }
-
-  /** Lo que recibe un participante: quién más está, la pizarra, la consulta y, en la de acuerdo, lo que opinó cada uno. */
-  #roundInput(round: RoundRecord, agent: AgentRecord): string {
-    const main = this.#mainAgentId ? this.#store.getAgent(this.#mainAgentId) : null;
-    const others = round.participants
-      .filter((participant) => participant.agentId !== agent.id)
-      .map((participant) => {
-        const current = this.#store.getAgent(participant.agentId);
-        return { name: current?.name ?? participant.name, role: current?.role ?? participant.role };
-      });
-    return composeRoundInput({
-      mode: round.mode,
-      mainName: main?.name ?? MAIN_AGENT_NAME,
-      others,
-      board: this.#board(),
-      question: round.question,
-      opinions: round.mode === "acuerdo" ? this.#opinionsFor(round.requestId) : [],
-    });
-  }
-
-  /** Lo que opinó cada uno en la última ronda de opiniones (cerrada) de un pedido. */
-  #opinionsFor(requestId: string): Array<{ name: string; text: string }> {
-    const closed = this.#store.roundsForRequest(requestId, "opiniones").filter((round) => round.status === "closed");
-    const last = closed[closed.length - 1];
-    if (!last) return [];
-    return last.participants
-      .filter((participant) => participant.status === "answered")
-      .map((participant) => ({ name: this.#store.getAgent(participant.agentId)?.name ?? participant.name, text: participant.answer }));
-  }
+  // ---------- imágenes que genera un agente ----------
 
   /**
-   * De qué pedido del usuario es parte lo que recibe Claude Bot, y cómo lo pidió: el resultado de una
-   * ronda, la respuesta a una de sus preguntas o lo que le contesta un agente siguen siendo del mismo pedido.
+   * Codex generó una imagen: se copia a la carpeta compartida (imagenes/<agente>/), se ve en su chat y va con lo
+   * que le responda a quien se la pidió.
    */
-  #mainRequest(delivery: DeliveryRecord): { id: string; mode: RequestMode } {
-    const message = this.#store.getMessage(delivery.messageId);
-    const own = readRequest(message?.payload?.request);
-    if (own) return own;
-    const decisionId = message?.payload?.decisionId;
-    if (typeof decisionId === "string") {
-      const asked = readRequest(this.#store.getMessage(decisionId)?.payload?.request);
-      if (asked) return asked;
-    }
-    if (delivery.replyTo) {
-      const sent = readRequest(this.#store.getMessage(delivery.replyTo)?.payload?.request);
-      if (sent) return sent;
-    }
-    return { id: delivery.messageId, mode: message?.payload?.mode === "todos" ? "todos" : "corta" };
-  }
-
-  /** start_round: la misma consulta a varios agentes; las respuestas se ven en la sala y le llegan juntas a Claude Bot. */
-  #startRound(mainId: string, args: StartRoundArgs, params: DynamicToolCallParams): DynamicToolResult {
-    const state = this.#active.get(mainId);
-    const key = `${params.threadId}:${params.turnId}:${params.callId}`;
-    const roundId = `ronda-${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
-    // La misma llamada repetida (el proveedor reintenta): no abre otra.
-    const repeated = this.#store.getRound(roundId);
-    if (repeated) return this.#roundStarted(repeated, []);
-    const request = state?.request ?? { id: `turno:${params.turnId ?? key}`, mode: "corta" as RequestMode };
-    if (args.mode !== "propuestas" && request.mode !== "todos") {
-      throw new Error(
-        `La ronda de «${args.mode}» es solo para cuando el usuario elige «Que opinen todos». En este pedido, reparte directamente o abre una de «propuestas» con 2 a ${ROUND_LIMITS.participants.propuestas} candidatos.`,
-      );
-    }
-    const open = this.#openRound();
-    if (open) {
-      const waiting = this.#roundView(open).waiting.map((item) => item.name);
-      throw new Error(
-        `Ya hay una ronda abierta («${ROUND_LABELS[open.mode]}»${waiting.length ? `; faltan ${joinNames(waiting)}` : ""}). Termina tu turno: su resultado te llegará en un mensaje.`,
-      );
-    }
-    if (this.#store.roundsForRequest(request.id, args.mode).length) {
-      throw new Error(`Ya hiciste una ronda de «${args.mode}» para este pedido: decide con lo que respondieron.`);
-    }
-    if (args.mode === "acuerdo" && !this.#opinionsFor(request.id).length) {
-      throw new Error("La ronda de «acuerdo» va después de la de «opiniones» de este pedido, cuando ya respondieron.");
-    }
-    const hops = (state?.hops ?? 0) + 1;
-    if (hops > this.#options.maxHops) {
-      throw new Error(`Se alcanzó el límite de ${this.#options.maxHops} reenvíos seguidos entre agentes. Decide tú con lo que tienes y responde al usuario.`);
-    }
-    const agents = [
-      ...new Map(
-        args.participants.map((ref) => {
-          const agent = this.#resolveAgentRef(ref);
-          return [agent.id, agent] as const;
-        }),
-      ).values(),
-    ];
-    if (agents.some((agent) => agent.id === mainId)) throw new Error("No te incluyas en la ronda: es para consultar a tus agentes.");
-    const skipped = agents.filter((agent) => agent.paused || this.#deleting.has(agent.id));
-    const chosen = agents.filter((agent) => !skipped.includes(agent));
-    if (!chosen.length) {
-      throw new Error(`${joinNames(skipped.map((agent) => agent.name))} no puede${skipped.length === 1 ? "" : "n"} responder: tiene${skipped.length === 1 ? "" : "n"} la cola en pausa. Elige a otros o pídele al usuario que la reanude.`);
-    }
-    const { round, notice } = this.#store.transaction(() => {
-      const participants: RoundParticipant[] = chosen.map((agent) => {
-        const message = this.#store.insertMessage({
-          agentId: agent.id,
-          role: "teammate",
-          text: args.question,
-          status: "queued",
-          fromAgentId: mainId,
-          payload: { kind: "round-question", roundId, mode: args.mode },
+  #imageGenerated(agentId: string, item: Record<string, unknown>, turnId: string | null): void {
+    const agent = this.#store.getAgent(agentId);
+    const state = this.#active.get(agentId);
+    const failed = getString(item, "status") === "failed";
+    let saved: SavedImage | null = null;
+    if (agent && !failed) {
+      try {
+        saved = saveGeneratedImage({
+          sharedDir: this.#options.sharedDir,
+          folder: slugify(agent.name) || "agente",
+          savedPath: getString(item, "savedPath") ?? getString(item, "saved_path"),
+          result: getString(item, "result"),
         });
-        const { delivery } = this.#store.enqueueDelivery({
-          agentId: agent.id,
-          messageId: message.id,
-          senderKind: "agent",
-          senderAgentId: mainId,
-          text: args.question,
-          hops,
-          idempotencyKey: `${key}:${agent.id}`,
-        });
-        this.#store.updateMessage(message.id, { deliveryId: delivery.id });
-        return {
-          agentId: agent.id,
-          name: agent.name,
-          role: agent.role,
-          messageId: message.id,
-          deliveryId: delivery.id,
-          status: "waiting",
-          answer: "",
-          reason: null,
-          answeredAt: null,
-          quiet: agent.lastAt <= agent.readAt,
-        };
-      });
-      const created = this.#store.insertRound({ id: roundId, mode: args.mode, question: args.question, participants, requestId: request.id, requestMode: request.mode, hops });
-      // En la sala: la consulta y a quiénes se les hizo.
-      const posted = this.#store.insertMessage({
-        agentId: mainId,
-        role: "notice",
-        text: args.question,
-        status: "completed",
-        toAgentIds: chosen.map((agent) => agent.id),
-        turnId: params.turnId,
-        payload: { kind: "round-started", roundId, mode: args.mode },
-      });
-      return { round: created, notice: posted };
-    });
-    this.#emit({ type: "message", agentId: mainId, message: notice });
-    for (const participant of round.participants) {
-      const message = this.#store.getMessage(participant.messageId);
-      if (message) this.#emit({ type: "message", agentId: participant.agentId, message });
-      this.#emitQueue(participant.agentId);
-      this.#scheduleDrain(participant.agentId);
-    }
-    this.#armRoundTimer(round);
-    this.#emitAgents();
-    return this.#roundStarted(round, skipped.map((agent) => agent.name));
-  }
-
-  #roundStarted(round: RoundRecord, skipped: string[]): DynamicToolResult {
-    const minutes = Math.max(1, Math.round(this.#roundTimeout() / 60_000));
-    return toolResult({
-      ronda: ROUND_LABELS[round.mode],
-      participantes: round.participants.map((participant) => participant.name),
-      ...(skipped.length ? { sinIncluir: `${joinNames(skipped)} (cola en pausa)` } : {}),
-      nota: `Les llegó la consulta. Termina tu turno ahora: cuando respondan todos (o a los ${minutes} minutos, con las respuestas que haya) te llegará un solo mensaje con lo que dijo cada uno.`,
-    });
-  }
-
-  /** Terminó (o no pudo empezar) el turno de un participante: su respuesta queda en la ronda y a la vista en la sala. */
-  #roundTurnEnded(state: TurnState, terminal: "completed" | "failed" | "interrupted", reason?: string): void {
-    const round = state.roundId ? this.#store.getRound(state.roundId) : null;
-    if (!round) return;
-    const participant = round.participants.find((item) => item.deliveryId === state.deliveryId);
-    if (!participant) return;
-    const text = (state.roundAnswer ?? state.lastAssistantText).trim();
-    if (round.status !== "open" || participant.status !== "waiting") {
-      // Llegó tarde (la ronda se cerró por tiempo): se ve en la sala, pero Claude Bot ya recibió el resultado.
-      if (round.status === "closed" && terminal === "completed" && text) {
-        this.#postRoundAnswer(round, participant.agentId, text, true);
-        this.#keepRead(participant);
+      } catch (error) {
+        this.#log("warn", `No se pudo copiar la imagen de ${agent.name} a la carpeta compartida: ${errorText(error)}`);
       }
-      return;
     }
-    if (terminal === "completed" && text) {
-      participant.status = "answered";
-      participant.answer = text;
-    } else {
-      participant.status = "failed";
-      participant.reason = reason ?? (terminal === "interrupted" ? "se detuvo" : terminal === "failed" ? "falló" : "no respondió");
-    }
-    participant.answeredAt = Date.now();
-    const updated = this.#store.updateRound(round.id, { participants: round.participants }) as RoundRecord;
-    if (participant.status === "answered") {
-      this.#postRoundAnswer(updated, participant.agentId, text, false);
-      this.#keepRead(participant);
-    }
-    this.#maybeCloseRound(updated);
-    this.#emitAgents();
-  }
-
-  /**
-   * Lo que respondió en la ronda ya se ve en la sala: si no tenía nada sin leer al empezar y no le llegó
-   * otra cosa entre medio, su chat sigue leído (así una ronda no llena la lista de puntos azules).
-   */
-  #keepRead(participant: RoundParticipant): void {
-    if (!participant.quiet) return;
-    const agent = this.#store.getAgent(participant.agentId);
-    const question = this.#store.getMessage(participant.messageId);
-    if (!agent || !question || agent.lastAt <= agent.readAt) return;
-    const other = this.#store
-      .listMessages(agent.id, 60)
-      .some(
-        (message) =>
-          message.createdAt >= question.createdAt &&
-          message.id !== question.id &&
-          message.deliveryId !== participant.deliveryId &&
-          !message.channelId &&
-          UNREAD_MESSAGE_ROLES.has(message.role),
-      );
-    if (other) return;
-    this.#store.updateAgent(agent.id, { readAt: Math.max(Date.now(), agent.lastAt) });
-    this.#emitAgents();
-  }
-
-  /** La respuesta de un participante, en el chat de Claude Bot (la sala). */
-  #postRoundAnswer(round: RoundRecord, agentId: string, text: string, late: boolean): void {
-    const mainId = this.#mainAgentId;
-    if (!mainId || !this.#store.getAgent(mainId)) return;
+    if (saved && state) state.images.push({ ...saved, sent: false });
     const message = this.#store.insertMessage({
-      agentId: mainId,
-      role: "teammate",
-      text,
+      agentId,
+      role: "activity",
+      text: failed ? "No pudo generar una imagen." : saved ? `Generó una imagen: ${saved.relativePath}` : "Generó una imagen.",
       status: "completed",
-      fromAgentId: agentId,
-      payload: { kind: "round-answer", roundId: round.id, mode: round.mode, ...(late ? { late: true } : {}) },
+      turnId,
+      channelId: state?.channelId ?? null,
+      ...(saved ? { payload: { kind: "image", path: saved.relativePath } } : {}),
     });
-    this.#emit({ type: "message", agentId: mainId, message });
-  }
-
-  /** Si ya respondieron todos (o no pueden), se cierra y Claude Bot recibe el resultado. */
-  #maybeCloseRound(round: RoundRecord): void {
-    if (round.status !== "open" || round.participants.some((participant) => participant.status === "waiting")) return;
-    this.#closeRound(round, false);
-  }
-
-  /** Cierra la ronda y le deja a Claude Bot, en un solo mensaje, lo que respondió cada uno. */
-  #closeRound(round: RoundRecord, timedOut: boolean): void {
-    const timer = this.#roundTimers.get(round.id);
-    if (timer) clearTimeout(timer);
-    this.#roundTimers.delete(round.id);
-    const closed = this.#store.updateRound(round.id, { status: "closed", closedAt: Date.now(), participants: round.participants }) as RoundRecord;
-    const mainId = this.#mainAgentId;
-    if (!mainId || !this.#store.getAgent(mainId)) return;
-    const answered = closed.participants.filter((participant) => participant.status === "answered").length;
-    const total = closed.participants.length;
-    const message = this.#store.transaction(() => {
-      const activity = this.#store.insertMessage({
-        agentId: mainId,
-        role: "activity",
-        text: `${ROUND_LABELS[closed.mode]}: respondieron ${answered} de ${total}${timedOut ? " (se cerró por tiempo)" : ""}`,
-        status: "queued",
-        payload: {
-          kind: "round-closed",
-          roundId: closed.id,
-          mode: closed.mode,
-          answered,
-          total,
-          timedOut,
-          request: { id: closed.requestId, mode: closed.requestMode },
-        },
-      });
-      const { delivery } = this.#store.enqueueDelivery({
-        agentId: mainId,
-        messageId: activity.id,
-        senderKind: "user",
-        text: composeRoundResult(closed, timedOut),
-        hops: closed.hops,
-        idempotencyKey: `ronda:${closed.id}`,
-      });
-      return this.#store.updateMessage(activity.id, { deliveryId: delivery.id }) as MessageRecord;
-    });
-    this.#emit({ type: "message", agentId: mainId, message });
-    this.#emitQueue(mainId);
-    this.#emitAgents();
-    this.#scheduleDrain(mainId);
-  }
-
-  #armRoundTimer(round: RoundRecord): void {
-    const existing = this.#roundTimers.get(round.id);
-    if (existing) clearTimeout(existing);
-    const left = round.createdAt + this.#roundTimeout() - Date.now();
-    const timer = setTimeout(() => this.#closeRoundByTime(round.id), Math.max(0, left));
-    timer.unref?.();
-    this.#roundTimers.set(round.id, timer);
-  }
-
-  /** Pasó el tiempo: se cierra con las respuestas que haya y se cancelan las consultas que seguían en cola. */
-  #closeRoundByTime(roundId: string): void {
-    this.#roundTimers.delete(roundId);
-    if (this.#stopping) return;
-    const round = this.#store.getRound(roundId);
-    if (!round || round.status !== "open") return;
-    for (const participant of round.participants) {
-      if (participant.status !== "waiting") continue;
-      const delivery = this.#store.getDelivery(participant.deliveryId);
-      const queued = delivery?.status === "queued";
-      participant.status = "failed";
-      participant.reason = queued ? "estaba ocupado con otra cosa" : "seguía trabajando";
-      participant.answeredAt = Date.now();
-      if (queued && delivery) this.#cancelRoundDelivery(participant.agentId, delivery);
-    }
-    this.#closeRound(round, true);
-  }
-
-  #cancelRoundDelivery(agentId: string, delivery: DeliveryRecord): void {
-    this.#store.updateDelivery(delivery.id, { status: "cancelled", finishedAt: Date.now() });
-    this.#updateMessageStatus(agentId, delivery.messageId, "cancelled");
-    this.#emitQueue(agentId);
-  }
-
-  /** Al arrancar: las rondas abiertas siguen; las consultas que cortó el reinicio cuentan como sin respuesta. */
-  #resumeRounds(): void {
-    for (const round of this.#store.listRounds("open")) {
-      for (const participant of round.participants) {
-        if (participant.status !== "waiting") continue;
-        const delivery = this.#store.getDelivery(participant.deliveryId);
-        if (delivery?.status === "queued") continue;
-        if (delivery?.status === "completed") {
-          // Alcanzó a responder justo antes de que se cerrara la app.
-          const reply = this.#store
-            .listMessages(participant.agentId, 50)
-            .filter((message) => message.role === "assistant" && message.deliveryId === delivery.id && message.text.trim())
-            .pop();
-          if (reply) {
-            participant.status = "answered";
-            participant.answer = reply.text.trim();
-            participant.answeredAt = delivery.finishedAt ?? Date.now();
-            this.#postRoundAnswer(round, participant.agentId, participant.answer, false);
-            continue;
-          }
-        }
-        participant.status = "failed";
-        participant.reason = delivery?.status === "interrupted" ? "se cortó al reiniciarse la app" : delivery?.status === "cancelled" ? "se canceló su turno" : "no respondió";
-        participant.answeredAt = Date.now();
-      }
-      const updated = this.#store.updateRound(round.id, { participants: round.participants }) as RoundRecord;
-      if (updated.createdAt + this.#roundTimeout() <= Date.now()) {
-        this.#closeRoundByTime(updated.id);
-        continue;
-      }
-      this.#maybeCloseRound(updated);
-      if (this.#store.getRound(updated.id)?.status === "open") this.#armRoundTimer(updated);
-    }
-  }
-
-  /** Detiene las rondas abiertas: cancela las consultas en cola y devuelve a quiénes hay que interrumpir. */
-  #cancelRounds(reason: string): { cancelled: number; running: string[] } {
-    const running: string[] = [];
-    let cancelled = 0;
-    for (const round of this.#store.listRounds("open")) {
-      cancelled += 1;
-      const timer = this.#roundTimers.get(round.id);
-      if (timer) clearTimeout(timer);
-      this.#roundTimers.delete(round.id);
-      for (const participant of round.participants) {
-        if (participant.status !== "waiting") continue;
-        participant.status = "failed";
-        participant.reason = "se detuvo la ronda";
-        participant.answeredAt = Date.now();
-        const delivery = this.#store.getDelivery(participant.deliveryId);
-        if (delivery?.status === "queued") this.#cancelRoundDelivery(participant.agentId, delivery);
-        else if (delivery && (delivery.status === "starting" || delivery.status === "running")) running.push(participant.agentId);
-      }
-      this.#store.updateRound(round.id, { status: "cancelled", closedAt: Date.now(), participants: round.participants });
-      const mainId = this.#mainAgentId;
-      if (mainId && this.#store.getAgent(mainId)) {
-        const message = this.#store.insertMessage({
-          agentId: mainId,
-          role: "activity",
-          text: `${ROUND_LABELS[round.mode]}: ${reason}`,
-          status: "completed",
-          payload: { kind: "round-cancelled", roundId: round.id, mode: round.mode },
-        });
-        this.#emit({ type: "message", agentId: mainId, message });
-      }
-    }
-    if (cancelled) this.#emitAgents();
-    return { cancelled, running };
-  }
-
-  /** Un agente ya no puede responder (se elimina, empieza de cero o se pausa): queda sin respuesta en la ronda. */
-  #roundAgentGone(agentId: string, reason: string, options: { queuedOnly?: boolean } = {}): void {
-    for (const round of this.#store.listRounds("open")) {
-      const participant = round.participants.find((item) => item.agentId === agentId && item.status === "waiting");
-      if (!participant) continue;
-      const delivery = this.#store.getDelivery(participant.deliveryId);
-      const queued = delivery?.status === "queued";
-      if (options.queuedOnly && !queued) continue;
-      if (queued && delivery) this.#cancelRoundDelivery(agentId, delivery);
-      participant.status = "failed";
-      participant.reason = reason;
-      participant.answeredAt = Date.now();
-      this.#maybeCloseRound(this.#store.updateRound(round.id, { participants: round.participants }) as RoundRecord);
-      this.#emitAgents();
-    }
-  }
-
-  /** Se canceló una entrega en cola: si era una consulta de una ronda, ese agente queda sin respuesta. */
-  #roundDeliveryGone(deliveryId: string, reason: string): void {
-    for (const round of this.#store.listRounds("open")) {
-      const participant = round.participants.find((item) => item.deliveryId === deliveryId && item.status === "waiting");
-      if (!participant) continue;
-      participant.status = "failed";
-      participant.reason = reason;
-      participant.answeredAt = Date.now();
-      this.#maybeCloseRound(this.#store.updateRound(round.id, { participants: round.participants }) as RoundRecord);
-      this.#emitAgents();
-    }
+    this.#emit({ type: "message", agentId, message });
   }
 
   #resolveAgentRef(ref: string): AgentRecord {
@@ -3663,7 +3199,6 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       queued,
       unread: agent.lastAt > agent.readAt,
       main,
-      ...(main ? { round: this.#roundViewOrNull() } : {}),
     };
   }
 
@@ -3750,20 +3285,8 @@ function agentStateLabel(state: AgentState): string {
   return state === "working" ? "trabajando" : state === "queued" ? "con cola" : state === "paused" ? "en pausa" : "libre";
 }
 
-/** Los mensajes que dejan a un agente con novedades (como en la lista: lo que el usuario no ha visto). */
-const UNREAD_MESSAGE_ROLES: ReadonlySet<string> = new Set(["assistant", "teammate", "notice", "decision", "routine"]);
-
-/** «A», «A y B», «A, B y C». */
-function joinNames(names: string[]): string {
-  if (names.length <= 1) return names[0] ?? "";
-  return `${names.slice(0, -1).join(", ")} y ${names[names.length - 1]}`;
-}
-
-/** El pedido guardado en un mensaje (de qué pedido del usuario es parte), si lo tiene. */
-function readRequest(value: unknown): { id: string; mode: RequestMode } | null {
-  if (!isRecord(value) || typeof value.id !== "string" || !value.id) return null;
-  return { id: value.id, mode: isRequestMode(value.mode) ? value.mode : "corta" };
-}
+/** La herramienta de las rondas de la 0.8.0, que un hilo de Codex de entonces todavía puede pedir. */
+const RETIRED_ROUND_TOOL = "start_round";
 
 function signInProvider(value: unknown): SignInProvider {
   if (value === "claude" || value === "codex" || value === "grok" || value === "gemini") return value;

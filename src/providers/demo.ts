@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { crc32, deflateSync } from "node:zlib";
 import { GREETING_MARKER } from "../instructions.js";
-import { ROUND_INPUT_PREFIX, ROUND_RESULT_PREFIX, TODOS_NOTE_PREFIX } from "../rounds.js";
 import { splitTeamNote } from "../team-state.js";
 import {
   TEAM_NAMESPACE,
@@ -15,7 +15,6 @@ import {
   TOOL_REMEMBER,
   TOOL_SEARCH_MEMORIES,
   TOOL_SEND_MESSAGE,
-  TOOL_START_ROUND,
   TOOL_UPDATE_AGENT,
   TOOL_UPDATE_BOARD,
 } from "../team.js";
@@ -49,11 +48,10 @@ export interface DemoClientOptions {
  *   - `/equipo` lista a los compañeros; `/lento` transmite la respuesta despacio;
  *   - `/pregunta [¿Texto? | Opción A | Opción B]` hace una pregunta con opciones al usuario;
  *   - `/rutina HH:MM Nombre` o `/rutina cada N Nombre` crea una rutina; `/rutinas` las lista;
+ *   - `/imagen descripción` «genera» una imagen (como el generador de imágenes de Codex);
  *   - solo para el bot principal: `/crear Nombre | Rol | Proyecto` crea un agente,
- *     `/ajustar Nombre | Rol nuevo` le cambia el rol, `/ficha Nombre` lee su ficha,
- *     `/pizarra texto` escribe la pizarra y `/ronda modo | Ana, Beto | consulta` abre una ronda;
- *   - en una ronda, cada agente responde con una propuesta, una opinión o «De acuerdo»
- *     (o «Paso» si la consulta dice `/paso`).
+ *     `/ajustar Nombre | Rol nuevo` le cambia el rol, `/proveedor Nombre | codex` le cambia el
+ *     proveedor, `/ficha Nombre` lee su ficha y `/pizarra texto` escribe la pizarra.
  */
 export class DemoAgentClient extends EventEmitter<ClientEvents> implements AgentClient {
   readonly provider: ProviderId = "demo";
@@ -151,24 +149,6 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
       const team = splitTeamNote(input);
       if (team.note) notes.push(`ClosedBot me contó cómo están tus agentes:\n${team.note.split("\n").slice(1).join("\n")}`);
       input = team.rest;
-      // Una consulta de una ronda de Claude Bot: se responde corto, sin herramientas.
-      if (input.startsWith(ROUND_INPUT_PREFIX)) {
-        await this.#say(threadId, state, demoRoundAnswer(input));
-        return;
-      }
-      // El resultado de una ronda (lo recibe Claude Bot): cuántos respondieron.
-      if (input.startsWith(ROUND_RESULT_PREFIX)) {
-        const header = input.split("\n")[0] ?? "";
-        const count = /respondieron (\d+) de (\d+)/.exec(header);
-        notes.push(`Recibí las respuestas de la ronda${count ? ` (${count[1]} de ${count[2]})` : ""}.`);
-        input = input.slice(header.length).trim();
-      }
-      // «Que opinen todos»: la nota de ClosedBot va antes del mensaje del usuario.
-      if (input.startsWith(TODOS_NOTE_PREFIX)) {
-        const end = input.indexOf("\n\n");
-        notes.push("ClosedBot me pidió que opinen todos antes de repartir.");
-        input = end < 0 ? "" : input.slice(end + 2);
-      }
       const { channel, inner } = splitChannel(input);
       const body = extractBody(inner);
       if (/(^|\s)\/equipo(\s|$)/.test(body)) {
@@ -234,6 +214,15 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
           notes.push(`No pude ajustar a ${agent}: ${errorMessage(error)}`);
         }
       }
+      for (const match of body.matchAll(/^\/proveedor\s+(.+)$/gm)) {
+        const [agent = "", provider = ""] = (match[1] ?? "").split("|").map((part) => part.trim());
+        try {
+          await this.#callTool(threadId, state.turnId, TOOL_UPDATE_AGENT, { agent, provider });
+          notes.push(`Le cambié el proveedor a ${agent}: ahora usa ${provider}.`);
+        } catch (error) {
+          notes.push(`No pude cambiarle el proveedor a ${agent}: ${errorMessage(error)}`);
+        }
+      }
       for (const match of body.matchAll(/^\/canal\s+(.+)$/gm)) {
         const [name = "", lead = "", members = ""] = (match[1] ?? "").split("|").map((part) => part.trim());
         const args = {
@@ -268,20 +257,26 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
           notes.push(`No pude escribir la pizarra: ${errorMessage(error)}`);
         }
       }
-      const round = /^\/ronda\s+(.+)$/m.exec(body);
-      if (round) {
-        const [mode = "", people = "", question = ""] = (round[1] ?? "").split("|").map((part) => part.trim());
-        const participants = people
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean);
-        try {
-          await this.#callTool(threadId, state.turnId, TOOL_START_ROUND, { mode, participants, question: question || "Consulta de prueba de la demo." });
-          notes.push(`Abrí una ronda de «${mode}» con ${participants.join(", ")}.`);
-        } catch (error) {
-          notes.push(`No pude abrir la ronda: ${errorMessage(error)}`);
-        }
+      // Como el generador de imágenes de Codex: un evento imageGeneration con la imagen en base64.
+      let images = 0;
+      for (const match of body.matchAll(/^\/imagen(?:\s+(.*))?$/gm)) {
+        images += 1;
+        this.emit("notification", {
+          method: "item/completed",
+          params: {
+            threadId,
+            turnId: state.turnId,
+            item: {
+              id: `${state.turnId}:imagen-${images}`,
+              type: "imageGeneration",
+              status: "completed",
+              revisedPrompt: (match[1] ?? "").trim() || "Imagen de prueba",
+              result: demoPng(images).toString("base64"),
+            },
+          },
+        });
       }
+      if (images) notes.push(images === 1 ? "Generé una imagen de prueba." : `Generé ${images} imágenes de prueba.`);
       for (const match of body.matchAll(/^\/recuerda(\s+siempre)?\s+(.+)$/gm)) {
         const text = (match[2] ?? "").trim();
         try {
@@ -348,20 +343,6 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
     }
   }
 
-  /** Responde un texto fijo (para las rondas) y termina el turno. */
-  async #say(threadId: string, state: { turnId: string; interrupted: boolean }, reply: string): Promise<void> {
-    const itemId = `${state.turnId}:demo`;
-    let text = "";
-    for (const word of reply.split(/(?<=\s)/)) {
-      if (state.interrupted || !this.#running) break;
-      text += word;
-      this.emit("notification", { method: "item/agentMessage/delta", params: { threadId, turnId: state.turnId, itemId, delta: word } });
-      await sleep(this.#wordDelayMs);
-    }
-    this.emit("notification", { method: "item/completed", params: { threadId, turnId: state.turnId, item: { id: itemId, type: "agentMessage", text } } });
-    this.#finish(threadId, state, state.interrupted ? "interrupted" : "completed");
-  }
-
   #finish(threadId: string, state: { turnId: string }, status: string): void {
     this.#active.delete(threadId);
     this.emit("notification", { method: "turn/completed", params: { threadId, turn: { id: state.turnId, status } } });
@@ -387,17 +368,49 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
   }
 }
 
-/** Lo que responde la demo a una consulta de una ronda: corto, como pide la ronda. */
-function demoRoundAnswer(input: string): string {
-  const mode = /^\[Ronda de ClosedBot · ([^\]\n]+)\]/.exec(input)?.[1] ?? "";
-  const start = input.search(/^--- consulta de .+ ---$/m);
-  const end = input.indexOf("\n--- cómo responder ---");
-  const question = start >= 0 && end > start ? input.slice(input.indexOf("\n", start) + 1, end).trim() : "";
-  const summary = question.length > 80 ? `${question.slice(0, 80)}…` : question;
-  if (/(^|\s)\/paso(\s|$)/.test(question)) return "Paso: en modo demo no tengo nada que aportar a esto.";
-  if (mode === "Acuerdo del reparto") return "De acuerdo con el reparto (modo demo).";
-  if (mode === "Que opinen todos") return `Opinión de demo: conviene repartirlo por partes; yo tomaría una de «${summary}».`;
-  return `Propuesta de demo: puedo encargarme de una parte de «${summary}».`;
+/** Una imagen PNG de prueba de 96×96: un degradado con un cuadro al centro, de otro color en cada `seed`. */
+export function demoPng(seed = 1): Buffer {
+  const size = 96;
+  const hue = (seed * 67) % 360;
+  const [r, g, b] = hslToRgb(hue / 360, 0.55, 0.62);
+  const rows: Buffer[] = [];
+  for (let y = 0; y < size; y += 1) {
+    const row = Buffer.alloc(1 + size * 3);
+    for (let x = 0; x < size; x += 1) {
+      const inner = x >= 28 && x < 68 && y >= 28 && y < 68;
+      const shade = 0.75 + (0.25 * (x + y)) / (2 * size);
+      row[1 + x * 3] = inner ? 255 : Math.round(r * shade);
+      row[2 + x * 3] = inner ? 255 : Math.round(g * shade);
+      row[3 + x * 3] = inner ? 255 : Math.round(b * shade);
+    }
+    rows.push(row);
+  }
+  const chunk = (type: string, data: Buffer) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, "latin1"), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body));
+    return Buffer.concat([length, body, crc]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(size, 0);
+  header.writeUInt32BE(size, 4);
+  header[8] = 8; // bits por canal
+  header[9] = 2; // RGB
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(Buffer.concat(rows))),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  const k = (n: number) => (n + h * 12) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
 }
 
 /** Saludo inicial de la demo, con el nombre del agente y del usuario que trae el pedido. */

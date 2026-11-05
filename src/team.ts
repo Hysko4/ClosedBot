@@ -6,10 +6,10 @@
  */
 
 import { INSTRUCTIONS_MAX } from "./agent-files.js";
+import { BOARD_MAX } from "./board.js";
 import { CHANNEL_LIMITS, MAX_CHANNEL_MEMBERS } from "./channels.js";
 import { MEMORY_LIMITS } from "./memories.js";
 import type { ProviderId } from "./providers/client.js";
-import { isRoundMode, ROUND_LIMITS, ROUND_MODES, type RoundMode } from "./rounds.js";
 import { MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES } from "./schedule.js";
 
 export const TEAM_NAMESPACE = "closedbot";
@@ -23,7 +23,6 @@ export const TOOL_CREATE_AGENT = "create_agent";
 export const TOOL_UPDATE_AGENT = "update_agent";
 export const TOOL_CREATE_CHANNEL = "create_channel";
 export const TOOL_READ_AGENT = "read_agent";
-export const TOOL_START_ROUND = "start_round";
 export const TOOL_UPDATE_BOARD = "update_board";
 export const TOOL_REMEMBER = "remember";
 export const TOOL_FORGET_MEMORY = "forget_memory";
@@ -46,10 +45,10 @@ export const TEAM_TOOLS = [
 ] as const;
 
 /**
- * Herramientas que solo tiene el bot principal: arman y ajustan los equipos y les crean su canal, leen la
- * ficha completa de cada agente, abren rondas en su chat (la sala) y llevan la pizarra del trabajo.
+ * Herramientas que solo tiene el bot principal: arman y ajustan los equipos (también el proveedor de cada
+ * agente) y les crean su canal, leen la ficha completa de cada agente y llevan la pizarra del trabajo.
  */
-export const MAIN_TOOLS = [TOOL_CREATE_AGENT, TOOL_UPDATE_AGENT, TOOL_CREATE_CHANNEL, TOOL_READ_AGENT, TOOL_START_ROUND, TOOL_UPDATE_BOARD] as const;
+export const MAIN_TOOLS = [TOOL_CREATE_AGENT, TOOL_UPDATE_AGENT, TOOL_CREATE_CHANNEL, TOOL_READ_AGENT, TOOL_UPDATE_BOARD] as const;
 
 export const LIST_AGENTS_DESCRIPTION =
   "Lista los agentes de tu equipo con su id, nombre, rol, proyecto y estado (libre, trabajando o con cola). Al bot principal le muestra además los canales, la pizarra y cuánto plan le queda a cada cuenta.";
@@ -64,7 +63,7 @@ export const DELETE_ROUTINE_DESCRIPTION = "Elimina una de tus rutinas por su id 
 export const CREATE_AGENT_DESCRIPTION =
   "Crea un agente nuevo en el equipo del usuario, con nombre, rol, descripción, instrucciones permanentes y proyecto (el grupo de la barra lateral donde aparece). Antes revisa con list_agents que no exista uno parecido. Usa el mismo proyecto para todos los agentes de un equipo.";
 export const UPDATE_AGENT_DESCRIPTION =
-  "Cambia el nombre, el rol, la descripción, las instrucciones, el proyecto o el modelo de un agente que ya existe (indícalo por id o nombre). Solo cambia lo que pases. No sirve para cambiarte a ti mismo.";
+  "Cambia el nombre, el rol, la descripción, las instrucciones, el proyecto, el proveedor o el modelo de un agente que ya existe (indícalo por id o nombre). Solo cambia lo que pases. Cambia el proveedor cuando el agente no puede hacer su parte con el que tiene (p. ej. imágenes) y solo si está libre: empieza una conversación nueva con sus mismas instrucciones y recuerdos. No sirve para cambiarte a ti mismo.";
 export const REMEMBER_DESCRIPTION =
   "Guarda un recuerdo duradero: un dato, preferencia o decisión del usuario que te servirá en otras conversaciones (no lo uses para notas de la tarea actual). Con always true se usa siempre (va en tus instrucciones desde tu próximo mensaje); si no, lo buscas con search_memories cuando haga falta. Antes de guardar, revisa que no lo tengas ya.";
 export const FORGET_MEMORY_DESCRIPTION = "Borra uno de tus recuerdos por su id (míralo con list_memories o search_memories). Úsalo si quedó viejo, es falso o el usuario te pide olvidarlo.";
@@ -79,17 +78,8 @@ export const CREATE_CHANNEL_DESCRIPTION =
 
 export const READ_AGENT_DESCRIPTION =
   "Lee la ficha completa de un agente (por id o nombre): título, descripción, proveedor y modelo, sus instrucciones (AGENTS.md), sus recuerdos, sus habilidades, sus rutinas, sus canales y en qué anda (lo último de su conversación). Úsala cuando list_agents no te baste para decidir a quién darle un trabajo.";
-export const START_ROUND_DESCRIPTION =
-  `Abre una ronda en tu chat (la sala del usuario con sus agentes): les hace la misma consulta a varios agentes a la vez. Cada uno responde con lo que sabe y su respuesta se ve en tu chat; a ti te llegan todas juntas en un solo mensaje cuando terminan (o a los 15 minutos, con las que haya). Después de abrirla, termina tu turno. Modos: «propuestas» (de 2 a ${ROUND_LIMITS.participants.propuestas} candidatos dicen qué harían o «Paso»; úsala cuando no tengas claro a quién darle el trabajo), «opiniones» (todos opinan cómo encararlo y qué parte tomarían) y «acuerdo» (dicen si están de acuerdo con el reparto que propones). «opiniones» y «acuerdo» solo se pueden abrir si el usuario eligió «Que opinen todos». Una ronda de cada modo por pedido y una abierta a la vez.`;
 export const UPDATE_BOARD_DESCRIPTION =
-  "Reemplaza la pizarra del trabajo: el objetivo, quién hace qué, las decisiones y el avance, en pocas líneas. La reciben los agentes cuando les escribes o los consultas, y el usuario la ve en tu chat. Pasa el texto completo (vacío la borra).";
-
-export const ROUND_FIELD_HELP = {
-  mode: "«propuestas», «opiniones» o «acuerdo».",
-  participants: `Ids o nombres de los agentes que consultas (sin ti): de 1 a ${ROUND_LIMITS.participants.propuestas} en «propuestas» y hasta ${ROUND_LIMITS.participants.opiniones} en las otras.`,
-  question:
-    "La consulta: el trabajo del usuario y lo que necesitas saber de ellos. En «acuerdo», el reparto que propones (quién hace qué); ClosedBot les agrega lo que opinó cada uno.",
-} as const;
+  "Reemplaza la pizarra del trabajo: el objetivo, las partes, quién hace cada una (con qué proveedor), en qué orden, dónde queda cada entrega y el avance, en pocas líneas. La reciben los agentes cuando les escribes y el usuario la ve en tu chat. Pasa el texto completo (vacío la borra).";
 
 export const CHANNEL_FIELD_HELP = {
   name: "Nombre del canal. Para un equipo, el de su proyecto (p. ej. «Creación de Juegos»).",
@@ -110,10 +100,14 @@ export const AGENT_FIELD_HELP = {
   description: "Descripción opcional en dos o tres frases: para qué sirve y qué entrega. La ven el usuario en su ficha y los demás agentes.",
   instructions: "Instrucciones permanentes: qué hace, qué entrega, con quién coordina y cuándo preguntarle al usuario.",
   project: "Proyecto (grupo de la barra lateral), p. ej. «Creación de Juegos». El mismo para todo el equipo.",
-  provider: "Proveedor del agente: uno de proveedoresListos (lo da list_agents). Si no lo indicas, el tuyo.",
+  provider:
+    "Proveedor del agente, según lo que mejor hace su parte: uno de proveedoresListos (lo da list_agents). Para imágenes, codex (Claude no las genera). Si no lo indicas, el tuyo.",
   model:
     "Modelo opcional (p. ej. claude-sonnet-5-5 o claude-haiku-5-5 para tareas simples). Sin él usa el modelo por defecto del proveedor.",
 } as const;
+
+export const UPDATE_PROVIDER_HELP =
+  "Proveedor nuevo, uno de proveedoresListos: para que haga lo que su proveedor no puede (p. ej. codex para imágenes). Solo si está libre; si no indicas model, usa el modelo por defecto del proveedor nuevo.";
 
 const BASE_DYNAMIC_TOOLS = [
   {
@@ -309,6 +303,7 @@ const MAIN_DYNAMIC_TOOLS = [
         description: { type: "string", maxLength: AGENT_LIMITS.description, description: "Descripción nueva; vacía la borra." },
         instructions: { type: "string", minLength: 1, maxLength: AGENT_LIMITS.instructions, description: AGENT_FIELD_HELP.instructions },
         project: { type: "string", maxLength: AGENT_LIMITS.project, description: "Proyecto nuevo; vacío lo saca de su grupo." },
+        provider: { type: "string", enum: [...AGENT_PROVIDERS], description: UPDATE_PROVIDER_HELP },
         model: { type: "string", maxLength: AGENT_LIMITS.model, description: "Modelo nuevo; vacío vuelve al modelo por defecto." },
       },
       required: ["agent"],
@@ -350,32 +345,11 @@ const MAIN_DYNAMIC_TOOLS = [
   },
   {
     type: "function",
-    name: TOOL_START_ROUND,
-    description: START_ROUND_DESCRIPTION,
-    inputSchema: {
-      type: "object",
-      properties: {
-        mode: { type: "string", enum: [...ROUND_MODES], description: ROUND_FIELD_HELP.mode },
-        participants: {
-          type: "array",
-          items: { type: "string", minLength: 1 },
-          minItems: 1,
-          maxItems: ROUND_LIMITS.participants.opiniones,
-          description: ROUND_FIELD_HELP.participants,
-        },
-        question: { type: "string", minLength: 1, maxLength: ROUND_LIMITS.question, description: ROUND_FIELD_HELP.question },
-      },
-      required: ["mode", "participants", "question"],
-      additionalProperties: false,
-    },
-  },
-  {
-    type: "function",
     name: TOOL_UPDATE_BOARD,
     description: UPDATE_BOARD_DESCRIPTION,
     inputSchema: {
       type: "object",
-      properties: { text: { type: "string", maxLength: ROUND_LIMITS.board, description: "La pizarra completa, en pocas líneas." } },
+      properties: { text: { type: "string", maxLength: BOARD_MAX, description: "La pizarra completa, en pocas líneas." } },
       required: ["text"],
       additionalProperties: false,
     },
@@ -514,6 +488,7 @@ export interface UpdateAgentArgs {
   instructions?: string;
   /** "" saca al agente de su proyecto. */
   project?: string;
+  provider?: ProviderId;
   /** null vuelve al modelo por defecto. */
   model?: string | null;
 }
@@ -530,6 +505,8 @@ export function parseUpdateAgentArgs(value: unknown): UpdateAgentArgs {
     args.instructions = requiredText(record.instructions, "instructions", AGENT_LIMITS.instructions);
   }
   if (record.project !== undefined && record.project !== null) args.project = optionalText(record.project, "project", AGENT_LIMITS.project);
+  const provider = parseProvider(record.provider);
+  if (provider) args.provider = provider;
   if (record.model !== undefined) args.model = optionalText(record.model, "model", AGENT_LIMITS.model) || null;
   return args;
 }
@@ -563,40 +540,11 @@ export function parseReadAgentArgs(value: unknown): { agent: string } {
   return { agent: requiredText(record.agent ?? record.id ?? record.name, "agent", 100) };
 }
 
-export interface StartRoundArgs {
-  mode: RoundMode;
-  /** Ids o nombres, en orden. */
-  participants: string[];
-  question: string;
-}
-
-export function parseStartRoundArgs(value: unknown): StartRoundArgs {
-  const record = argsRecord(value);
-  if (!isRoundMode(record.mode)) throw new Error("`mode` debe ser «propuestas», «opiniones» o «acuerdo».");
-  const raw = typeof record.participants === "string" ? [record.participants] : record.participants;
-  if (!Array.isArray(raw) || raw.length === 0 || !raw.every((item) => typeof item === "string" && item.trim())) {
-    throw new Error("`participants` debe ser una lista con ids o nombres de agentes.");
-  }
-  const max = ROUND_LIMITS.participants[record.mode];
-  if (raw.length > max) {
-    throw new Error(
-      record.mode === "propuestas"
-        ? `Una ronda de propuestas es corta: hasta ${max} candidatos. Elige los que más calcen con el trabajo.`
-        : `Una ronda admite hasta ${max} agentes.`,
-    );
-  }
-  return {
-    mode: record.mode,
-    participants: raw.map((item) => (item as string).trim()),
-    question: requiredText(record.question, "question", ROUND_LIMITS.question),
-  };
-}
-
 export function parseUpdateBoardArgs(value: unknown): { text: string } {
   const record = argsRecord(value);
   if (typeof record.text !== "string") throw new Error("`text` debe ser el texto de la pizarra (vacío la borra).");
   const text = record.text.replace(/\r\n?/g, "\n").trim();
-  if (text.length > ROUND_LIMITS.board) throw new Error(`La pizarra admite hasta ${ROUND_LIMITS.board} caracteres: déjala en pocas líneas.`);
+  if (text.length > BOARD_MAX) throw new Error(`La pizarra admite hasta ${BOARD_MAX} caracteres: déjala en pocas líneas.`);
   return { text };
 }
 

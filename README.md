@@ -6,11 +6,13 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
 
 ## Qué hace
 
-- **Claude Bot, el bot principal**: va fijo arriba de la barra lateral. Le cuentas qué quieres lograr y arma el equipo de agentes que lo hará: crea cada agente con su nombre, rol e instrucciones, los agrupa en un proyecto, les crea un canal con el líder de encargado, le pasa el primer encargo al líder y te cuenta cómo va. También ajusta equipos que ya existen (rol, instrucciones, proyecto o modelo) y les crea el canal si no lo tienen. Antes de cada mensaje se entera de lo que cambiaste tú en agentes, secciones y canales (por ejemplo, si eliminaste un equipo), así no se queda con lo que recordaba. No elimina agentes ni cambia sus permisos, y no se puede eliminar.
-- **La sala de Claude Bot**: su chat junta a todos tus agentes. Claude Bot ve la ficha completa de cada uno (instrucciones, recuerdos, habilidades y en qué anda), su proveedor y cuánto plan le queda a cada cuenta, y lleva una pizarra del trabajo (objetivo, quién hace qué y el avance) que les llega a los agentes cuando les escribe.
-  - *Ronda corta* (siempre): si tiene claro a quién darle el trabajo, lo reparte directo; si no, les pregunta a 2 a 4 candidatos qué harían (o «Paso»). Solo trabajan los que hacen falta.
-  - *Que opinen todos* (el botón de las personas, al lado del +, o escribiendo `@todos`): todos opinan cómo encarar el trabajo y qué parte tomarían, Claude Bot propone un reparto y lo votan antes de empezar. Vale para ese mensaje; el siguiente vuelve a la ronda corta.
-  - Cada respuesta se ve en su chat con el nombre del agente, y a Claude Bot le llegan todas juntas en un solo mensaje. Si alguien no responde en 15 minutos, la ronda se cierra con lo que haya. «Detener» la cancela.
+- **Claude Bot, el bot principal**: va fijo arriba de la barra lateral. Le cuentas qué quieres lograr y él decide cómo se hace: usa los agentes que ya tienes o arma un equipo (cada agente con su nombre, rol, instrucciones y el proveedor que mejor hace su parte, agrupados en un proyecto y con su canal), le da a cada uno su parte y te cuenta cómo va. También ajusta equipos que ya existen (rol, instrucciones, proyecto, proveedor o modelo) y les crea el canal si no lo tienen. Antes de cada mensaje se entera de lo que cambiaste tú en agentes, secciones y canales (por ejemplo, si eliminaste un equipo), así no se queda con lo que recordaba. No elimina agentes ni cambia sus permisos, y no se puede eliminar.
+- **Un solo cerebro**: Claude Bot reparte y los agentes no debaten entre ellos.
+  - Ve la ficha completa de cada agente (instrucciones, recuerdos, habilidades y en qué anda), su proveedor y cuánto plan le queda a cada cuenta.
+  - Elige el proveedor de cada parte: imágenes con Codex (GPT), código y textos con Claude, y el QA con un proveedor distinto del que hizo el trabajo. Si un agente no puede hacer su parte con el suyo, se lo cambia.
+  - Lleva una pizarra del trabajo (objetivo, quién hace qué, en qué orden y dónde queda cada entrega) que les llega a los agentes cuando les escribe.
+  - Trabaja en cadena: cada entrega le vuelve sola, la revisa y se la pasa al siguiente, hasta 20 encargos seguidos por pedido.
+- **Imágenes**: las que genera un agente de Codex (con el generador de imágenes de tu plan de ChatGPT) se copian solas a la carpeta compartida, en `imagenes/<agente>/`. Se ven en miniatura en su chat y le llegan con su ruta a quien las pidió.
 - **Varios agentes**, cada uno con su proveedor (Claude, Codex, Gemini o Grok), modelo, nivel de esfuerzo y nivel de acceso.
 - **Canales**: una conversación con varios agentes a la vez. El encargado del canal responde lo que no nombra a nadie y reparte el trabajo; con `@Nombre` le hablas a un agente en particular y con `@todos` a todos. Se crean con clic derecho en la barra lateral → «Nuevo canal». Los eliminados quedan en «Canales eliminados», desde donde se restauran o se borran para siempre.
 - **Cola por agente**: si le escribes mientras trabaja, el mensaje espera su turno. Puedes quitar mensajes de la cola, pausarla o detener el turno en curso.
@@ -204,7 +206,7 @@ ClosedBot los busca en el PATH, en las carpetas de npm, en la app de Codex, en l
 - **Archivos**: en la ficha del agente se ven y descargan los archivos de su carpeta y de la compartida. «Subir archivo» los deja en `adjuntos/`. Los archivos se abren en una pestaña aparte, sin permisos sobre la app.
 - **Uso del plan**: se lee cada 10 minutos y tras cada turno, solo de las cuentas con sesión. Claude lo informa Claude Code (como `/usage`); Codex, su `app-server`; Grok, su CLI; y Gemini, Antigravity con «/usage» (desde la 1.4.1, sin pasar por el modelo). Codex y Grok se abren un momento para leerlo y se cierran si ningún agente los usa. Antigravity no se abre solo para esto: Gemini se actualiza cuando un agente lo está usando y, mientras, se ve la última lectura con su hora. Si una de esas lecturas cambia, esa cuenta desaparece del detalle y la app sigue igual.
 - **Adjuntos**: clip, pegar o arrastrar. Hasta 25 MB por archivo; se guardan en `adjuntos/` dentro de la carpeta del agente.
-- **Probar sin IA** (solo para desarrollo: Demo ya no aparece en la app): con el proveedor Demo, una línea `@Nombre: texto` envía `texto` a ese compañero, `/equipo` lista a los compañeros, `/lento` responde despacio (para probar «Detener»), `/pregunta ¿Texto? | A | B` muestra una tarjeta de opciones y `/rutina 09:00 Nombre` crea una rutina, `/recuerda [siempre] texto` guarda un recuerdo y `/busca texto` busca entre ellos. Si Claude Bot usa la demo, `/crear Nombre | Rol | Proyecto` crea un agente, `/ajustar Nombre | Rol nuevo` le cambia el rol, `/canal Nombre | Encargado | Ana, Beto` crea un canal, `/ficha Nombre` lee la ficha de un agente, `/pizarra texto` escribe la pizarra y `/ronda propuestas | Ana, Beto | consulta` abre una ronda (también `opiniones` y `acuerdo`, si elegiste «Que opinen todos»). En una ronda, la demo responde con una propuesta, una opinión o «De acuerdo» (o «Paso» si la consulta dice `/paso`).
+- **Probar sin IA** (solo para desarrollo: Demo ya no aparece en la app): con el proveedor Demo, una línea `@Nombre: texto` envía `texto` a ese compañero, `/equipo` lista a los compañeros, `/lento` responde despacio (para probar «Detener»), `/pregunta ¿Texto? | A | B` muestra una tarjeta de opciones y `/rutina 09:00 Nombre` crea una rutina, `/recuerda [siempre] texto` guarda un recuerdo y `/busca texto` busca entre ellos. Si Claude Bot usa la demo, `/crear Nombre | Rol | Proyecto` crea un agente, `/ajustar Nombre | Rol nuevo` le cambia el rol, `/canal Nombre | Encargado | Ana, Beto` crea un canal, `/proveedor Nombre | codex` le cambia el proveedor, `/ficha Nombre` lee la ficha de un agente y `/pizarra texto` escribe la pizarra. Con `/imagen descripción`, cualquier agente de la demo «genera» una imagen de prueba, como el generador de Codex.
 
 ## Configuración
 
@@ -258,7 +260,7 @@ npm ci
 npm test        # compila y corre las pruebas
 ```
 
-Las pruebas usan el proveedor Demo y simulaciones del SDK de Claude y del `codex app-server`, así que no gastan créditos. Cubren a Claude Bot (crear, proteger, sus herramientas para armar equipos, la nota con lo que cambiaste, las fichas, la pizarra y las rondas de su sala), el uso del plan de cada proveedor, la cola, los mensajes entre agentes, el límite de reenvíos, la interrupción, el reinicio, el login, la protección CSRF, los eventos en vivo, las preguntas con opciones, las rutinas y sus horarios, los adjuntos, el control del lanzador de escritorio, el inicio de sesión con la cuenta (con un Claude Code falso) y la mudanza de `~/.cuadrilla` a `~/.closedbot`.
+Las pruebas usan el proveedor Demo y simulaciones del SDK de Claude y del `codex app-server`, así que no gastan créditos. Cubren a Claude Bot (crear, proteger, sus herramientas para armar equipos, la nota con lo que cambiaste, las fichas, la pizarra, el cambio de proveedor y la cadena de encargos), las imágenes que genera Codex, el uso del plan de cada proveedor, la cola, los mensajes entre agentes, el límite de reenvíos, la interrupción, el reinicio, el login, la protección CSRF, los eventos en vivo, las preguntas con opciones, las rutinas y sus horarios, los adjuntos, el control del lanzador de escritorio, el inicio de sesión con la cuenta (con un Claude Code falso) y la mudanza de `~/.cuadrilla` a `~/.closedbot`.
 
 ```
 src/
@@ -270,7 +272,8 @@ src/
   instructions.ts      instrucciones de sistema de cada agente
   team.ts              herramientas del equipo: mensajes, preguntas, rutinas y las de Claude Bot
   team-state.ts        lo que sabe Claude Bot de agentes y canales, y la nota con lo que cambió
-  rounds.ts            la sala de Claude Bot: rondas de consulta y pizarra
+  board.ts             la pizarra de Claude Bot
+  images.ts            las imágenes que genera un agente, copiadas a la carpeta compartida
   schedule.ts          horarios de las rutinas
   version.ts           versión de la app
   providers/           Claude (Agent SDK), Codex (app-server), Grok y Gemini (ACP), Demo, detección y uso del plan
@@ -284,10 +287,11 @@ test/                  pruebas (node:test)
 
 ## Estado y límites conocidos
 
-- Versión 0.8.0. Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. Las voces de OpenBot se probaron con el modelo real en Windows. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
+- Versión 0.8.1. Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. Las voces de OpenBot se probaron con el modelo real en Windows. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
 - Un solo usuario y sin notificaciones push por ahora.
 - Claude Bot crea hasta 8 agentes por pedido y deja de crear cuando ya hay 60 agentes en total.
-- En la sala hay una ronda abierta a la vez y una de cada tipo por pedido: hasta 4 candidatos en la corta y 12 agentes cuando opinan todos. Los que tienen la cola en pausa no se consultan. Cada agente que responde gasta su propio plan: «Que opinen todos» con 6 agentes son unos 14 turnos solo para ponerse de acuerdo, contra 1 a 6 con la ronda corta.
+- Claude Bot hace hasta 20 encargos seguidos por pedido; cuando él escribe, la cuenta de reenvíos seguidos entre agentes (6) vuelve a empezar. Cada agente que trabaja gasta el plan de su proveedor, y las imágenes gastan el de ChatGPT más rápido.
+- Solo se copian a la carpeta compartida las imágenes de Codex: falta ver si Gemini (Antigravity) y Grok generan imágenes desde ClosedBot.
 - Las preguntas con opciones terminan el turno del agente: tu respuesta le llega como un mensaje nuevo.
 - Las rutinas solo corren con ClosedBot abierta (en Windows, basta con el icono de la bandeja).
 

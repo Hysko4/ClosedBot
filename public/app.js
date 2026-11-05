@@ -55,11 +55,7 @@ const state = {
   deletedChannels: [], // «Canales eliminados»
   currentChannelId: null, // canal abierto (entonces currentId es null)
   selection: null, // «Seleccionar varios»: ids de los agentes marcados, o null si no se está seleccionando
-  askAll: null, // «Que opinen todos» activado para el próximo mensaje a Claude Bot: su id, o null
 };
-
-/** Nombre de cada ronda de la sala de Claude Bot (como en el servidor). */
-const ROUND_LABELS = { propuestas: "Ronda de propuestas", opiniones: "Que opinen todos", acuerdo: "Acuerdo del reparto" };
 
 const elements = new Map(); // id de mensaje -> elemento del DOM (solo el agente abierto)
 const dirty = new Set();
@@ -478,7 +474,6 @@ async function route() {
   document.body.classList.toggle("in-channel", Boolean(channel));
   // En un canal no se adjuntan archivos ni hay cola propia: cada agente tiene la suya.
   $("#attach").hidden = Boolean(channel);
-  renderAskAll();
   $("#chat-empty").hidden = true;
   $("#conversation").hidden = false;
   renderSidebar();
@@ -695,7 +690,7 @@ const ICONS = {
   clip: ["M8.5 12.5l6-6a3 3 0 0 1 4.2 4.2l-7.4 7.4a5 5 0 0 1-7-7L11 4.4"],
   close: ["M7 7l10 10M17 7L7 17"],
   team: ["M9.5 4.8a3.2 3.2 0 1 0 0 6.4a3.2 3.2 0 1 0 0-6.4", "M3.8 19c.6-3.2 3-5 5.7-5s5.1 1.8 5.7 5", "M18.5 8v6M15.5 11h6"],
-  people: ["M9.5 4.8a3.2 3.2 0 1 0 0 6.4a3.2 3.2 0 1 0 0-6.4", "M3.8 19c.6-3.2 3-5 5.7-5s5.1 1.8 5.7 5", "M15.6 5.1a3.2 3.2 0 0 1 0 5.9", "M17.6 14.4c1.5.7 2.5 2.2 2.8 4.6"],
+  image: ["M4.5 6.5a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2z", "M4.5 16.5l4.3-4.3a1.5 1.5 0 0 1 2.1 0l5.6 5.6", "M13.8 14.6l1.7-1.7a1.5 1.5 0 0 1 2.1 0l1.9 1.9", "M15 7.8a1.3 1.3 0 1 0 0 2.6a1.3 1.3 0 1 0 0-2.6"],
   pencil: ["M5 19l1-4.2 9.6-9.6a2 2 0 0 1 2.8 0l.4.4a2 2 0 0 1 0 2.8L9.2 18z", "M13.8 7l3.2 3.2"],
   pin: ["M9 4.5h6l-1 5 3 3H7l3-3z", "M12 12.5V20"],
   folder: ["M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"],
@@ -784,9 +779,6 @@ function renderBotCard() {
   status.dataset.tone = "";
   if (main.state === "working") {
     status.textContent = "Trabajando…";
-    status.dataset.tone = "working";
-  } else if (main.round) {
-    status.textContent = "Esperando a tus agentes…";
     status.dataset.tone = "working";
   } else if (hasPendingDecision(main.id) || main.preview?.startsWith("Pregunta:")) {
     status.textContent = "Te hizo una pregunta";
@@ -1099,18 +1091,8 @@ function renderHeader() {
     avatar.dataset.key = avatarKey;
   }
   $("#chat-name").textContent = agent.name;
-  // Con una ronda abierta, Claude Bot espera a sus agentes.
-  const waiting = agent.round?.waiting ?? [];
   const label =
-    agent.state === "working"
-      ? "trabajando…"
-      : waiting.length
-        ? `esperando a ${waiting.length > 2 ? `${waiting.length} agentes` : joinNames(waiting.map((item) => item.name))}`
-        : agent.state === "paused"
-          ? "en pausa"
-          : agent.queued > 0
-            ? `${agent.queued} en cola`
-            : "";
+    agent.state === "working" ? "trabajando…" : agent.state === "paused" ? "en pausa" : agent.queued > 0 ? `${agent.queued} en cola` : "";
   const stateNode = $("#chat-state");
   stateNode.textContent = label;
   stateNode.hidden = !label;
@@ -1162,32 +1144,8 @@ function updatePlaceholder() {
   $("#composer-input").placeholder = hasPendingDecision(agent.id)
     ? "Escribe tu respuesta o habla de otra cosa"
     : agent.main
-      ? // En el teléfono el botón no muestra su nombre: lo dice el cuadro.
-        state.askAll === agent.id && window.matchMedia("(max-width: 560px)").matches
-        ? "Que opinen todos…"
-        : "Cuéntale qué necesitas…"
+      ? "Cuéntale qué necesitas…"
       : `Escribe a ${agent.name}…`;
-}
-
-/** «Que opinen todos»: solo en el chat de Claude Bot; vale para el próximo mensaje. */
-function renderAskAll() {
-  const button = $("#ask-all");
-  const agent = currentChannel() ? null : findAgent(state.currentId);
-  button.hidden = !agent?.main;
-  const active = Boolean(agent?.main) && state.askAll === agent.id;
-  button.setAttribute("aria-pressed", String(active));
-  button.title = active
-    ? "Que opinen todos (activado): cada agente opina y se ponen de acuerdo antes de repartir. Toca para volver a la ronda corta."
-    : "Que opinen todos: cada agente opina y se ponen de acuerdo antes de repartir";
-}
-
-function toggleAskAll() {
-  const agent = findAgent(state.currentId);
-  if (!agent?.main) return;
-  state.askAll = state.askAll === agent.id ? null : agent.id;
-  renderAskAll();
-  updatePlaceholder();
-  if (!coarsePointer) $("#composer-input").focus();
 }
 
 /** Ideas para empezar a hablar con Claude Bot: llenan el cuadro de texto para que las ajustes antes de enviar. */
@@ -1414,10 +1372,14 @@ function buildMessage(message) {
       node.append(details);
       return node;
     }
-    if (kind === "round-closed" || kind === "round-cancelled") {
-      const text = document.createElement("span");
-      text.textContent = message.text;
-      node.append(icon("people"), text);
+    // Una imagen que generó el agente (quedó en la carpeta compartida): se ve en miniatura.
+    if (kind === "image" && typeof message.payload.path === "string") {
+      node.classList.add("msg-image");
+      const line = document.createElement("div");
+      line.className = "msg-image-line";
+      line.append(icon("image"), "Generó una imagen");
+      if (message.channelId) line.prepend(whoLabel(message.agentId));
+      node.append(line, imageStrip(message.agentId, [message.payload.path]));
       return node;
     }
     if (kind === "agent-created" || kind === "agent-updated") {
@@ -1494,7 +1456,7 @@ function buildMessage(message) {
         const to = Array.isArray(message.payload?.to) ? message.payload.to.map(agentName) : [];
         meta.textContent = to.length ? `${message.payload?.decisionId ? "Respuesta para" : "Para"} ${to.join(", ")}` : "";
       } else {
-        meta.textContent = [message.payload?.mode === "todos" ? "Que opinen todos" : "", userStatus(message.status)].filter(Boolean).join(" · ");
+        meta.textContent = userStatus(message.status);
       }
       break;
     case "assistant":
@@ -1506,20 +1468,13 @@ function buildMessage(message) {
       if (message.channelId) label = agentName(message.agentId);
       break;
     case "teammate":
-      if (message.payload?.kind === "round-answer") {
-        // En la sala: lo que respondió cada agente, con su figura y su nombre.
-        node.className = "msg msg-assistant msg-member msg-round";
-        label = roundAnswerLabel(message);
-        renderMarkdown(message.text, bubble);
-        meta.textContent = message.payload.late ? "llegó tarde: la ronda ya se había cerrado" : "";
-        break;
-      }
       node.className = "msg msg-teammate";
-      label =
-        message.payload?.kind === "round-question"
-          ? `Consulta de ${agentName(message.fromAgentId)} · ${ROUND_LABELS[message.payload.mode] ?? "Ronda"}`
-          : `${message.replyTo ? "Respuesta de" : "Mensaje de"} ${agentName(message.fromAgentId)}`;
+      label = `${message.replyTo ? "Respuesta de" : "Mensaje de"} ${agentName(message.fromAgentId)}`;
       renderMarkdown(message.text, bubble);
+      // Las imágenes que generó quien escribe, en miniatura.
+      if (Array.isArray(message.payload?.images) && message.payload.images.length) {
+        bubble.append(imageStrip(message.agentId, message.payload.images.filter((path) => typeof path === "string")));
+      }
       meta.textContent = teammateStatus(message.status);
       break;
     case "notice":
@@ -1527,9 +1482,6 @@ function buildMessage(message) {
         // Un encargo entre agentes del canal: «Ana → Beto».
         node.className = "msg msg-handoff";
         label = `${agentName(message.agentId)} → ${message.toAgentIds.map(agentName).join(", ")}`;
-      } else if (message.payload?.kind === "round-started") {
-        node.className = "msg msg-outgoing";
-        label = `${ROUND_LABELS[message.payload.mode] ?? "Ronda"} · ${joinNames(message.toAgentIds.map(agentName), 12)}`;
       } else {
         node.className = "msg msg-outgoing";
         label = `${message.replyTo ? "Respuesta para" : "Enviado a"} ${message.toAgentIds.map(agentName).join(", ")}`;
@@ -1553,7 +1505,7 @@ function buildMessage(message) {
     const avatar = document.createElement("span");
     avatar.className = "msg-avatar";
     avatar.setAttribute("aria-hidden", "true");
-    const author = findAgent(message.role === "teammate" ? message.fromAgentId : message.agentId);
+    const author = findAgent(message.agentId);
     if (author) avatar.append(blobAvatar(author));
     node.append(avatar);
   }
@@ -1562,10 +1514,36 @@ function buildMessage(message) {
   return node;
 }
 
-/** «Ana · propuesta», «Ana · opinión» o «Ana · sobre el reparto». */
-function roundAnswerLabel(message) {
-  const what = { propuestas: "propuesta", opiniones: "opinión", acuerdo: "sobre el reparto" }[message.payload?.mode] ?? "respuesta";
-  return `${agentName(message.fromAgentId)} · ${what}`;
+/** Miniaturas de imágenes de la carpeta compartida: cada una se abre en grande en otra pestaña. */
+function imageStrip(agentId, paths) {
+  const strip = document.createElement("div");
+  strip.className = "image-strip";
+  for (const path of paths.slice(0, 12)) {
+    const name = path.split("/").pop() || "imagen";
+    const link = document.createElement("a");
+    link.className = "image-thumb";
+    link.href = libraryUrl(agentId, "shared", path, true);
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.title = name;
+    const image = document.createElement("img");
+    image.src = link.href;
+    image.alt = name;
+    image.loading = "lazy";
+    image.decoding = "async";
+    // Si el archivo ya no está (lo borraron o lo movieron), queda su nombre.
+    image.addEventListener(
+      "error",
+      () => {
+        link.classList.add("missing");
+        link.replaceChildren(name);
+      },
+      { once: true },
+    );
+    link.append(image);
+    strip.append(link);
+  }
+  return strip;
 }
 
 /** «Ana» al principio de una línea de actividad de un canal. */
@@ -1702,10 +1680,7 @@ function updateWorkingIndicator() {
     list.some((message) => message.role === "assistant" && message.status === "streaming" && (!agentId || message.agentId === agentId));
   // En un canal: los miembros que trabajan y todavía no escribieron nada.
   const thinking = channel ? channel.working.filter((agentId) => !streamingBy(agentId)) : [];
-  const agent = channel ? null : findAgent(state.currentId);
-  // En la sala de Claude Bot, mientras espera las respuestas de una ronda: quiénes faltan.
-  const waiting = agent?.state !== "working" ? (agent?.round?.waiting ?? []) : [];
-  const show = channel ? thinking.length > 0 : waiting.length > 0 || (agent?.state === "working" && !streamingBy(null));
+  const show = channel ? thinking.length > 0 : findAgent(state.currentId)?.state === "working" && !streamingBy(null);
   if (!show) {
     indicator?.remove();
     return;
@@ -1720,13 +1695,13 @@ function updateWorkingIndicator() {
     indicator.append(bubble);
   }
   let who = indicator.querySelector(".msg-label");
-  if (channel || waiting.length) {
+  if (channel) {
     if (!who) {
       who = document.createElement("div");
       who.className = "msg-label";
       indicator.querySelector(".bubble").prepend(who);
     }
-    who.textContent = channel ? thinking.map(agentName).join(", ") : joinNames(waiting.map((item) => item.name), 12);
+    who.textContent = thinking.map(agentName).join(", ");
   } else {
     who?.remove();
   }
@@ -1997,9 +1972,7 @@ function updateActionButton() {
   const button = $("#send");
   const channel = currentChannel();
   const agent = channel ? null : findAgent(state.currentId);
-  // Con una ronda abierta, «Detener» en Claude Bot la cancela.
-  const round = !channel && agent?.state !== "working" && Boolean(agent?.round);
-  const working = channel ? channel.working.length > 0 : agent?.state === "working" || round;
+  const working = channel ? channel.working.length > 0 : agent?.state === "working";
   const text = $("#composer-input").value.trim();
   const files = currentAttachments();
   const ready = files.some((file) => file.status === "ready");
@@ -2014,7 +1987,7 @@ function updateActionButton() {
   const label = {
     send: "Enviar",
     voice: voiceActive ? "Terminar y enviar" : "Hablar y enviar al terminar",
-    stop: channel ? "Detener a los agentes del canal" : round ? "Detener la ronda" : `Detener a ${agent?.name ?? "el agente"}`,
+    stop: channel ? "Detener a los agentes del canal" : `Detener a ${agent?.name ?? "el agente"}`,
   }[mode];
   button.setAttribute("aria-label", label);
   button.title = label;
@@ -2066,20 +2039,8 @@ async function sendMessage() {
   state.keepUnread.delete(agentId);
   const button = $("#send");
   button.disabled = true;
-  // «Que opinen todos» vale para este mensaje; después vuelve la ronda corta.
-  const askAll = state.askAll === agentId && Boolean(findAgent(agentId)?.main);
   try {
-    const result = await api(`/api/agents/${encodeURIComponent(agentId)}/messages`, {
-      method: "POST",
-      body: askAll ? { text, mode: "todos" } : { text },
-    });
-    if (askAll && state.askAll === agentId) {
-      state.askAll = null;
-      if (state.currentId === agentId) {
-        renderAskAll();
-        updatePlaceholder();
-      }
-    }
+    const result = await api(`/api/agents/${encodeURIComponent(agentId)}/messages`, { method: "POST", body: { text } });
     // Solo se vacía si no escribiste otra cosa mientras se enviaba.
     if (state.currentId === agentId && input.value === original) {
       input.value = "";
@@ -6951,7 +6912,6 @@ function bindUi() {
     }
   });
   $("#attach").addEventListener("click", () => $("#file-input").click());
-  $("#ask-all").addEventListener("click", toggleAskAll);
   $("#file-input").addEventListener("change", (event) => {
     const files = [...event.target.files];
     event.target.value = "";

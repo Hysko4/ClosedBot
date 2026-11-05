@@ -1958,9 +1958,59 @@ svg {
   overflow-wrap: anywhere;
 }
 
-/* La respuesta de un agente en una ronda (en la sala de Claude Bot). */
-.msg-round .bubble {
-  border: 1px solid #23304a;
+/* Las imágenes que genera un agente (quedan en la carpeta compartida), en miniatura. */
+.msg-image {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.msg-image-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.image-strip {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.msg-teammate .image-strip {
+  justify-content: flex-start;
+  margin-top: 10px;
+}
+
+.image-thumb {
+  display: block;
+  width: 168px;
+  max-width: 100%;
+  aspect-ratio: 1;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #161616;
+  border: 1px solid #2a2a2a;
+}
+
+.image-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.image-thumb.missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+  text-align: center;
 }
 
 .msg[data-status="interrupted"] .bubble,
@@ -2384,49 +2434,6 @@ svg {
   background: var(--accent-soft);
   color: var(--accent-text);
   animation: ring 1.4s ease-out infinite;
-}
-
-/* «Que opinen todos» (solo en el chat de Claude Bot): activado, se ve su nombre. */
-.composer-chip {
-  height: 38px;
-  min-width: 38px;
-  border-radius: 19px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 0 9px;
-  color: #a7a7a7;
-  font-size: 13.5px;
-  font-weight: 600;
-  white-space: nowrap;
-  flex: none;
-}
-
-.composer-chip:hover {
-  background: var(--raised);
-  color: #e0e0e0;
-}
-
-.composer-chip[aria-pressed="true"] {
-  background: var(--accent-soft);
-  color: var(--accent-text);
-}
-
-.composer-chip .chip-label {
-  display: none;
-}
-
-.composer-chip[aria-pressed="true"] .chip-label {
-  display: inline;
-  padding-right: 3px;
-}
-
-/* En el teléfono basta el color (y el texto del cuadro dice que opinarán todos). */
-@media (max-width: 560px) {
-  .composer-chip[aria-pressed="true"] .chip-label {
-    display: none;
-  }
 }
 
 .action-button {

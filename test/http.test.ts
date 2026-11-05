@@ -265,11 +265,6 @@ test("HTTP: crear agente, conversar y recibir eventos en vivo", async () => {
     assert.deepEqual(roles, ["user", "assistant"]);
     assert.equal(history.json?.hasMore, false);
 
-    // El modo de un pedido a Claude Bot: «corta» o «todos»; otro, no.
-    const badMode = await s.call(`/api/agents/${agent.id}/messages`, { method: "POST", body: { text: "Hola", mode: "debate" } });
-    assert.equal(badMode.status, 400);
-    assert.match(String(badMode.json?.error), /Modo desconocido/);
-
     const models = await s.call("/api/models?provider=demo");
     assert.equal(models.json?.models[0].model, "demo");
     const queue = await s.call(`/api/agents/${agent.id}/queue`);

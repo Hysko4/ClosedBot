@@ -305,8 +305,7 @@ export function createApp(options: AppOptions): App {
     const body = await readJson(ctx.req);
     if (typeof body.text !== "string") throw new HttpError(400, "Falta el texto del mensaje.");
     ctx.res.statusCode = 202;
-    // A Claude Bot: «corta» (por defecto) o «todos» (que opinen todos los agentes antes de repartir).
-    return service.sendUserMessage(param(ctx, 0), body.text, { mode: body.mode });
+    return service.sendUserMessage(param(ctx, 0), body.text);
   });
 
   route("POST", "/api/agents/:id/read", (ctx) => ({ agent: service.markRead(param(ctx, 0)) }));
