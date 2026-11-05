@@ -30,6 +30,8 @@ if exist "%DEST%\.git" (
   echo   [1/3] Actualizando el codigo en %DEST% ...
   "%GIT%" -C "%DEST%" fetch origin %RAMA%
   if errorlevel 1 goto fallo
+  call :guardar_cambios
+  if errorlevel 1 goto fallo
   "%GIT%" -C "%DEST%" checkout -q %RAMA%
   if errorlevel 1 goto fallo
   "%GIT%" -C "%DEST%" merge -q --ff-only origin/%RAMA%
@@ -110,3 +112,14 @@ echo.
 echo   No se pudo terminar. Avisale a Claude con lo que dice arriba.
 pause
 exit /b 1
+
+:guardar_cambios
+rem Si algo cambio archivos de la app en esta carpeta, se guardan aparte con git stash: asi no traban
+rem la actualizacion y no se pierden.
+"%GIT%" -C "%DEST%" diff --quiet HEAD --
+if not errorlevel 1 exit /b 0
+echo   Hay archivos de la app cambiados en esta carpeta: los guardo aparte antes de actualizar.
+"%GIT%" -C "%DEST%" -c user.name=ClosedBot -c user.email=closedbot@localhost stash push -q -m "Instalar ClosedBot: cambios locales guardados"
+if errorlevel 1 exit /b 1
+echo   Quedaron guardados aparte: Claude puede recuperarlos si hacen falta.
+exit /b 0
