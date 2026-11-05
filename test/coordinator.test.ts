@@ -363,6 +363,8 @@ test("La guía de Claude Bot: un solo cerebro que elige el proveedor de cada par
     voice: { name: "", rate: 1, lang: "auto", autoRead: false },
     notify: "" as const,
     skillsOff: [],
+    appearance: "",
+    character: null,
     readAt: 0,
     lastAt: 0,
     createdAt: 0,

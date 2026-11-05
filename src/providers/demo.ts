@@ -49,9 +49,10 @@ export interface DemoClientOptions {
  *   - `/pregunta [¿Texto? | Opción A | Opción B]` hace una pregunta con opciones al usuario;
  *   - `/rutina HH:MM Nombre` o `/rutina cada N Nombre` crea una rutina; `/rutinas` las lista;
  *   - `/imagen descripción` «genera» una imagen (como el generador de imágenes de Codex);
- *   - solo para el bot principal: `/crear Nombre | Rol | Proyecto` crea un agente,
- *     `/ajustar Nombre | Rol nuevo` le cambia el rol, `/proveedor Nombre | codex` le cambia el
- *     proveedor, `/ficha Nombre` lee su ficha y `/pizarra texto` escribe la pizarra.
+ *   - solo para el bot principal: `/crear Nombre | Rol | Proyecto | Aspecto` crea un agente (el
+ *     aspecto es opcional), `/ajustar Nombre | Rol nuevo | Aspecto nuevo` le cambia el rol o el aspecto,
+ *     `/proveedor Nombre | codex` le cambia el proveedor, `/ficha Nombre` lee su ficha y
+ *     `/pizarra texto` escribe la pizarra.
  */
 export class DemoAgentClient extends EventEmitter<ClientEvents> implements AgentClient {
   readonly provider: ProviderId = "demo";
@@ -191,12 +192,13 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
         }
       }
       for (const match of body.matchAll(/^\/crear\s+(.+)$/gm)) {
-        const [name = "", role = "", project = ""] = (match[1] ?? "").split("|").map((part) => part.trim());
+        const [name = "", role = "", project = "", appearance = ""] = (match[1] ?? "").split("|").map((part) => part.trim());
         const args = {
           name,
           role: role || "Agente de prueba",
           instructions: `Agente de prueba creado desde la demo con el rol «${role || "Agente de prueba"}».`,
           project: project || "Demo",
+          ...(appearance ? { appearance } : {}),
         };
         try {
           await this.#callTool(threadId, state.turnId, TOOL_CREATE_AGENT, args);
@@ -206,10 +208,10 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
         }
       }
       for (const match of body.matchAll(/^\/ajustar\s+(.+)$/gm)) {
-        const [agent = "", role = ""] = (match[1] ?? "").split("|").map((part) => part.trim());
+        const [agent = "", role = "", appearance = ""] = (match[1] ?? "").split("|").map((part) => part.trim());
         try {
-          await this.#callTool(threadId, state.turnId, TOOL_UPDATE_AGENT, { agent, role });
-          notes.push(`Le cambié el rol a ${agent}.`);
+          await this.#callTool(threadId, state.turnId, TOOL_UPDATE_AGENT, { agent, ...(role || !appearance ? { role } : {}), ...(appearance ? { appearance } : {}) });
+          notes.push(role || !appearance ? `Le cambié el rol a ${agent}.` : `Le cambié el aspecto a ${agent}.`);
         } catch (error) {
           notes.push(`No pude ajustar a ${agent}: ${errorMessage(error)}`);
         }

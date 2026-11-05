@@ -1,5 +1,7 @@
 // ClosedBot — interfaz web (sin dependencias ni paso de compilación).
 
+import { createOffice } from "./office.js";
+
 const $ = (selector) => document.querySelector(selector);
 const SVG_NS = "http://www.w3.org/2000/svg";
 const LETTERS = "ABCD";
@@ -70,6 +72,11 @@ let recognition = null;
 let dictation = null; // { engine: "browser" | "local", mode: "dictate" | "voice", agentId, cancelled, … }
 /** Código de inicio de sesión que se está escribiendo, por proveedor (sobrevive a los repintados). */
 const signInCodes = new Map();
+/** La Oficina: los agentes trabajando en un dibujo (#/oficina). */
+let office = null;
+/** PixelLab: { configured, missing, drawing } (los personajes de la Oficina). */
+let pixelLab = null;
+let lastCharacters = "";
 
 const coarsePointer = window.matchMedia("(pointer: coarse)").matches;
 
@@ -410,12 +417,23 @@ function handleEvent(event) {
     default:
       break;
   }
+  office?.handle(event);
+  if (event.type === "agents") {
+    // Cambió el personaje de alguien (se empezó a dibujar, quedó listo o falló): se actualiza lo de PixelLab.
+    const characters = state.agents.map((agent) => `${agent.id}:${agent.character?.status ?? ""}:${agent.character?.version ?? 0}`).join(",");
+    if (characters !== lastCharacters) {
+      lastCharacters = characters;
+      if (office?.visible || $("#settings-dialog").open) void refreshPixelLab();
+      if ($("#create-dialog").open && createState.agentId) renderCreateCharacter(findAgent(createState.agentId));
+    }
+  }
 }
 
 // ---------- navegación ----------
 
 /** Qué está abierto según la dirección: #/a/<agente> o #/c/<canal>. */
 function currentRoute() {
+  if (/^#\/oficina\/?$/.test(location.hash)) return { kind: "office" };
   const agent = location.hash.match(/^#\/a\/([^/?#]+)/);
   if (agent) return { kind: "agent", id: decodeURIComponent(agent[1]) };
   const channel = location.hash.match(/^#\/c\/([^/?#]+)/);
@@ -443,6 +461,28 @@ async function route() {
   const channel = target?.kind === "channel" ? findChannel(target.id) : null;
   closeContextMenu();
   hideMentionMenu();
+  const inOffice = target?.kind === "office";
+  document.body.classList.toggle("in-office", inOffice);
+  $("#open-office").setAttribute("aria-current", inOffice ? "page" : "false");
+  if (inOffice) {
+    if (convKey()) {
+      stopDictation({ cancel: true });
+      stopSpeaking();
+    }
+    closeDialog($("#details-dialog"));
+    state.currentId = null;
+    state.currentChannelId = null;
+    document.body.classList.remove("in-channel");
+    elements.clear();
+    document.body.classList.add("show-chat");
+    $("#conversation").hidden = true;
+    $("#chat-empty").hidden = true;
+    renderSidebar();
+    office.show();
+    void refreshPixelLab();
+    return;
+  }
+  office.hide();
   if (!agent && !channel) {
     if (convKey()) {
       stopDictation({ cancel: true });
@@ -4331,10 +4371,145 @@ function openCreateDialog({ project = "", agentId = null } = {}) {
   $("#create-save").textContent = agent ? "Guardar" : "Crear";
   const name = $("#create-name");
   name.value = agent?.name ?? "";
+  $("#create-look").value = agent?.appearance ?? "";
   $("#create-error").textContent = "";
+  renderCreateCharacter(agent);
   renderCreatePickers();
   openDialog($("#create-dialog"));
   if (!coarsePointer) name.focus();
+}
+
+/** En «Apariencia» de un agente: su personaje de PixelLab y, si PixelLab está conectado, volver a dibujarlo. */
+function renderCreateCharacter(agent) {
+  const row = $("#create-character");
+  const character = agent?.character ?? null;
+  if (!agent || !pixelLab?.configured) {
+    row.hidden = true;
+    return;
+  }
+  row.hidden = false;
+  const label = {
+    drawing: "PixelLab está dibujando su personaje…",
+    ready: "Su personaje de PixelLab está listo.",
+    failed: `No se pudo dibujar: ${character?.error ?? "error de PixelLab"}`,
+  }[character?.status] ?? "Aún no tiene personaje de PixelLab.";
+  $("#create-character-text").textContent = label;
+  const redo = $("#create-character-redo");
+  redo.hidden = character?.status === "drawing";
+  redo.textContent = character?.status === "ready" ? "Dibujar de nuevo" : "Dibujarlo";
+}
+
+async function redrawCharacter() {
+  const agentId = createState.agentId;
+  if (!agentId) return;
+  const button = $("#create-character-redo");
+  button.disabled = true;
+  try {
+    await api(`/api/agents/${encodeURIComponent(agentId)}/character`, { method: "POST" });
+    $("#create-character-text").textContent = "PixelLab está dibujando su personaje…";
+    button.hidden = true;
+  } catch (problem) {
+    $("#create-error").textContent = problem.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// ---------- la Oficina y PixelLab ----------
+
+function openOffice() {
+  closeContextMenu();
+  if (location.hash === "#/oficina") return void route();
+  state.navigatedInApp = true;
+  location.hash = "#/oficina";
+}
+
+async function refreshPixelLab() {
+  try {
+    pixelLab = (await api("/api/pixellab")).pixelLab;
+  } catch {
+    return;
+  }
+  renderPixelLab();
+}
+
+/** Ajustes («Personajes de la Oficina») y el botón de la Oficina para dibujar los que faltan. */
+function renderPixelLab() {
+  const configured = Boolean(pixelLab?.configured);
+  $("#pixellab-connect").hidden = configured;
+  $("#pixellab-connected").hidden = !configured;
+  const draw = $("#office-draw");
+  const status = $("#office-status");
+  const drawing = pixelLab?.drawing?.length ?? 0;
+  const missing = pixelLab?.missing ?? 0;
+  if (!pixelLab) draw.hidden = true;
+  else if (!configured) {
+    draw.hidden = false;
+    draw.textContent = "Conectar PixelLab";
+  } else {
+    draw.hidden = drawing > 0 || missing === 0;
+    draw.textContent = missing === 1 ? "Dibujar el personaje que falta" : `Dibujar ${missing} personajes`;
+  }
+  if (drawing) {
+    const names = pixelLab.drawing.map((id) => findAgent(id)?.name).filter(Boolean);
+    status.textContent = names.length === 1 ? `PixelLab está dibujando a ${names[0]}…` : `PixelLab está dibujando ${drawing} personajes…`;
+  } else status.textContent = "";
+}
+
+async function connectPixelLab(event) {
+  event.preventDefault();
+  const input = $("#pixellab-token");
+  const error = $("#pixellab-error");
+  const button = $("#pixellab-save");
+  error.textContent = "";
+  if (!input.value.trim()) {
+    error.textContent = "Pega el token de tu cuenta de PixelLab.";
+    input.focus();
+    return;
+  }
+  button.disabled = true;
+  button.textContent = "Comprobando…";
+  try {
+    pixelLab = (await api("/api/pixellab", { method: "PUT", body: { token: input.value } })).pixelLab;
+    input.value = "";
+    renderPixelLab();
+    showToast("PixelLab quedó conectado.", "info");
+  } catch (problem) {
+    error.textContent = problem.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Conectar";
+  }
+}
+
+async function disconnectPixelLab() {
+  const ok = await confirmAction("¿Quitar PixelLab?", "Los personajes que ya tienen se quedan; los agentes nuevos usarán el que dibuja ClosedBot.", "Quitar");
+  if (!ok) return;
+  try {
+    pixelLab = (await api("/api/pixellab", { method: "DELETE" })).pixelLab;
+    renderPixelLab();
+  } catch (problem) {
+    showToast(problem.message, "error");
+  }
+}
+
+async function drawMissingCharacters() {
+  if (!pixelLab?.configured) {
+    openSettings();
+    $("#pixellab-token").focus();
+    return;
+  }
+  const button = $("#office-draw");
+  button.disabled = true;
+  try {
+    const result = await api("/api/office/characters", { method: "POST", body: {} });
+    pixelLab = result.pixelLab;
+    renderPixelLab();
+  } catch (problem) {
+    showToast(problem.message, "error");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderCreatePickers(focusKind = null) {
@@ -4394,16 +4569,20 @@ async function saveCreate(event) {
     return;
   }
   const avatar = customAvatar(createState.shape, createState.color);
+  const appearance = $("#create-look").value.trim();
   const button = $("#create-save");
   button.disabled = true;
   try {
     if (createState.agentId) {
-      const result = await api(`/api/agents/${encodeURIComponent(createState.agentId)}`, { method: "PATCH", body: { name, avatar } });
+      const before = findAgent(createState.agentId);
+      // Un aspecto nuevo se vuelve a dibujar con PixelLab: solo se envía si cambió.
+      const body = { name, avatar, ...(appearance !== (before?.appearance ?? "") ? { appearance } : {}) };
+      const result = await api(`/api/agents/${encodeURIComponent(createState.agentId)}`, { method: "PATCH", body });
       closeDialog($("#create-dialog"));
       replaceAgent(result.agent);
     } else {
       // greet: como lo creaste tú, se presenta con un primer mensaje (los que arma Claude Bot no).
-      const body = { name, avatar, project: createState.project, provider: preferredProvider(), greet: true };
+      const body = { name, avatar, appearance, project: createState.project, provider: preferredProvider(), greet: true };
       const result = await api("/api/agents", { method: "POST", body });
       closeDialog($("#create-dialog"));
       if (!findAgent(result.agent.id)) state.agents.push(result.agent);
@@ -4685,6 +4864,9 @@ function openSettings({ focusName = false } = {}) {
   }
   renderPermissions();
   renderTtsSettings();
+  $("#pixellab-error").textContent = "";
+  renderPixelLab();
+  void refreshPixelLab();
   openDialog($("#settings-dialog"));
   if (focusName) names.elements.userName.focus();
 }
@@ -6717,6 +6899,23 @@ function bindUi() {
   $("#open-settings").addEventListener("click", () => openSettings());
   $("#open-profile").addEventListener("click", () => openSettings({ focusName: true }));
   $("#open-routines").addEventListener("click", () => openRoutines());
+  $("#open-office").addEventListener("click", openOffice);
+  $("#office-back").addEventListener("click", goBack);
+  $("#office-draw").addEventListener("click", () => void drawMissingCharacters());
+  $("#pixellab-form").addEventListener("submit", connectPixelLab);
+  $("#pixellab-remove").addEventListener("click", () => void disconnectPixelLab());
+  $("#create-character-redo").addEventListener("click", () => void redrawCharacter());
+  office = createOffice({
+    root: $("#office"),
+    agents: () => state.agents,
+    channels: () => state.channels,
+    colorOf: (agent) => (agent.main ? "#d97757" : avatarParts(agent)[1]),
+    openAgent: (id) => void navigate(id),
+    openChannel: (id) => void navigateChannel(id),
+    imageUrl: (agentId, path) => libraryUrl(agentId, "shared", path, true),
+    renderMarkdown: (text, target) => renderMarkdown(text, target),
+    api,
+  });
   $("#settings-close").addEventListener("click", () => closeDialog($("#settings-dialog")));
   $("#names-form").addEventListener("submit", saveNames);
   $("#refresh-providers").addEventListener("click", refreshProviders);

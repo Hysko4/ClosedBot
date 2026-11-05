@@ -161,9 +161,12 @@ async function main(): Promise<void> {
         env: envWithout(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "XAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"]),
         programsDir,
       }),
+    // La Oficina: personajes de PixelLab y el arte en alta resolución.
+    officeDir: join(config.dataDir, "oficina"),
     log,
   });
   await service.start();
+  service.prefetchOfficeArt();
 
   // Dictado local: el modelo se descarga en <datos>/voz la primera vez que alguien lo pide.
   const speech = new SpeechEngine({ dir: join(config.dataDir, "voz"), log });

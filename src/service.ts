@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import {
   cleanInstructions,
   composeSkill,
@@ -38,6 +38,7 @@ import {
 import { type SavedImage, saveGeneratedImage, withImages } from "./images.js";
 import { buildInstructions, composeDeliveryInput, composeGreeting, GREETING_MARKER } from "./instructions.js";
 import { cleanMemory, describeMemories, MEMORY_LIMITS, searchMemories } from "./memories.js";
+import { APPEARANCE_MAX, type CharacterManifest, type CharacterState, OfficeStudio, type OfficeStudioOptions, PixelLabError, type PixelLabOptions } from "./office.js";
 import { type AccessLevel, type AgentClient, isProviderId, PROVIDER_IDS, type ProviderId } from "./providers/client.js";
 import {
   type AppServerNotification,
@@ -305,7 +306,35 @@ export type ServiceEvent =
   | { type: "notice"; level: "error" | "info"; message: string; agentId?: string }
   | { type: "memories"; agentId: string; memories: MemoryView[] }
   | { type: "skills"; agentId: string; skills: SkillView[] }
+  /** Terminó un turno (la Oficina muestra «!» si falló). */
+  | { type: "turn"; agentId: string; status: "completed" | "failed" | "interrupted" }
+  /** Llegó el arte de la Oficina en alta resolución. */
+  | { type: "office"; art: OfficeArtView }
   | AlertEvent;
+
+export interface OfficeArtView {
+  hd: boolean;
+  version: number;
+}
+
+/** Lo que necesita la Oficina al abrirse; lo demás llega con los eventos. */
+export interface OfficeSnapshot {
+  board: string;
+  images: Array<{ agentId: string; channelId: string | null; path: string; at: number }>;
+  activity: Record<string, { text: string; at: number }>;
+  asking: string[];
+  failed: string[];
+  art: OfficeArtView;
+  pixelLab: PixelLabStatus;
+}
+
+export interface PixelLabStatus {
+  configured: boolean;
+  /** Agentes sin personaje de PixelLab (ni en camino). */
+  missing: number;
+  /** A quién está dibujando ahora o tiene en cola. */
+  drawing: string[];
+}
 
 export interface ServiceOptions {
   store: Store;
@@ -326,8 +355,17 @@ export interface ServiceOptions {
   mainAgent?: boolean;
   /** Encargos seguidos que puede hacer Claude Bot en un pedido (MAIN_MAX_STEPS por defecto). */
   mainMaxSteps?: number;
+  /** Carpeta de la Oficina (personajes y arte); por defecto «oficina» junto a la carpeta compartida. */
+  officeDir?: string;
+  /** Cómo hablar con PixelLab (las pruebas usan un servidor falso). */
+  pixelLab?: PixelLabOptions;
+  /** De dónde y cómo bajar el arte en alta resolución (las pruebas usan uno falso). */
+  officeArt?: OfficeStudioOptions["art"];
   log?: (level: "info" | "warn" | "error", message: string) => void;
 }
+
+/** Donde se guarda el token de PixelLab: aparte de los ajustes, que van a la interfaz. */
+export const PIXELLAB_TOKEN_META = "pixellab_token";
 
 export interface AgentInput {
   name: string;
@@ -347,6 +385,8 @@ export interface AgentInput {
   voice?: Partial<VoiceSettings>;
   /** «Avisarme»: all, needs o none; null vuelve a lo de siempre. */
   notify?: NotifyLevel | null;
+  /** Cómo se ve su personaje de la Oficina. */
+  appearance?: string;
 }
 
 export interface RoutineInput {
@@ -434,6 +474,10 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   #usageReadAt = 0;
   /** Procesos abiertos solo para leer el uso: se cierran al terminar si ningún agente los empezó a usar. */
   readonly #usageOnly = new Set<ProviderId>();
+  /** Personajes de PixelLab y arte de la Oficina. */
+  readonly #studio: OfficeStudio;
+  /** Agentes cuyo último turno falló (para el «!» de la Oficina). */
+  readonly #failedTurns = new Set<string>();
 
   constructor(options: ServiceOptions) {
     super();
@@ -446,6 +490,17 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#installs = new SignInFlows({ action: "install", timeoutMs: options.installTimeoutMs ?? INSTALL_TIMEOUT_MS });
     this.#installs.on("change", () => this.#emit({ type: "providers", providers: this.providers() }));
     this.#installs.on("settled", (provider, result) => void this.#afterInstall(provider as InstallProvider, result));
+    this.#studio = new OfficeStudio({
+      dir: options.officeDir ?? join(dirname(resolve(options.sharedDir)), "oficina"),
+      token: () => this.#pixelLabToken(),
+      ...(options.pixelLab ? { pixelLab: options.pixelLab } : {}),
+      ...(options.officeArt ? { art: options.officeArt } : {}),
+      log: (level, message) => this.#log(level, message),
+    });
+    this.#studio.on("character", (agentId: string, change: { status: CharacterState["status"]; error: string | null; version?: number }) =>
+      this.#characterChanged(agentId, change),
+    );
+    this.#studio.on("art", () => this.#emit({ type: "office", art: this.#officeArt() }));
   }
 
   // ---------- ciclo de vida ----------
@@ -455,6 +510,12 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     mkdirSync(this.#options.sharedDir, { recursive: true });
     this.#ensureMainAgent();
     this.#migrateInstructionFiles();
+    // Un personaje que se estaba dibujando cuando se cerró la app no sigue solo (no se gasta de nuevo sin pedirlo).
+    for (const agent of this.#store.listAgents()) {
+      if (agent.character?.status === "drawing") {
+        this.#store.updateAgent(agent.id, { character: { ...agent.character, status: "failed", error: "Se interrumpió al cerrar ClosedBot.", updatedAt: Date.now() } });
+      }
+    }
     for (const delivery of this.#store.reconcileUnfinished()) {
       this.#notice(delivery.agentId, "La app se reinició mientras este agente trabajaba; ese turno quedó interrumpido.");
     }
@@ -721,6 +782,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       access: input.access === "total" ? "total" : "carpeta",
       workspace,
       project: cleanProject(input.project),
+      appearance: cleanText(input.appearance, APPEARANCE_MAX),
       ...(input.avatar === undefined ? {} : { avatar: cleanAvatar(input.avatar) }),
     });
     let created = agent;
@@ -732,6 +794,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         ...(input.notify === undefined ? {} : { notify: cleanNotify(input.notify) }),
       });
     }
+    // Con PixelLab conectado, cada agente nuevo recibe su personaje.
+    if (this.#requestCharacter(created)) created = this.#store.getAgent(created.id) ?? created;
     this.#emitAgents();
     if (options.greet) this.#greet(created);
     return this.#view(created);
@@ -759,6 +823,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (patch.pinned !== undefined) next.pinned = patch.pinned === true;
     if (patch.hidden !== undefined) next.hidden = patch.hidden === true;
     if (patch.voice !== undefined) next.voice = toVoice({ ...agent.voice, ...patch.voice });
+    if (patch.appearance !== undefined) next.appearance = cleanText(patch.appearance, APPEARANCE_MAX);
     if (patch.provider !== undefined) {
       const provider = validProvider(patch.provider);
       if (provider !== agent.provider) {
@@ -771,7 +836,11 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     }
     // El archivo es lo que lee el agente (y lo que él mismo edita): se escribe antes de guardarlo en la base.
     if (next.instructions !== undefined) writeInstructions(agent.workspace, next.instructions);
-    const updated = this.#store.updateAgent(id, next);
+    let updated = this.#store.updateAgent(id, next);
+    // Otro aspecto: PixelLab lo vuelve a dibujar.
+    if (next.appearance !== undefined && next.appearance !== agent.appearance && this.#requestCharacter(updated)) {
+      updated = this.#store.getAgent(id) ?? updated;
+    }
     if (agent.threadId) this.#loadedThreads.delete(`${agent.provider}:${agent.threadId}`);
     if (next.provider) {
       void this.#closeThread(agent);
@@ -800,6 +869,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       await this.#closeThread(this.#store.getAgent(id) ?? agent);
       const touchedChannels = this.#leaveChannels(id);
       this.#store.deleteAgent(id);
+      this.#studio.forget(id);
+      this.#failedTurns.delete(id);
       this.#emitAgents();
       if (touchedChannels) this.#emitChannels();
       // Sus rutinas se borran con él (ON DELETE CASCADE).
@@ -2250,6 +2321,9 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       const message = this.#store.getMessage(messageId);
       if (message?.status === "streaming") this.#updateMessageStatus(agentId, messageId, terminal);
     }
+    if (terminal === "failed") this.#failedTurns.add(agentId);
+    else this.#failedTurns.delete(agentId);
+    this.#emit({ type: "turn", agentId, status: terminal });
     const channel = state.channelId ? this.#store.getChannel(state.channelId) : null;
     const speaker = channel ? `${this.#store.getAgent(agentId)?.name ?? "Un agente"}: ` : "";
     let preview: string | null = null;
@@ -2297,6 +2371,120 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       }
     }
     this.#scheduleDrain(agentId);
+  }
+
+  // ---------- la Oficina ----------
+
+  /** Lo que la Oficina necesita al abrirse; de paso, baja el arte en alta resolución si falta. */
+  officeSnapshot(): OfficeSnapshot {
+    this.#studio.ensureArt();
+    const activity: Record<string, { text: string; at: number }> = {};
+    for (const item of this.#store.latestActivities(Date.now() - 30 * 60_000)) activity[item.agentId] = { text: item.text, at: item.at };
+    return {
+      board: this.#board(),
+      images: this.#store.recentImages(40),
+      activity,
+      asking: this.#store.agentsAsking(),
+      failed: [...this.#failedTurns],
+      art: this.#officeArt(),
+      pixelLab: this.pixelLabStatus(),
+    };
+  }
+
+  /** Baja el arte en alta resolución en segundo plano al arrancar, sin esperar a que se abra la Oficina. */
+  prefetchOfficeArt(): void {
+    this.#studio.ensureArt();
+  }
+
+  pixelLabStatus(): PixelLabStatus {
+    const agents = this.#store.listAgents();
+    return {
+      configured: Boolean(this.#pixelLabToken()),
+      missing: agents.filter((agent) => agent.character?.status !== "ready" && !this.#studio.pending(agent.id)).length,
+      drawing: agents.filter((agent) => this.#studio.pending(agent.id)).map((agent) => agent.id),
+    };
+  }
+
+  /** Guarda el token de PixelLab (antes comprueba que PixelLab lo acepte) o, con null, lo quita. */
+  async setPixelLabToken(token: string | null): Promise<PixelLabStatus> {
+    const value = token?.trim() ?? "";
+    if (!value) {
+      this.#store.setMeta(PIXELLAB_TOKEN_META, "");
+      return this.pixelLabStatus();
+    }
+    if (value.length > 400 || /\s/.test(value)) throw new ServiceError("Eso no parece un token de PixelLab.", 400);
+    try {
+      await this.#studio.client(value)?.balance();
+    } catch (error) {
+      if (error instanceof PixelLabError && (error.status === 401 || error.status === 403)) {
+        throw new ServiceError("PixelLab no aceptó ese token. Cópialo de nuevo desde tu cuenta de PixelLab.", 400);
+      }
+      throw new ServiceError(error instanceof Error ? error.message : "No se pudo conectar con PixelLab.", 502);
+    }
+    this.#store.setMeta(PIXELLAB_TOKEN_META, value);
+    return this.pixelLabStatus();
+  }
+
+  /** Pide a PixelLab los personajes que faltan o, con `ids`, los de esos agentes (aunque ya tengan uno). */
+  drawCharacters(ids?: string[]): number {
+    if (!this.#pixelLabToken()) throw new ServiceError("Conecta PixelLab en Ajustes para dibujar los personajes.", 409);
+    const agents = ids?.length ? ids.map((id) => this.#requireAgent(id)) : this.#store.listAgents().filter((agent) => agent.character?.status !== "ready");
+    let count = 0;
+    for (const agent of agents) if (!this.#studio.pending(agent.id) && this.#requestCharacter(agent)) count += 1;
+    if (count) this.#emitAgents();
+    return count;
+  }
+
+  characterManifest(id: string): CharacterManifest {
+    this.#requireAgent(id);
+    const manifest = this.#studio.manifest(id);
+    if (!manifest) throw new ServiceError("Este agente aún no tiene personaje de PixelLab.", 404);
+    return manifest;
+  }
+
+  characterFile(id: string, name: string): string {
+    this.#requireAgent(id);
+    const path = this.#studio.file(id, name);
+    if (!path) throw new ServiceError("No encontrado.", 404);
+    return path;
+  }
+
+  /** El arte original de una pieza de la Oficina, o null si aún no se descargó (se usa el que trae la app). */
+  officeArtFile(name: string): string | null {
+    return this.#studio.artFile(name);
+  }
+
+  #officeArt(): OfficeArtView {
+    const hd = this.#studio.artReady();
+    return { hd, version: hd ? this.#studio.artVersion() : 0 };
+  }
+
+  #pixelLabToken(): string | null {
+    const value = this.#store.getMeta(PIXELLAB_TOKEN_META);
+    return value?.trim() ? value.trim() : null;
+  }
+
+  /** Encola el personaje de un agente si PixelLab está conectado y lo deja «dibujándose». */
+  #requestCharacter(agent: AgentRecord): boolean {
+    if (!this.#studio.request({ id: agent.id, name: agent.name, role: agent.role, appearance: agent.appearance })) return false;
+    this.#store.updateAgent(agent.id, { character: { status: "drawing", version: agent.character?.version ?? 0, error: null, updatedAt: Date.now() } });
+    return true;
+  }
+
+  #characterChanged(agentId: string, change: { status: CharacterState["status"]; error: string | null; version?: number; quiet?: boolean }): void {
+    const agent = this.#store.getAgent(agentId);
+    if (!agent) {
+      // Se eliminó mientras PixelLab lo dibujaba: no quedan sus cuadros.
+      if (change.status !== "drawing") this.#studio.forget(agentId);
+      return;
+    }
+    // Si quedó otro dibujo en cola (cambió el aspecto mientras tanto), sigue «dibujándose».
+    const status = change.status !== "drawing" && this.#studio.pending(agentId) ? "drawing" : change.status;
+    this.#store.updateAgent(agentId, {
+      character: { status, version: change.version ?? agent.character?.version ?? 0, error: change.error, updatedAt: Date.now() },
+    });
+    if (change.status === "failed" && change.error && !change.quiet) this.#emit({ type: "notice", level: "error", message: `Personaje de ${agent.name}: ${change.error}` });
+    this.#emitAgents();
   }
 
   // ---------- internos: eventos del proveedor ----------
@@ -2715,6 +2903,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         provider,
         model: args.model,
         project: args.project,
+        appearance: args.appearance,
       });
     } catch (error) {
       if (error instanceof ServiceError && error.status === 409) {
@@ -2828,6 +3017,10 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (args.project !== undefined && args.project !== target.project) {
       patch.project = args.project;
       changes.push("proyecto");
+    }
+    if (args.appearance !== undefined && args.appearance !== target.appearance) {
+      patch.appearance = args.appearance;
+      changes.push("aspecto");
     }
     if (args.provider !== undefined && args.provider !== target.provider) {
       // Por ejemplo, para que haga imágenes (Claude no las genera): con otro proveedor empieza una conversación
@@ -3114,6 +3307,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       nombre: agent.name,
       titulo: agent.role || (view.main ? "Bot principal" : "Asistente general"),
       ...(agent.description ? { descripcion: agent.description } : {}),
+      ...(agent.appearance ? { aspecto: agent.appearance } : {}),
       proyecto: agent.project || null,
       proveedor: providerLabel(agent.provider),
       modelo: agent.model ?? "predeterminado",

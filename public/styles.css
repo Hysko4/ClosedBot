@@ -3890,7 +3890,249 @@ svg {
   }
 }
 
+/* ---------- la Oficina ---------- */
+
+.office {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.office-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: calc(10px + var(--safe-top)) 18px 8px;
+}
+
+.office-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.office-status {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.office-draw {
+  flex: none;
+  min-height: 32px;
+  padding: 6px 13px;
+  font-size: 13px;
+}
+
+.office-scroll {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  padding: 4px 18px calc(18px + var(--safe-bottom));
+}
+
+.office-panel {
+  position: relative;
+  flex: none;
+  width: 100%;
+  max-width: 1500px;
+  margin: 0 auto;
+  aspect-ratio: 2752 / 1536;
+  overflow: hidden;
+  border-radius: 14px;
+  background: #2a1d14;
+  box-shadow:
+    0 0 0 1px #262626,
+    0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+.office-panel canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: pan-y;
+}
+
+.office-tip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 280px;
+  padding: 8px 11px;
+  border-radius: 10px;
+  background: rgba(26, 26, 26, 0.97);
+  box-shadow:
+    0 0 0 1px #333,
+    0 8px 22px rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.office-tip[hidden],
+.office-board[hidden] {
+  display: none;
+}
+
+.office-tip strong {
+  font-weight: 600;
+}
+
+.office-tip-role {
+  color: var(--text-2);
+}
+
+.office-tip-state {
+  color: var(--muted);
+}
+
+.office-board {
+  position: absolute;
+  top: 60px;
+  right: 18px;
+  z-index: 25;
+  width: min(440px, calc(100% - 36px));
+  max-height: calc(100% - 84px);
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+  border-radius: 14px;
+  background: #1c1c1c;
+  box-shadow:
+    0 0 0 1px #2e2e2e,
+    0 14px 40px rgba(0, 0, 0, 0.5);
+}
+
+.office-board-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.office-board-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+#open-office[aria-current="page"] {
+  background: #262626;
+  color: #fff;
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.create-look {
+  margin: 16px 0 6px;
+  text-align: left;
+}
+
+.field.create-look textarea {
+  min-height: 0;
+  font-size: 14px;
+}
+
+.create-character {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.create-character[hidden] {
+  display: none;
+}
+
+.link-button {
+  padding: 0;
+  background: none;
+  color: var(--link);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.pixellab-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pixellab-row[hidden] {
+  display: none;
+}
+
+.pixellab-row input {
+  flex: 1;
+  min-width: 0;
+  background: #121212;
+  border: 1px solid #2c2c2c;
+  border-radius: 11px;
+  padding: 9px 12px;
+  font-size: 15px;
+  outline: none;
+}
+
+.pixellab-row input:focus {
+  border-color: var(--accent);
+}
+
+.pixellab-ok {
+  flex: 1;
+  color: var(--ok);
+  font-size: 14px;
+}
+
+.pixellab-form .form-error:empty {
+  display: none;
+}
+
 /* ---------- teléfono ---------- */
+
+@media (max-width: 760px) {
+  .office-header {
+    padding: calc(8px + var(--safe-top)) 10px 6px;
+  }
+
+  .office-scroll {
+    gap: 10px;
+    padding: 2px 0 calc(14px + var(--safe-bottom));
+  }
+
+  .office-panel {
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .office-board {
+    top: 56px;
+    right: 10px;
+    width: calc(100% - 20px);
+  }
+}
 
 @media (max-width: 760px) {
   .layout {

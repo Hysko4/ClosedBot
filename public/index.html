@@ -39,6 +39,9 @@
     <div id="app" class="layout" hidden>
       <aside class="sidebar" aria-label="Agentes">
         <div class="sidebar-tools">
+          <button type="button" class="round-button" id="open-office" title="Oficina: mira a tus agentes trabajar" aria-label="Oficina" aria-current="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20.5v-15a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1v15M14 9.5h4a1 1 0 0 1 1 1v10M3.5 20.5h17M8 8h3M8 11.5h3M8 15h3" /></svg>
+          </button>
           <button type="button" class="round-button" id="open-routines" title="Rutinas" aria-label="Rutinas">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="7.5" /><path d="M12 9.5V13l2.5 1.6M9.5 3h5" /></svg>
           </button>
@@ -120,6 +123,28 @@
             <button type="button" class="button primary" id="connect-claude">Iniciar sesión con Claude</button>
           </div>
         </div>
+
+        <section class="office" id="office" aria-label="Oficina" hidden>
+          <header class="office-header">
+            <button type="button" class="round-button mobile-only" id="office-back" aria-label="Volver a la lista">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
+            </button>
+            <h2 class="office-title">Oficina</h2>
+            <span class="office-status" id="office-status" role="status"></span>
+            <button type="button" class="button ghost office-draw" id="office-draw" hidden></button>
+          </header>
+          <div class="office-scroll"></div>
+          <div class="office-tip" role="tooltip" hidden></div>
+          <div class="office-board" role="dialog" aria-label="Pizarra de Claude Bot" hidden>
+            <header class="office-board-head">
+              <h3>Pizarra</h3>
+              <button type="button" class="round-button small-round" aria-label="Cerrar la pizarra">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>
+              </button>
+            </header>
+            <div class="office-board-text md"></div>
+          </div>
+        </section>
 
         <section class="conversation" id="conversation" hidden>
           <header class="chat-header">
@@ -288,6 +313,18 @@
           </p>
           <h3 class="section-title" id="tts-title">Voces para leer en voz alta</h3>
           <ul class="provider-list" id="tts-settings"></ul>
+          <h3 class="section-title">Personajes de la Oficina</h3>
+          <form class="pixellab-form" id="pixellab-form" novalidate>
+            <div class="pixellab-row" id="pixellab-connect">
+              <input id="pixellab-token" type="password" autocomplete="off" spellcheck="false" placeholder="Token de PixelLab" aria-label="Token de PixelLab" />
+              <button type="submit" class="button ghost" id="pixellab-save">Conectar</button>
+            </div>
+            <div class="pixellab-row" id="pixellab-connected" hidden>
+              <span class="pixellab-ok">PixelLab conectado</span>
+              <button type="button" class="button ghost" id="pixellab-remove">Quitar</button>
+            </div>
+            <p class="form-error" id="pixellab-error" role="alert"></p>
+          </form>
           <h3 class="section-title">Carpetas</h3>
           <dl class="paths" id="paths"></dl>
         </div>
@@ -372,6 +409,14 @@
           <input class="create-name" id="create-name" name="name" maxlength="60" placeholder="Ponle nombre a tu agente" aria-label="Nombre del agente" autocomplete="off" />
           <div class="shape-grid" id="shape-grid" role="radiogroup" aria-label="Figura"></div>
           <div class="color-row" id="color-row" role="radiogroup" aria-label="Color"></div>
+          <label class="field create-look">
+            <span>Su personaje en la Oficina (opcional)</span>
+            <textarea id="create-look" rows="2" maxlength="300" placeholder="Ej.: pelo rojo, chaleco verde y lentes redondos"></textarea>
+          </label>
+          <div class="create-character" id="create-character" hidden>
+            <span id="create-character-text"></span>
+            <button type="button" class="link-button" id="create-character-redo"></button>
+          </div>
           <p class="form-error" id="create-error" role="alert"></p>
         </div>
         <footer class="dialog-footer">

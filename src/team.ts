@@ -63,7 +63,7 @@ export const DELETE_ROUTINE_DESCRIPTION = "Elimina una de tus rutinas por su id 
 export const CREATE_AGENT_DESCRIPTION =
   "Crea un agente nuevo en el equipo del usuario, con nombre, rol, descripción, instrucciones permanentes y proyecto (el grupo de la barra lateral donde aparece). Antes revisa con list_agents que no exista uno parecido. Usa el mismo proyecto para todos los agentes de un equipo.";
 export const UPDATE_AGENT_DESCRIPTION =
-  "Cambia el nombre, el rol, la descripción, las instrucciones, el proyecto, el proveedor o el modelo de un agente que ya existe (indícalo por id o nombre). Solo cambia lo que pases. Cambia el proveedor cuando el agente no puede hacer su parte con el que tiene (p. ej. imágenes) y solo si está libre: empieza una conversación nueva con sus mismas instrucciones y recuerdos. No sirve para cambiarte a ti mismo.";
+  "Cambia el nombre, el rol, la descripción, las instrucciones, el proyecto, el proveedor, el modelo o el aspecto de un agente que ya existe (indícalo por id o nombre). Solo cambia lo que pases. Cambia el proveedor cuando el agente no puede hacer su parte con el que tiene (p. ej. imágenes) y solo si está libre: empieza una conversación nueva con sus mismas instrucciones y recuerdos. No sirve para cambiarte a ti mismo.";
 export const REMEMBER_DESCRIPTION =
   "Guarda un recuerdo duradero: un dato, preferencia o decisión del usuario que te servirá en otras conversaciones (no lo uses para notas de la tarea actual). Con always true se usa siempre (va en tus instrucciones desde tu próximo mensaje); si no, lo buscas con search_memories cuando haga falta. Antes de guardar, revisa que no lo tengas ya.";
 export const FORGET_MEMORY_DESCRIPTION = "Borra uno de tus recuerdos por su id (míralo con list_memories o search_memories). Úsalo si quedó viejo, es falso o el usuario te pide olvidarlo.";
@@ -90,7 +90,7 @@ export const CHANNEL_FIELD_HELP = {
 
 export const ROUTINE_LIMITS = { name: 80, prompt: 4_000, times: 12 } as const;
 export const QUESTION_LIMITS = { question: 300, label: 80, detail: 200, minOptions: 2, maxOptions: 4 } as const;
-export const AGENT_LIMITS = { name: 60, role: 200, description: 2_000, instructions: INSTRUCTIONS_MAX, project: 60, model: 120 } as const;
+export const AGENT_LIMITS = { name: 60, role: 200, description: 2_000, instructions: INSTRUCTIONS_MAX, project: 60, model: 120, appearance: 300 } as const;
 /** Proveedores que el bot principal puede elegir para un agente nuevo. */
 export const AGENT_PROVIDERS = ["claude", "codex", "grok", "gemini"] as const;
 
@@ -104,6 +104,8 @@ export const AGENT_FIELD_HELP = {
     "Proveedor del agente, según lo que mejor hace su parte: uno de proveedoresListos (lo da list_agents). Para imágenes, codex (Claude no las genera). Si no lo indicas, el tuyo.",
   model:
     "Modelo opcional (p. ej. claude-sonnet-5-5 o claude-haiku-5-5 para tareas simples). Sin él usa el modelo por defecto del proveedor.",
+  appearance:
+    "Cómo se ve su personaje en la Oficina (PixelLab lo dibuja en pixel art), en inglés y en una frase: edad, pelo, ropa y un detalle que vaya con su rol, p. ej. «young woman, curly red hair, green sweater, round glasses». Si el usuario describió cómo lo quiere, usa eso.",
 } as const;
 
 export const UPDATE_PROVIDER_HELP =
@@ -285,6 +287,7 @@ const MAIN_DYNAMIC_TOOLS = [
         project: { type: "string", minLength: 1, maxLength: AGENT_LIMITS.project, description: AGENT_FIELD_HELP.project },
         provider: { type: "string", enum: [...AGENT_PROVIDERS], description: AGENT_FIELD_HELP.provider },
         model: { type: "string", maxLength: AGENT_LIMITS.model, description: AGENT_FIELD_HELP.model },
+        appearance: { type: "string", maxLength: AGENT_LIMITS.appearance, description: AGENT_FIELD_HELP.appearance },
       },
       required: ["name", "role", "instructions", "project"],
       additionalProperties: false,
@@ -305,6 +308,11 @@ const MAIN_DYNAMIC_TOOLS = [
         project: { type: "string", maxLength: AGENT_LIMITS.project, description: "Proyecto nuevo; vacío lo saca de su grupo." },
         provider: { type: "string", enum: [...AGENT_PROVIDERS], description: UPDATE_PROVIDER_HELP },
         model: { type: "string", maxLength: AGENT_LIMITS.model, description: "Modelo nuevo; vacío vuelve al modelo por defecto." },
+        appearance: {
+          type: "string",
+          maxLength: AGENT_LIMITS.appearance,
+          description: "Aspecto nuevo de su personaje de la Oficina (en inglés, una frase); PixelLab lo vuelve a dibujar. Solo si el usuario lo pide o no tiene.",
+        },
       },
       required: ["agent"],
       additionalProperties: false,
@@ -464,6 +472,8 @@ export interface CreateAgentArgs {
   /** null = el mismo proveedor del bot principal. */
   provider: ProviderId | null;
   model: string | null;
+  /** Cómo se ve su personaje de la Oficina ("" = sin describir). */
+  appearance: string;
 }
 
 export function parseCreateAgentArgs(value: unknown): CreateAgentArgs {
@@ -476,6 +486,7 @@ export function parseCreateAgentArgs(value: unknown): CreateAgentArgs {
     project: requiredText(record.project, "project", AGENT_LIMITS.project),
     provider: parseProvider(record.provider),
     model: optionalText(record.model, "model", AGENT_LIMITS.model) || null,
+    appearance: optionalText(record.appearance, "appearance", AGENT_LIMITS.appearance),
   };
 }
 
@@ -491,6 +502,7 @@ export interface UpdateAgentArgs {
   provider?: ProviderId;
   /** null vuelve al modelo por defecto. */
   model?: string | null;
+  appearance?: string;
 }
 
 export function parseUpdateAgentArgs(value: unknown): UpdateAgentArgs {
@@ -508,6 +520,9 @@ export function parseUpdateAgentArgs(value: unknown): UpdateAgentArgs {
   const provider = parseProvider(record.provider);
   if (provider) args.provider = provider;
   if (record.model !== undefined) args.model = optionalText(record.model, "model", AGENT_LIMITS.model) || null;
+  if (record.appearance !== undefined && record.appearance !== null) {
+    args.appearance = optionalText(record.appearance, "appearance", AGENT_LIMITS.appearance);
+  }
   return args;
 }
 

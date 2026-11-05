@@ -2,3 +2,4 @@
 *.cmd text eol=crlf
 *.ico binary
 *.png binary
+*.webp binary

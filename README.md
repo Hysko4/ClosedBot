@@ -12,6 +12,8 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
   - Elige el proveedor de cada parte: imágenes con Codex (GPT), código y textos con Claude, y el QA con un proveedor distinto del que hizo el trabajo. Si un agente no puede hacer su parte con el suyo, se lo cambia.
   - Lleva una pizarra del trabajo (objetivo, quién hace qué, en qué orden y dónde queda cada entrega) que les llega a los agentes cuando les escribe.
   - Trabaja en cadena: cada entrega le vuelve sola, la revisa y se la pasa al siguiente, hasta 20 encargos seguidos por pedido.
+- **La Oficina**: el botón del edificio, arriba en la barra lateral, muestra a los agentes trabajando en una oficina dibujada a mano. Claude Bot tiene su escritorio y su pizarra en el salón, y cada canal tiene su sala con un escritorio por integrante (si son más, los escritorios se achican para que quepan); los agentes sin canal van a «Sin grupo». Quien trabaja se sienta y escribe, el que te pregunta algo muestra «?», el que está en pausa duerme y los demás pasean. Los sobres que vuelan son los encargos entre compañeros, el corcho de cada sala muestra las últimas imágenes del grupo y al tocar a un agente se abre su chat.
+- **Personajes de PixelLab**: con tu token de PixelLab en Ajustes, cada agente nuevo recibe su personaje en pixel art (4 vistas y el caminar). Su aspecto lo decide quien lo crea: tú, en «Su personaje en la Oficina» al crearlo, o Claude Bot cuando arma un equipo. Si cambias el aspecto (tocando su figura en la ficha), se vuelve a dibujar. Sin PixelLab, ClosedBot les pone un personaje simple.
 - **Imágenes**: las que genera un agente de Codex (con el generador de imágenes de tu plan de ChatGPT) se copian solas a la carpeta compartida, en `imagenes/<agente>/`. Se ven en miniatura en su chat y le llegan con su ruta a quien las pidió.
 - **Varios agentes**, cada uno con su proveedor (Claude, Codex, Gemini o Grok), modelo, nivel de esfuerzo y nivel de acceso.
 - **Canales**: una conversación con varios agentes a la vez. El encargado del canal responde lo que no nombra a nadie y reparte el trabajo; con `@Nombre` le hablas a un agente en particular y con `@todos` a todos. Se crean con clic derecho en la barra lateral → «Nuevo canal». Los eliminados quedan en «Canales eliminados», desde donde se restauran o se borran para siempre.
@@ -187,6 +189,7 @@ ClosedBot los busca en el PATH, en las carpetas de npm, en la app de Codex, en l
 
 - **Armar un equipo**: toca a Claude Bot (arriba en la barra lateral) y cuéntale qué necesitas, por ejemplo: «Arma un equipo para crear un videojuego de plataformas». Cada agente que crea aparece en la lista, dentro de su proyecto y con un punto azul, y el equipo queda con su canal. En su chat verás «Creó a …» y «Creó el canal …»; al tocar el nombre se abre esa conversación. En su ficha → «Instrucciones» puedes dejarle tus preferencias para armar equipos (por ejemplo, «máximo 3 agentes» o «usa Sonnet para tareas simples»).
 - **Crear un agente**: botón **+**. Ponle nombre y elige figura y color. Usa el primer proveedor con sesión (Claude, si la tienes). El título, la descripción, las instrucciones, el modelo, el razonamiento y el acceso se cambian en su ficha (con «Acceso total para todos» encendido, el acceso no aparece: todos lo tienen).
+- **Oficina**: botón del edificio en la barra lateral. Para los personajes, copia tu token de PixelLab (en tu cuenta de pixellab.ai) y pégalo en Ajustes → «Personajes de la Oficina»; ClosedBot lo comprueba antes de guardarlo y no lo muestra en ninguna parte. «Dibujar N personajes» (arriba en la Oficina) dibuja los de los agentes que ya tenías; cada personaje gasta créditos de tu plan de PixelLab. Los dibujos quedan en `<datos>/oficina/personajes`. La app trae el arte en baja resolución y, la primera vez que arranca, baja el original en alta a `<datos>/oficina/arte` (fal lo guarda al menos 7 días: si no alcanza a bajarlo, la Oficina sigue con el de baja).
 - **Escribir**: en el computador, Enter envía y Mayús+Enter hace un salto de línea. En el teléfono se envía con el botón.
 - **Cola**: si el agente está ocupado, verás «N mensajes esperando turno». Desde ahí puedes quitar mensajes. En su ficha (toca su nombre arriba) → «Avanzado» puedes pausar la cola o empezar de cero; «Eliminar agente» está al final de la ficha. «Detener» corta el turno en curso.
 - **Equipo**: pídele a un agente que consulte a otro, por ejemplo: «Pídele a Beto que revise esto». En su chat verás «Enviado a Beto» y después «Respuesta de Beto».
@@ -206,7 +209,7 @@ ClosedBot los busca en el PATH, en las carpetas de npm, en la app de Codex, en l
 - **Archivos**: en la ficha del agente se ven y descargan los archivos de su carpeta y de la compartida. «Subir archivo» los deja en `adjuntos/`. Los archivos se abren en una pestaña aparte, sin permisos sobre la app.
 - **Uso del plan**: se lee cada 10 minutos y tras cada turno, solo de las cuentas con sesión. Claude lo informa Claude Code (como `/usage`); Codex, su `app-server`; Grok, su CLI; y Gemini, Antigravity con «/usage» (desde la 1.4.1, sin pasar por el modelo). Codex y Grok se abren un momento para leerlo y se cierran si ningún agente los usa. Antigravity no se abre solo para esto: Gemini se actualiza cuando un agente lo está usando y, mientras, se ve la última lectura con su hora. Si una de esas lecturas cambia, esa cuenta desaparece del detalle y la app sigue igual.
 - **Adjuntos**: clip, pegar o arrastrar. Hasta 25 MB por archivo; se guardan en `adjuntos/` dentro de la carpeta del agente.
-- **Probar sin IA** (solo para desarrollo: Demo ya no aparece en la app): con el proveedor Demo, una línea `@Nombre: texto` envía `texto` a ese compañero, `/equipo` lista a los compañeros, `/lento` responde despacio (para probar «Detener»), `/pregunta ¿Texto? | A | B` muestra una tarjeta de opciones y `/rutina 09:00 Nombre` crea una rutina, `/recuerda [siempre] texto` guarda un recuerdo y `/busca texto` busca entre ellos. Si Claude Bot usa la demo, `/crear Nombre | Rol | Proyecto` crea un agente, `/ajustar Nombre | Rol nuevo` le cambia el rol, `/canal Nombre | Encargado | Ana, Beto` crea un canal, `/proveedor Nombre | codex` le cambia el proveedor, `/ficha Nombre` lee la ficha de un agente y `/pizarra texto` escribe la pizarra. Con `/imagen descripción`, cualquier agente de la demo «genera» una imagen de prueba, como el generador de Codex.
+- **Probar sin IA** (solo para desarrollo: Demo ya no aparece en la app): con el proveedor Demo, una línea `@Nombre: texto` envía `texto` a ese compañero, `/equipo` lista a los compañeros, `/lento` responde despacio (para probar «Detener»), `/pregunta ¿Texto? | A | B` muestra una tarjeta de opciones y `/rutina 09:00 Nombre` crea una rutina, `/recuerda [siempre] texto` guarda un recuerdo y `/busca texto` busca entre ellos. Si Claude Bot usa la demo, `/crear Nombre | Rol | Proyecto | Aspecto` crea un agente (el aspecto es opcional), `/ajustar Nombre | Rol nuevo | Aspecto nuevo` le cambia el rol o el aspecto, `/canal Nombre | Encargado | Ana, Beto` crea un canal, `/proveedor Nombre | codex` le cambia el proveedor, `/ficha Nombre` lee la ficha de un agente y `/pizarra texto` escribe la pizarra. Con `/imagen descripción`, cualquier agente de la demo «genera» una imagen de prueba, como el generador de Codex.
 
 ## Configuración
 
@@ -260,7 +263,7 @@ npm ci
 npm test        # compila y corre las pruebas
 ```
 
-Las pruebas usan el proveedor Demo y simulaciones del SDK de Claude y del `codex app-server`, así que no gastan créditos. Cubren a Claude Bot (crear, proteger, sus herramientas para armar equipos, la nota con lo que cambiaste, las fichas, la pizarra, el cambio de proveedor y la cadena de encargos), las imágenes que genera Codex, el uso del plan de cada proveedor, la cola, los mensajes entre agentes, el límite de reenvíos, la interrupción, el reinicio, el login, la protección CSRF, los eventos en vivo, las preguntas con opciones, las rutinas y sus horarios, los adjuntos, el control del lanzador de escritorio, el inicio de sesión con la cuenta (con un Claude Code falso) y la mudanza de `~/.cuadrilla` a `~/.closedbot`.
+Las pruebas usan el proveedor Demo y simulaciones del SDK de Claude y del `codex app-server`, así que no gastan créditos. Cubren a Claude Bot (crear, proteger, sus herramientas para armar equipos, la nota con lo que cambiaste, las fichas, la pizarra, el cambio de proveedor y la cadena de encargos), las imágenes que genera Codex, el uso del plan de cada proveedor, la cola, los mensajes entre agentes, el límite de reenvíos, la interrupción, el reinicio, el login, la protección CSRF, los eventos en vivo, las preguntas con opciones, las rutinas y sus horarios, los adjuntos, el control del lanzador de escritorio, el inicio de sesión con la cuenta (con un Claude Code falso), la Oficina (con un PixelLab simulado: personajes, ZIP, errores y arte en alta resolución) y la mudanza de `~/.cuadrilla` a `~/.closedbot`.
 
 ```
 src/
@@ -274,12 +277,15 @@ src/
   team-state.ts        lo que sabe Claude Bot de agentes y canales, y la nota con lo que cambió
   board.ts             la pizarra de Claude Bot
   images.ts            las imágenes que genera un agente, copiadas a la carpeta compartida
+  office.ts            la Oficina: personajes de PixelLab y arte en alta resolución
   schedule.ts          horarios de las rutinas
   version.ts           versión de la app
   providers/           Claude (Agent SDK), Codex (app-server), Grok y Gemini (ACP), Demo, detección y uso del plan
   cli/password.ts      npm run password
   cli/access.ts        npm run access (acceso total para todos, sin abrir la app)
-public/                interfaz web (sin dependencias ni compilación)
+public/                interfaz web (sin dependencias ni compilación); office.js dibuja la Oficina
+public/office/         arte de la Oficina en baja resolución (salón, sala, escritorios) y arte.json
+scripts/office-art.py  prepara public/office/ a partir de los dibujos originales (Pillow)
 scripts/windows/       ClosedBot.exe: ventana propia e icono en la bandeja (C#)
 deploy/                servicio de systemd y plantilla de entorno
 test/                  pruebas (node:test)
@@ -287,7 +293,9 @@ test/                  pruebas (node:test)
 
 ## Estado y límites conocidos
 
-- Versión 0.8.1. Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. Las voces de OpenBot se probaron con el modelo real en Windows. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
+- Versión 0.9.0. Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. Las voces de OpenBot se probaron con el modelo real en Windows. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
+- PixelLab se probó con una simulación de su API: **falta la primera prueba con tu cuenta**. Si algo falla, el agente queda con el personaje simple: tocando su figura en la ficha se ve el motivo y «Dibujarlo» lo intenta de nuevo.
+- En la Oficina, cada agente está en una sola sala (la del canal que encarga o, si no, la del primero en que está); en sus otros canales su escritorio queda vacío.
 - Un solo usuario y sin notificaciones push por ahora.
 - Claude Bot crea hasta 8 agentes por pedido y deja de crear cuando ya hay 60 agentes en total.
 - Claude Bot hace hasta 20 encargos seguidos por pedido; cuando él escribe, la cuenta de reenvíos seguidos entre agentes (6) vuelve a empezar. Cada agente que trabaja gasta el plan de su proveedor, y las imágenes gastan el de ChatGPT más rápido.

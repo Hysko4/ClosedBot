@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { CharacterState } from "./office.js";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type { AccessLevel, ProviderId } from "./providers/client.js";
 import type { Schedule } from "./schedule.js";
@@ -37,6 +38,10 @@ export interface AgentRecord {
   notify: NotifyLevel | "";
   /** Habilidades apagadas (ids como «.agents/skills/resumen»). */
   skillsOff: string[];
+  /** Cómo se ve su personaje de la Oficina (lo describe quien lo crea; PixelLab lo dibuja). */
+  appearance: string;
+  /** Su personaje de PixelLab: dibujándose, listo o con error; null si nunca se pidió. */
+  character: CharacterState | null;
   /** Última vez que el usuario abrió la conversación (para el aviso de no leído). */
   readAt: number;
   /** Último mensaje del agente (o para el usuario) en su conversación. */
@@ -207,6 +212,8 @@ CREATE TABLE IF NOT EXISTS agents (
   voice TEXT,
   notify TEXT NOT NULL DEFAULT '',
   skills_off TEXT NOT NULL DEFAULT '[]',
+  appearance TEXT NOT NULL DEFAULT '',
+  character TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -319,6 +326,8 @@ const ADDED_COLUMNS: Array<{ table: string; column: string; ddl: string; backfil
   { table: "agents", column: "notify", ddl: "ALTER TABLE agents ADD COLUMN notify TEXT NOT NULL DEFAULT ''" },
   { table: "agents", column: "skills_off", ddl: "ALTER TABLE agents ADD COLUMN skills_off TEXT NOT NULL DEFAULT '[]'" },
   { table: "deliveries", column: "steps", ddl: "ALTER TABLE deliveries ADD COLUMN steps INTEGER NOT NULL DEFAULT 0" },
+  { table: "agents", column: "appearance", ddl: "ALTER TABLE agents ADD COLUMN appearance TEXT NOT NULL DEFAULT ''" },
+  { table: "agents", column: "character", ddl: "ALTER TABLE agents ADD COLUMN character TEXT" },
 ];
 
 /** Tablas que ya no se usan: la de las rondas de Claude Bot (solo existió en la 0.8.0). */
@@ -327,7 +336,7 @@ const DROPPED = ["DROP INDEX IF EXISTS rounds_status", "DROP INDEX IF EXISTS rou
 /** Índices sobre columnas añadidas: se crean después de añadirlas. */
 const ADDED_INDEXES = ["CREATE INDEX IF NOT EXISTS messages_channel ON messages(channel_id, seq)"];
 
-const SCHEMA_VERSION = "7";
+const SCHEMA_VERSION = "8";
 
 /** Roles cuyos mensajes cuentan como novedad para el aviso de no leído. */
 const UNREAD_ROLES = "('assistant', 'teammate', 'notice', 'decision', 'routine')";
@@ -428,6 +437,8 @@ export class Store {
       | "voice"
       | "notify"
       | "skillsOff"
+      | "appearance"
+      | "character"
       | "readAt"
       | "lastAt"
       | "createdAt"
@@ -435,6 +446,7 @@ export class Store {
     > & {
       description?: string;
       project?: string;
+      appearance?: string;
       /** Figura y color elegidos; si falta, el siguiente automático. */
       avatar?: number;
     },
@@ -444,8 +456,8 @@ export class Store {
     const avatar = input.avatar ?? this.#nextAutoAvatar();
     this.#db
       .prepare(
-        `INSERT INTO agents (id, name, role, description, instructions, provider, model, effort, access, workspace, project, read_at, avatar, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO agents (id, name, role, description, instructions, provider, model, effort, access, workspace, project, read_at, avatar, appearance, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -461,6 +473,7 @@ export class Store {
         input.project ?? "",
         now,
         avatar,
+        input.appearance ?? "",
         now,
         now,
       );
@@ -497,6 +510,8 @@ export class Store {
         | "voice"
         | "notify"
         | "skillsOff"
+        | "appearance"
+        | "character"
       >
     >,
   ): AgentRecord {
@@ -520,6 +535,8 @@ export class Store {
       voice: "voice",
       notify: "notify",
       skillsOff: "skills_off",
+      appearance: "appearance",
+      character: "character",
     };
     const sets: string[] = [];
     const values: SQLInputValue[] = [];
@@ -527,7 +544,7 @@ export class Store {
       const column = columns[key];
       if (!column || value === undefined) continue;
       sets.push(`${column} = ?`);
-      if (key === "voice" || key === "skillsOff") values.push(JSON.stringify(value));
+      if (key === "voice" || key === "skillsOff" || key === "character") values.push(value === null ? null : JSON.stringify(value));
       else values.push(typeof value === "boolean" ? (value ? 1 : 0) : (value as SQLInputValue));
     }
     if (sets.length) {
@@ -567,6 +584,51 @@ export class Store {
         : this.#db.prepare(`${base} ORDER BY seq DESC LIMIT ?`).all(channelId, limit)
     ) as Row[];
     return rows.reverse().map((row) => ({ ...toMessage(row), seq: Number(row.seq) }));
+  }
+
+  /** Para la Oficina: las últimas imágenes generadas (las que se clavan en el corcho de cada sala). */
+  recentImages(limit = 40): Array<{ agentId: string; channelId: string | null; path: string; at: number }> {
+    const rows = this.#db
+      .prepare(
+        "SELECT agent_id, channel_id, payload, created_at FROM messages WHERE role = 'activity' AND payload LIKE '%\"kind\":\"image\"%' ORDER BY seq DESC LIMIT ?",
+      )
+      .all(limit) as Row[];
+    const images: Array<{ agentId: string; channelId: string | null; path: string; at: number }> = [];
+    for (const row of rows) {
+      try {
+        const payload = JSON.parse(String(row.payload ?? "null")) as { kind?: unknown; path?: unknown } | null;
+        if (payload?.kind === "image" && typeof payload.path === "string") {
+          images.push({ agentId: String(row.agent_id), channelId: str(row.channel_id), path: payload.path, at: Number(row.created_at) });
+        }
+      } catch {
+        // Un payload dañado no se muestra.
+      }
+    }
+    return images;
+  }
+
+  /** Para la Oficina: la última línea de actividad de cada agente desde `since`. */
+  latestActivities(since: number): Array<{ agentId: string; text: string; at: number }> {
+    const rows = this.#db
+      .prepare(
+        "SELECT m.agent_id, m.text, m.created_at FROM messages m JOIN (SELECT agent_id, MAX(seq) AS seq FROM messages WHERE role = 'activity' AND created_at >= ? GROUP BY agent_id) last ON last.seq = m.seq",
+      )
+      .all(since) as Row[];
+    return rows.map((row) => ({ agentId: String(row.agent_id), text: String(row.text ?? ""), at: Number(row.created_at) }));
+  }
+
+  /** Agentes que esperan respuesta a su última pregunta (ask_user): sin tocar una opción ni escribirles después. */
+  agentsAsking(): string[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT d.agent_id FROM messages d
+         WHERE d.role = 'decision'
+           AND (d.payload IS NULL OR json_extract(d.payload, '$.answer') IS NULL)
+           AND d.seq = (SELECT MAX(seq) FROM messages WHERE agent_id = d.agent_id AND role = 'decision')
+           AND NOT EXISTS (SELECT 1 FROM messages u WHERE u.agent_id = d.agent_id AND u.role = 'user' AND u.seq > d.seq)`,
+      )
+      .all() as Row[];
+    return rows.map((row) => String(row.agent_id));
   }
 
   getMessage(id: string): MessageRecord | null {
@@ -1147,11 +1209,30 @@ function toAgent(row: Row): AgentRecord {
     voice: toVoice(row.voice),
     notify: toNotify(row.notify),
     skillsOff: parseIds(row.skills_off),
+    appearance: String(row.appearance ?? ""),
+    character: toCharacter(row.character),
     readAt: Number(row.read_at ?? 0),
     lastAt: row.last_at === null || row.last_at === undefined ? 0 : Number(row.last_at),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
+}
+
+function toCharacter(value: SQLInputValue | undefined): CharacterState | null {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<CharacterState>;
+    const status = parsed.status === "drawing" || parsed.status === "ready" || parsed.status === "failed" ? parsed.status : null;
+    if (!status) return null;
+    return {
+      status,
+      version: Number.isInteger(parsed.version) ? Number(parsed.version) : 0,
+      error: typeof parsed.error === "string" ? parsed.error : null,
+      updatedAt: Number(parsed.updatedAt ?? 0),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function toMessage(row: Row): MessageRecord {

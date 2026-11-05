@@ -72,10 +72,14 @@ const MIME: Record<string, string> = {
   ".webmanifest": "application/manifest+json; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".png": "image/png",
+  ".webp": "image/webp",
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
   ".txt": "text/plain; charset=utf-8",
 };
+
+/** Piezas del arte de la Oficina (public/office/<pieza>.webp o el original descargado). */
+const OFFICE_PIECES = new Set(["salon", "sala", "jefe", "escritorio", "silla"]);
 
 /** Archivos de la biblioteca que se pueden ver en el navegador; el resto se descarga. Nunca HTML, SVG ni scripts. */
 const LIBRARY_INLINE: Record<string, string> = {
@@ -365,6 +369,44 @@ export function createApp(options: AppOptions): App {
 
   route("DELETE", "/api/agents/:id/skill", (ctx) => {
     service.deleteSkill(param(ctx, 0), skillParam(ctx.url));
+    return NO_CONTENT;
+  });
+
+  // ---------- la Oficina ----------
+
+  route("GET", "/api/office", () => service.officeSnapshot());
+
+  route("GET", "/api/office/art/:name", async (ctx) => {
+    const name = param(ctx, 0);
+    if (!OFFICE_PIECES.has(name)) throw new HttpError(404, "No encontrado.");
+    const original = service.officeArtFile(name);
+    await sendFile(ctx, original ?? resolve(publicDir, "office", `${name}.webp`), original ? "image/png" : "image/webp");
+    return NO_CONTENT;
+  });
+
+  route("POST", "/api/office/characters", async (ctx) => {
+    const body = await readJson(ctx.req);
+    const ids = Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === "string") : undefined;
+    return { queued: service.drawCharacters(ids), pixelLab: service.pixelLabStatus() };
+  });
+
+  route("GET", "/api/pixellab", () => ({ pixelLab: service.pixelLabStatus() }));
+
+  route("PUT", "/api/pixellab", async (ctx) => {
+    const body = await readJson(ctx.req);
+    if (typeof body.token !== "string" || !body.token.trim()) throw new HttpError(400, "Pega el token de PixelLab.");
+    return { pixelLab: await service.setPixelLabToken(body.token) };
+  });
+
+  route("DELETE", "/api/pixellab", async () => ({ pixelLab: await service.setPixelLabToken(null) }));
+
+  route("GET", "/api/agents/:id/character", (ctx) => service.characterManifest(param(ctx, 0)));
+
+  // Vuelve a dibujar el personaje de un agente (gasta créditos de PixelLab).
+  route("POST", "/api/agents/:id/character", (ctx) => ({ queued: service.drawCharacters([param(ctx, 0)]) }));
+
+  route("GET", "/api/agents/:id/character/:file", async (ctx) => {
+    await sendFile(ctx, service.characterFile(param(ctx, 0), param(ctx, 1)), "image/png");
     return NO_CONTENT;
   });
 
@@ -903,6 +945,8 @@ function agentInput(body: Record<string, unknown>, creating: boolean): Partial<A
     if (!isRecord(body.voice)) throw new HttpError(400, "El campo voice debe ser un objeto.");
     input.voice = body.voice as Partial<VoiceSettings>;
   }
+  const appearance = text("appearance");
+  if (appearance !== undefined) input.appearance = appearance;
   if (body.notify !== undefined) {
     if (body.notify !== null && body.notify !== "all" && body.notify !== "needs" && body.notify !== "none") {
       throw new HttpError(400, "«Avisarme» debe ser all, needs, none o null.");
@@ -913,6 +957,38 @@ function agentInput(body: Record<string, unknown>, creating: boolean): Partial<A
     throw new HttpError(400, "Indica al menos el nombre y el proveedor.");
   }
   return input;
+}
+
+/** Envía un archivo de la app (arte de la Oficina, cuadros de un personaje) con etag: el navegador lo guarda y pregunta si cambió. */
+async function sendFile(ctx: Context, path: string, type: string): Promise<void> {
+  const { req, res } = ctx;
+  const info = await stat(path).catch(() => null);
+  if (!info?.isFile()) throw new HttpError(404, "No encontrado.");
+  const etag = `W/"${info.size.toString(16)}-${Math.floor(info.mtimeMs).toString(16)}"`;
+  res.setHeader("etag", etag);
+  res.setHeader("cache-control", "private, no-cache");
+  res.setHeader("content-type", type);
+  if (header(req, "if-none-match") === etag) {
+    res.statusCode = 304;
+    res.end();
+    return;
+  }
+  res.statusCode = 200;
+  res.setHeader("content-length", String(info.size));
+  if (req.method === "HEAD") {
+    res.end();
+    return;
+  }
+  await new Promise<void>((resolveStream, reject) => {
+    const stream = createReadStream(path);
+    stream.once("error", reject);
+    res.once("close", () => {
+      stream.destroy();
+      resolveStream();
+    });
+    stream.once("end", resolveStream);
+    stream.pipe(res);
+  });
 }
 
 function header(req: IncomingMessage, name: string): string | null {

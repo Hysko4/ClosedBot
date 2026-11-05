@@ -49,6 +49,9 @@ export async function createHarness(options: {
   mainAgent?: boolean;
   /** Encargos seguidos que puede hacer Claude Bot en un pedido. */
   mainMaxSteps?: number;
+  /** La Oficina: PixelLab y el arte en alta resolución, con un fetch de prueba. */
+  pixelLab?: ServiceOptions["pixelLab"];
+  officeArt?: ServiceOptions["officeArt"];
 } = {}): Promise<Harness> {
   const temp = options.dir ? { path: options.dir, cleanup: () => undefined } : tempDir();
   const store = new Store(join(temp.path, "closedbot.db"));
@@ -65,6 +68,8 @@ export async function createHarness(options: {
     ...(options.installCommands ? { installCommands: options.installCommands } : {}),
     ...(options.mainAgent ? { mainAgent: true } : {}),
     ...(options.mainMaxSteps ? { mainMaxSteps: options.mainMaxSteps } : {}),
+    ...(options.pixelLab ? { pixelLab: options.pixelLab } : {}),
+    ...(options.officeArt ? { officeArt: options.officeArt } : {}),
   });
   service.on("event", (event) => events.push(event));
   await service.start();

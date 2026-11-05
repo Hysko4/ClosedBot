@@ -222,7 +222,7 @@ test("Store: una base de la 0.8.0 pierde la tabla de las rondas y sus entregas r
     old.close();
     const store = new Store(path);
     try {
-      assert.equal(store.getMeta("schema_version"), "7");
+      assert.equal(store.getMeta("schema_version"), "8");
       assert.deepEqual([store.getDelivery("d1")?.hops, store.getDelivery("d1")?.steps], [2, 0]);
       assert.equal(store.countQueued("a1"), 1, "la cola sigue igual");
     } finally {
@@ -263,7 +263,7 @@ test("Store: una base de la 0.5 recibe los canales sin perder la cola", () => {
     old.close();
     const store = new Store(path);
     try {
-      assert.equal(store.getMeta("schema_version"), "7");
+      assert.equal(store.getMeta("schema_version"), "8");
       assert.equal(store.getDelivery("d1")?.steps, 0, "las entregas viejas empiezan sin encargos de Claude Bot");
       assert.equal(store.getDelivery("d1")?.channelId, null);
       assert.equal(store.countQueued("a1"), 1, "la cola sigue igual");
@@ -310,6 +310,8 @@ test("Store: una base de la versión 0.1 se actualiza sin perder datos", () => {
       assert.equal(agent?.project, "");
       assert.equal(agent?.readAt, 0);
       assert.equal(agent?.lastAt, 5);
+      assert.equal(agent?.appearance, "", "sin aspecto: la Oficina le da uno por su rol");
+      assert.equal(agent?.character, null);
       assert.deepEqual(
         store.listAgents().map((item) => item.avatar),
         [0, 1],
@@ -327,7 +329,7 @@ test("Store: una base de la versión 0.1 se actualiza sin perder datos", () => {
       });
       assert.equal(carla.avatar, 2);
       assert.equal(store.getMessage("m1")?.payload, null);
-      assert.equal(store.getMeta("schema_version"), "7");
+      assert.equal(store.getMeta("schema_version"), "8");
       assert.equal(store.getMessage("m1")?.channelId, null, "los mensajes viejos no son de ningún canal");
       assert.deepEqual(store.listChannels(), []);
       assert.deepEqual(store.listRoutines(), []);
