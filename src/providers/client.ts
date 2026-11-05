@@ -4,10 +4,10 @@
 
 import type { AppServerNotification, AppServerRequest, RequestId, RpcError } from "./protocol.js";
 
-export type ProviderId = "claude" | "codex" | "grok" | "gemini" | "demo";
+export type ProviderId = "claude" | "codex" | "grok" | "gemini" | "local" | "demo";
 
 /** Todos los proveedores, en el orden en que se muestran. */
-export const PROVIDER_IDS: readonly ProviderId[] = ["claude", "codex", "grok", "gemini", "demo"];
+export const PROVIDER_IDS: readonly ProviderId[] = ["claude", "codex", "grok", "gemini", "local", "demo"];
 
 export function isProviderId(value: unknown): value is ProviderId {
   return typeof value === "string" && (PROVIDER_IDS as readonly string[]).includes(value);

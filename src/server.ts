@@ -13,6 +13,7 @@ import type { AgentClient, ProviderId } from "./providers/client.js";
 import { CodexAppServerClient } from "./providers/codex.js";
 import { DemoAgentClient } from "./providers/demo.js";
 import { detectProviders } from "./providers/detect.js";
+import { LocalAgentClient, LocalModelRuntime, localProviderStatus, readLocalModelConfig } from "./providers/local.js";
 import { type CliName, locateCli } from "./providers/locate.js";
 import { acpAuthMethods, GROK_AGENT_ARGS, installCommand, providerEnv, signInCommands } from "./providers/presets.js";
 import { AgentService, VERSION } from "./service.js";
@@ -80,6 +81,12 @@ async function main(): Promise<void> {
   const locate = (name: CliName) => locateCli(name, { configured: configured[name], programsDir });
   const program = (name: CliName) => locate(name)?.path ?? configured[name] ?? name;
 
+  let localRuntime: LocalModelRuntime | null = null;
+  try {
+    const localConfig = readLocalModelConfig(config.dataDir);
+    if (localConfig) localRuntime = new LocalModelRuntime(localConfig);
+  } catch (error) { log("warn", `Qwen local desactivado: ${String(error)}`); }
+
   const createClient = (provider: ProviderId): AgentClient => {
     switch (provider) {
       case "claude":
@@ -120,6 +127,9 @@ async function main(): Promise<void> {
       }
       case "demo":
         return new DemoAgentClient();
+      case "local":
+        if (!localRuntime) throw new Error("Configura local-model.json para usar Qwen local.");
+        return new LocalAgentClient(localRuntime, { executable: config.claudeBin, env: providerEnv("claude") });
     }
   };
   const environments = { codex: codexEnvironment, grok: grokEnvironment, gemini: geminiEnvironment };
@@ -132,15 +142,18 @@ async function main(): Promise<void> {
     createClient,
     // Claude Bot: el bot principal que arma los equipos de agentes.
     mainAgent: true,
-    detectProviders: () =>
-      detectProviders({
+    detectProviders: async () => {
+      const providers = await detectProviders({
         enabled: config.detectProviders,
         codexBin: config.codexBin,
         grokBin: config.grokBin,
         geminiBin: config.geminiBin,
         locate,
         claude: { cli: claudeCli, env: claudeEnvironment, configDir: config.claudeConfigDir },
-      }),
+      });
+      if (localRuntime) providers.splice(providers.length - 1, 0, localProviderStatus(localRuntime.config));
+      return providers;
+    },
     // Como en OpenBot: se inicia sesión con la cuenta mediante el propio CLI, que abre el navegador.
     signInCommands: (provider) => {
       if (provider === "claude") {
@@ -210,6 +223,7 @@ async function main(): Promise<void> {
     app.closeStreams();
     await new Promise<void>((resolve) => app.server.close(() => resolve()));
     await service.stop();
+    await localRuntime?.stop();
     await speech.stop();
     await voices.stop();
     store.close();

@@ -92,7 +92,7 @@ export const ROUTINE_LIMITS = { name: 80, prompt: 4_000, times: 12 } as const;
 export const QUESTION_LIMITS = { question: 300, label: 80, detail: 200, minOptions: 2, maxOptions: 4 } as const;
 export const AGENT_LIMITS = { name: 60, role: 200, description: 2_000, instructions: INSTRUCTIONS_MAX, project: 60, model: 120, appearance: 300 } as const;
 /** Proveedores que el bot principal puede elegir para un agente nuevo. */
-export const AGENT_PROVIDERS = ["claude", "codex", "grok", "gemini"] as const;
+export const AGENT_PROVIDERS = ["claude", "codex", "grok", "gemini", "local"] as const;
 
 export const AGENT_FIELD_HELP = {
   name: "Nombre corto, claro y único, p. ej. «Diseñador de Niveles».",

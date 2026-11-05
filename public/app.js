@@ -1097,7 +1097,7 @@ function stateLabel(agent) {
 }
 
 function providerLabel(provider) {
-  return { claude: "Claude", codex: "Codex", grok: "Grok", gemini: "Gemini", demo: "Demo" }[provider] ?? provider;
+  return { claude: "Claude", codex: "Codex", grok: "Grok", gemini: "Gemini", local: "Qwen local", demo: "Demo" }[provider] ?? provider;
 }
 
 function toggleSearch(force) {
@@ -1490,7 +1490,7 @@ function buildMessage(message) {
   switch (message.role) {
     case "user":
       node.className = "msg msg-user";
-      bubble.textContent = message.text;
+      renderUserMessage(message, bubble);
       if (message.channelId) {
         // En un canal: a quién le llegó (el encargado o los que nombraste con @).
         const to = Array.isArray(message.payload?.to) ? message.payload.to.map(agentName) : [];
@@ -1794,6 +1794,52 @@ function scrollToBottom(instant = false) {
 
 const INLINE = /`([^`\n]+)`|\*\*([^*\n]+)\*\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"')\]]*[^\s<>"')\].,;:!?])/g;
 
+function appendChatImage(href, label, target) {
+  const anchor = link(href, "");
+  anchor.className = "chat-image";
+  const image = document.createElement("img");
+  image.src = href;
+  image.alt = label || "Imagen";
+  image.loading = "lazy";
+  image.referrerPolicy = "no-referrer";
+  image.addEventListener("error", () => {
+    image.hidden = true;
+    anchor.append("No se pudo cargar la imagen. Abrir archivo.");
+  }, { once: true });
+  anchor.append(image);
+  target.append(anchor);
+}
+
+function renderUserMessage(message, target) {
+  target.replaceChildren();
+  let attachments = false;
+  let pending = [];
+  const flush = () => {
+    if (!pending.length) return;
+    const text = document.createElement("span");
+    text.className = "user-message-text";
+    text.textContent = pending.join("\n");
+    target.append(text);
+    pending = [];
+  };
+  for (const line of message.text.split("\n")) {
+    if (/^Adjunté est(?:e archivo|os archivos) en tu carpeta:$/.test(line)) {
+      attachments = true;
+      pending.push(line);
+      continue;
+    }
+    const match = attachments && line.match(/^- (adjuntos\/[^\r\n]+\.(?:png|jpe?g|gif|webp|avif))$/i);
+    if (match) {
+      flush();
+      appendChatImage(libraryUrl(message.agentId, "agent", match[1], true), match[1].slice(9), target);
+    } else {
+      if (attachments && line && !line.startsWith("- ")) attachments = false;
+      pending.push(line);
+    }
+  }
+  flush();
+}
+
 function renderMarkdown(text, target) {
   target.replaceChildren();
   const segments = text.split("```");
@@ -1826,6 +1872,13 @@ function renderBlocks(text, target) {
     const line = raw.replace(/\s+$/, "");
     if (!line.trim()) {
       reset();
+      continue;
+    }
+    const picture = line.trim().match(/^!\[([^\]\n]*)\]\((?:<([^>\n]+)>|([^\n]+))\)$/);
+    const pictureUrl = picture && chatImageUrl(picture[2] ?? picture[3]);
+    if (pictureUrl) {
+      reset();
+      appendChatImage(pictureUrl, picture[1] || "Imagen generada", target);
       continue;
     }
     let match = line.match(/^#{1,6}\s+(.*)$/);
@@ -1877,6 +1930,44 @@ function renderBlocks(text, target) {
       paragraph.append(document.createElement("br"));
     }
     renderInline(line, paragraph);
+  }
+}
+
+/** Solo imágenes de la biblioteca autenticada; convierte enlaces file antiguos sin exponer el disco. */
+function chatImageUrl(value) {
+  try {
+    const url = new URL(value.trim(), location.origin);
+    if (url.protocol === "file:") {
+      if (url.hostname) return null;
+      const path = decodeURIComponent(url.pathname).replace(/^\/([A-Za-z]:\/)/, "$1").replaceAll("\\", "/");
+      const agent = state.agents.find((item) => item.id === state.currentId);
+      const roots = [["shared", state.paths?.shared], ["agent", agent?.workspace]];
+      for (const [root, directory] of roots) {
+        if (!directory) continue;
+        const base = directory.replaceAll("\\", "/").replace(/\/$/, "") + "/";
+        const windows = /^[A-Za-z]:\//.test(base);
+        if ((windows ? path.toLowerCase() : path).startsWith(windows ? base.toLowerCase() : base)) {
+          const relative = path.slice(base.length);
+          if (/\.(png|jpe?g|webp|gif|avif)$/i.test(relative)) return libraryUrl(state.currentId, root, relative, true);
+        }
+      }
+      return null;
+    }
+    if (url.origin !== location.origin || !/^\/api\/agents\/[^/]+\/library\/file$/.test(url.pathname)) return null;
+    if (!["agent", "shared"].includes(url.searchParams.get("root"))) return null;
+    if (!/\.(png|jpe?g|webp|gif|avif)$/i.test(url.searchParams.get("path") ?? "")) return null;
+    if (url.searchParams.get("download") === "1") return null;
+    if (url.searchParams.get("root") === "agent") {
+      const id = decodeURIComponent(url.pathname.split("/")[3]);
+      const agent = state.agents.find((item) => item.id === id);
+      const directory = agent?.workspace?.replaceAll("\\", "/").replace(/\/$/, "").split("/").pop();
+      const path = url.searchParams.get("path").replaceAll("\\", "/");
+      const prefix = directory && `agentes/${directory}/`;
+      if (prefix && path.startsWith(prefix)) url.searchParams.set("path", path.slice(prefix.length));
+    }
+    return url.pathname + url.search;
+  } catch {
+    return null;
   }
 }
 
@@ -2142,6 +2233,13 @@ function renderAttachments() {
     const chip = document.createElement("span");
     chip.className = "attachment";
     chip.dataset.state = file.status;
+    if (file.status === "ready" && /\.(png|jpe?g|gif|webp|avif)$/i.test(file.relativePath ?? "")) {
+      const preview = document.createElement("img");
+      preview.src = libraryUrl(file.agentId, "agent", file.relativePath, true);
+      preview.alt = file.name;
+      preview.className = "attachment-preview";
+      chip.append(preview);
+    }
     const name = document.createElement("span");
     name.className = "file-name";
     name.textContent = file.status === "uploading" ? `${file.name} · subiendo…` : file.name;

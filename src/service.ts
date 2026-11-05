@@ -558,8 +558,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 
   providers(): ProviderStatus[] {
     return this.#providers.map((status) => {
-      const signIn = status.id === "demo" ? null : this.#signIns.view(status.id);
-      const installing = status.id === "demo" ? null : this.#installs.view(status.id);
+      const signIn = status.id === "demo" || status.id === "local" ? null : this.#signIns.view(status.id);
+      const installing = status.id === "demo" || status.id === "local" ? null : this.#installs.view(status.id);
       const problem = status.loggedIn === true || signIn ? null : (this.#signInProblems.get(status.id) ?? null);
       if (!signIn && !installing && !problem) return status;
       return {
@@ -2240,9 +2240,11 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     let known: { note: string | null; saved: string; previous: string | null } | null = null;
     try {
       const client = await this.#getClient(agent.provider);
+      if (this.#stopping || this.#active.get(agent.id) !== state) return;
       // Lo que tenga ahora su AGENTS.md (el usuario o el propio agente pudieron cambiarlo).
       const fresh = this.#syncInstructions(this.#requireAgent(agent.id));
       const threadId = await this.#ensureThread(fresh, client);
+      if (this.#stopping || this.#active.get(agent.id) !== state) return;
       state.threadId = threadId;
       const sender = delivery.senderAgentId ? this.#store.getAgent(delivery.senderAgentId) : null;
       const original = delivery.replyTo ? this.#store.getMessage(delivery.replyTo) : null;
@@ -3508,7 +3510,7 @@ function installProvider(value: unknown): InstallProvider {
   throw new ServiceError("Ese proveedor no se instala desde la app.", 400);
 }
 
-const PROVIDER_LABELS: Record<ProviderId, string> = { claude: "Claude", codex: "Codex", grok: "Grok", gemini: "Gemini", demo: "Demo" };
+const PROVIDER_LABELS: Record<ProviderId, string> = { claude: "Claude", codex: "Codex", grok: "Grok", gemini: "Gemini", local: "Qwen local", demo: "Demo" };
 
 export function providerLabel(provider: ProviderId): string {
   return PROVIDER_LABELS[provider] ?? provider;

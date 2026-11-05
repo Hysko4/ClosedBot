@@ -126,6 +126,8 @@ interface PendingServerRequest {
 export type QueryFactory = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => Query;
 
 export interface ClaudeClientOptions {
+  /** Inferencia local mediante Messages API; el SDK conserva herramientas y sesiones. */
+  local?: { model: string; baseUrl: string; configDir: string; contextSize?: number; contextSizes?: Record<string, number>; models?: Array<{ model: string; displayName: string }> };
   /** Ruta opcional al ejecutable `claude`; si falta, el SDK usa el suyo. */
   executable?: string | null;
   /** Añade el servidor MCP de Playwright (navegador) a cada agente. */
@@ -165,7 +167,7 @@ export const CLAUDE_MODELS = [
  * Cada hilo es una sesión de Claude Code con entrada en streaming.
  */
 export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements AgentClient {
-  readonly provider: ProviderId = "claude";
+  readonly provider: ProviderId;
   readonly #options: ClaudeClientOptions;
   readonly #createQuery: QueryFactory;
   readonly #threads = new Map<string, ThreadRuntime>();
@@ -177,6 +179,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
 
   constructor(options: ClaudeClientOptions = {}) {
     super();
+    this.provider = options.local ? "local" : "claude";
     this.#options = options;
     this.#createQuery = options.createQuery ?? ((params) => query(params));
   }
@@ -215,8 +218,9 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
       case "initialize":
         return {} as T;
       case "model/list":
-        return { data: CLAUDE_MODELS } as T;
+        return { data: this.#options.local ? (this.#options.local.models ?? [{ model: this.#options.local.model, displayName: "Qwen local" }]).map(model => ({ ...model, isDefault: model.model === this.#options.local!.model, supportedReasoningEfforts: [] })) : CLAUDE_MODELS } as T;
       case "account/rateLimits/read":
+        if (this.#options.local) return { rateLimits: { available: false, windows: [] } } as T;
         return { rateLimits: await this.#readRateLimits() } as T;
       case "thread/start": {
         const threadId = randomUUID();
@@ -350,6 +354,30 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
     // Los agentes entran con la cuenta de claude.ai de la persona. Sin esto, Claude Code cargaría los
     // conectores de esa cuenta (servidores, bancos, brókeres…) y en acceso total podría usarlos sin preguntar.
     env.ENABLE_CLAUDEAI_MCP_SERVERS = "false";
+    const local = this.#options.local ? { ...this.#options.local, model: config.model || this.#options.local.model } : undefined;
+    if (local) {
+      for (const key of ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "XAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_FOUNDRY_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]) delete env[key];
+      env.ANTHROPIC_BASE_URL = local.baseUrl;
+      env.ANTHROPIC_API_KEY = "local";
+      env.CLAUDE_CONFIG_DIR = local.configDir;
+      env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
+      for (const key of ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_CUSTOM_HEADERS"]) delete env[key];
+      env.DISABLE_TELEMETRY = "1";
+      env.DISABLE_ERROR_REPORTING = "1";
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL = local.model;
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL = local.model;
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = local.model;
+      env.ENABLE_TOOL_SEARCH = "false";
+      env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = "2048";
+      // El SDK no conoce las ventanas de los modelos externos: no debe asumir 200k.
+      const contextSize = local.contextSizes?.[local.model] ?? (local.model === this.#options.local?.model ? local.contextSize : undefined) ?? 8192;
+      env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(contextSize);
+      env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(contextSize);
+      env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = "70";
+      delete env.DISABLE_COMPACT;
+      delete env.DISABLE_AUTO_COMPACT;
+      env.MAX_THINKING_TOKENS = "0";
+    }
 
     const mcpServers: NonNullable<Options["mcpServers"]> = { [TEAM_NAMESPACE]: this.#createTeamServer(threadId, config.teamTools ?? [...TEAM_TOOLS]) };
     if (this.#options.playwright) {
@@ -363,10 +391,10 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
     const options: Options = {
       cwd: config.cwd,
       ...(this.#options.executable ? { pathToClaudeCodeExecutable: this.#options.executable } : {}),
-      ...(config.model ? { model: normalizeClaudeModel(config.model) } : {}),
-      ...(config.effort ? { effort: normalizeClaudeEffort(config.effort) } : {}),
+      ...(local ? { model: config.model || local.model, thinking: { type: "disabled" as const }, tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"] } : config.model ? { model: normalizeClaudeModel(config.model) } : {}),
+      ...(!local && config.effort ? { effort: normalizeClaudeEffort(config.effort) } : {}),
       ...(resume ? { resume: threadId } : { sessionId: threadId }),
-      systemPrompt: {
+      systemPrompt: local ? `Eres un asistente local que trabaja en ClosedBot. Responde en español. Usa las herramientas disponibles para leer archivos, escribir y trabajar con el equipo; no inventes resultados de herramientas.\nCarpeta de trabajo: ${config.cwd}\n${config.developerInstructions}${this.#withoutShell(config) ? `\n${NO_SHELL_NOTE}` : ""}` : {
         type: "preset",
         preset: "claude_code",
         append: this.#withoutShell(config) ? `${config.developerInstructions}\n${NO_SHELL_NOTE}` : config.developerInstructions,
@@ -376,7 +404,8 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
       canUseTool: createPermissionPolicy(config.access, allowedDirs),
       mcpServers,
       // Segunda barrera para lo mismo: ninguna fuente de ajustes puede volver a activar los conectores.
-      settings: { disableClaudeAiConnectors: true },
+      settings: { disableClaudeAiConnectors: true, ...(local ? { env: { ANTHROPIC_BASE_URL: local.baseUrl, ANTHROPIC_API_KEY: "local" } } : {}) },
+      ...(local ? { strictMcpConfig: true } : {}),
       env,
     };
 
@@ -385,7 +414,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
         ...options,
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
-        settingSources: ["user", "project", "local"],
+        settingSources: local ? [] : ["user", "project", "local"],
       };
     }
     if (this.#withoutShell(config)) {
@@ -473,7 +502,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
     }
     const requestedModel = getString(params, "model");
     if (requestedModel && requestedModel !== runtime.config.model) {
-      await runtime.query.setModel(normalizeClaudeModel(requestedModel));
+      await runtime.query.setModel(this.#options.local ? requestedModel : normalizeClaudeModel(requestedModel));
       runtime.config.model = requestedModel;
     }
 

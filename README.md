@@ -44,6 +44,74 @@ Está inspirada en [OpenBot](https://openbot.run/) y reutiliza partes de su vers
   - En Ajustes, **«Acceso total para todos»** se lo da a todos los agentes a la vez, incluidos los nuevos. Al apagarlo, cada agente vuelve a su propio nivel. Desde la consola: `npm run access -- total` o `npm run access -- carpeta`.
 - **Los conectores de tu cuenta de Claude quedan fuera.** Los agentes entran con tu cuenta, pero no cargan los conectores que tengas en claude.ai (servidores, bancos, brókeres), ni siquiera con acceso total. ClosedBot se los apaga con `ENABLE_CLAUDEAI_MCP_SERVERS=false` y `disableClaudeAiConnectors`.
 
+## Modelos locales (Qwen GGUF)
+
+El proveedor opcional **Qwen local** conserva el motor de herramientas y sesiones
+del Claude Agent SDK, pero realiza la inferencia en llama.cpp en este PC, sin
+usar una cuenta de Claude ni su cuota. Aparece al configurar
+`~/.closedbot/local-model.json` y reiniciar ClosedBot:
+
+```json
+{
+  "model": "qwen3.8-unleashed",
+  "baseUrl": "http://127.0.0.1:8089",
+  "executable": "C:/Users/tu-usuario/.closedbot/local-model/llama/llama-server.exe",
+  "modelPath": "C:/Users/tu-usuario/.closedbot/local-model/Qwen3.8-27B-Unleashed-UD-Q3_K_XL.gguf",
+  "chatTemplatePath": "C:/Users/tu-usuario/ClosedBot/scripts/local/qwen-sdk.jinja",
+  "contextSize": 32768,
+  "gpuLayers": "auto"
+}
+```
+
+ClosedBot inicia llama.cpp al recibir el primer mensaje local y cierra el
+proceso que inició al salir. Si ya existe un servidor con el mismo modelo en
+esa dirección, lo reutiliza y lo deja abierto al salir. Puedes omitir
+`executable` y `modelPath` juntos para administrar el servidor por tu cuenta.
+Solo se permiten direcciones HTTP de loopback, sin claves ni rutas adicionales.
+`baseUrl` es la raíz del servidor, sin `/v1`.
+La plantilla `scripts/local/qwen-sdk.jinja` conserva la plantilla del GGUF Qwen3.8
+Unleashed y reúne los mensajes de sistema del SDK al principio. Esto evita el
+error «System message must be at the beginning». Para otro modelo, usa una
+plantilla compatible con ese modelo o elimina `chatTemplatePath` si su plantilla
+ya admite el formato del SDK.
+
+En la ficha del agente, selecciona **Cerebro → Modelo → Qwen local**. Se
+recomienda crear un agente separado para conservar las conversaciones de los
+demás proveedores. El historial local del SDK está en
+`~/.closedbot/local-model/agent-state`; el registro de carga del modelo, en
+`~/.closedbot/local-model/server.log`. Requiere una versión de llama.cpp con
+`/v1/messages`, soporte de la arquitectura del GGUF y las DLL de CUDA apropiadas.
+La velocidad y la cantidad de capas que caben en GPU dependen de la RAM/VRAM
+libres. No descarga ni cambia automáticamente a un modelo en la nube.
+Si llama.cpp termina inesperadamente mientras un agente conserva su hilo abierto,
+reinicia ClosedBot para volver a cargar el servidor y reanudar esa conversación.
+
+### Varios modelos locales
+
+Para ofrecer varios modelos desde el mismo proveedor, añade `modelsPresetPath`
+(ruta absoluta a un INI de presets de llama.cpp) y `models` a `local-model.json`:
+
+```json
+{
+  "model": "qwen3.8-unleashed",
+  "baseUrl": "http://127.0.0.1:8089",
+  "executable": "C:/Users/tu-usuario/.closedbot/local-model/llama/llama-server.exe",
+  "modelsPresetPath": "C:/Users/tu-usuario/.closedbot/local-model/models.ini",
+  "models": [
+    { "model": "qwen3.8-unleashed", "displayName": "Qwen 3.8 27B Unleashed" },
+    { "model": "qwen3.5-9b-abliterated", "displayName": "Qwen 3.5 9B abliterated Q4_K_M" }
+  ]
+}
+```
+
+Los nombres del catálogo deben coincidir con las secciones del INI y el catálogo
+debe incluir `model`, el predeterminado. Cada sección define su GGUF, contexto y
+plantilla. Para Qwen3.5-9B se incluye `scripts/local/qwen35-sdk.jinja`.
+ClosedBot inicia el router con `--models-max 1`: los agentes eligen su modelo y
+llama.cpp gestiona la carga y descarga de memoria. Los modelos auxiliares del
+SDK usan el modelo del agente correspondiente. La configuración anterior de un
+solo GGUF sigue siendo válida; en modo router `modelPath` no es necesario.
+
 ## Antes de instalar: seguridad
 
 - **Instálala en una máquina dedicada** (una VM o VPS aparte), nunca en el servidor de Sider4 ni donde guardes credenciales de bancos, exchanges o bots. Los agentes ejecutan comandos de verdad.
