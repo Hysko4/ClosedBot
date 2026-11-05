@@ -1,6 +1,6 @@
 {
   "name": "closedbot",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "description": "Equipo personal de agentes de IA (Claude y Codex) con interfaz web instalable en el teléfono.",
   "license": "UNLICENSED",

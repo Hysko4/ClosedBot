@@ -18,6 +18,11 @@ const BEFORE = "(^|[^\\p{L}\\p{N}_@])";
 const AFTER = "(?![\\p{L}\\p{N}_])";
 const EVERYONE = new RegExp(`${BEFORE}@(todos|todas|canal|everyone|all)${AFTER}`, "u");
 
+/** El texto nombra a todos con @todos (o @todas, @canal, @everyone, @all). */
+export function mentionsEveryone(text: string): boolean {
+  return EVERYONE.test(foldText(text));
+}
+
 /**
  * Agentes nombrados con @ en el texto, en el orden del canal. Los nombres pueden tener espacios
  * («@Diseñador de Niveles»); los largos se buscan primero para que «@Ana María» no cuente como «@Ana».

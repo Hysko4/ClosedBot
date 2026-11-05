@@ -94,6 +94,7 @@ test("Codex: si Claude Bot usa Codex, su hilo nace con las herramientas para arm
     const start = readLog(log).find((item) => item.method === "thread/start") as { params: Record<string, unknown> };
     const tools = (start.params.dynamicTools as Array<{ tools: Array<{ name: string }> }>)[0]?.tools.map((entry) => entry.name) ?? [];
     assert.ok(tools.includes("create_agent") && tools.includes("update_agent") && tools.includes("create_channel"));
+    assert.ok(tools.includes("read_agent") && tools.includes("start_round") && tools.includes("update_board"), "y las de la sala");
     assert.match(String(start.params.developerInstructions), /Eres el bot principal de ClosedBot/);
   } finally {
     await close();

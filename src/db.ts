@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type { AccessLevel, ProviderId } from "./providers/client.js";
+import { isRequestMode, isRoundMode, type RoundParticipant, type RoundRecord, type RoundStatus } from "./rounds.js";
 import type { Schedule } from "./schedule.js";
 
 export interface AgentRecord {
@@ -284,6 +285,20 @@ CREATE TABLE IF NOT EXISTS memories (
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS memories_agent ON memories(agent_id, created_at);
+CREATE TABLE IF NOT EXISTS rounds (
+  id TEXT PRIMARY KEY,
+  mode TEXT NOT NULL,
+  question TEXT NOT NULL,
+  participants TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  request_mode TEXT NOT NULL DEFAULT 'corta',
+  hops INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  closed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS rounds_status ON rounds(status, created_at);
+CREATE INDEX IF NOT EXISTS rounds_request ON rounds(request_id, mode);
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL,
@@ -319,7 +334,7 @@ const ADDED_COLUMNS: Array<{ table: string; column: string; ddl: string; backfil
 /** Índices sobre columnas añadidas: se crean después de añadirlas. */
 const ADDED_INDEXES = ["CREATE INDEX IF NOT EXISTS messages_channel ON messages(channel_id, seq)"];
 
-const SCHEMA_VERSION = "5";
+const SCHEMA_VERSION = "6";
 
 /** Roles cuyos mensajes cuentan como novedad para el aviso de no leído. */
 const UNREAD_ROLES = "('assistant', 'teammate', 'notice', 'decision', 'routine')";
@@ -998,6 +1013,65 @@ export class Store {
 
   // ---------- sesiones ----------
 
+  // ---------- rondas de Claude Bot ----------
+
+  insertRound(input: Omit<RoundRecord, "id" | "status" | "createdAt" | "closedAt"> & { id?: string }): RoundRecord {
+    const id = input.id ?? randomUUID();
+    this.#db
+      .prepare(
+        `INSERT INTO rounds (id, mode, question, participants, status, request_id, request_mode, hops, created_at)
+         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?)`,
+      )
+      .run(id, input.mode, input.question, JSON.stringify(input.participants), input.requestId, input.requestMode, input.hops, Date.now());
+    return this.getRound(id) as RoundRecord;
+  }
+
+  getRound(id: string): RoundRecord | null {
+    const row = this.#db.prepare("SELECT * FROM rounds WHERE id = ?").get(id) as Row | undefined;
+    return row ? toRound(row) : null;
+  }
+
+  updateRound(id: string, patch: Partial<Pick<RoundRecord, "participants" | "status" | "closedAt">>): RoundRecord | null {
+    const sets: string[] = [];
+    const values: SQLInputValue[] = [];
+    if (patch.participants !== undefined) {
+      sets.push("participants = ?");
+      values.push(JSON.stringify(patch.participants));
+    }
+    if (patch.status !== undefined) {
+      sets.push("status = ?");
+      values.push(patch.status);
+    }
+    if (patch.closedAt !== undefined) {
+      sets.push("closed_at = ?");
+      values.push(patch.closedAt);
+    }
+    if (sets.length) {
+      values.push(id);
+      this.#db.prepare(`UPDATE rounds SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    }
+    return this.getRound(id);
+  }
+
+  listRounds(status?: RoundStatus): RoundRecord[] {
+    const rows = (
+      status
+        ? this.#db.prepare("SELECT * FROM rounds WHERE status = ? ORDER BY created_at, rowid").all(status)
+        : this.#db.prepare("SELECT * FROM rounds ORDER BY created_at, rowid").all()
+    ) as Row[];
+    return rows.map(toRound);
+  }
+
+  /** Rondas de un pedido (del más viejo al más nuevo), de un modo o de todos. */
+  roundsForRequest(requestId: string, mode?: RoundRecord["mode"]): RoundRecord[] {
+    const rows = (
+      mode
+        ? this.#db.prepare("SELECT * FROM rounds WHERE request_id = ? AND mode = ? ORDER BY created_at, rowid").all(requestId, mode)
+        : this.#db.prepare("SELECT * FROM rounds WHERE request_id = ? ORDER BY created_at, rowid").all(requestId)
+    ) as Row[];
+    return rows.map(toRound);
+  }
+
   insertSession(tokenHash: string, expiresAt: number, userAgent: string | null): void {
     this.#db
       .prepare("INSERT INTO sessions (token_hash, created_at, expires_at, user_agent) VALUES (?, ?, ?, ?)")
@@ -1084,6 +1158,29 @@ export function toVoice(value: SQLInputValue | undefined | Record<string, unknow
 
 export function toNotify(value: unknown): NotifyLevel | "" {
   return value === "all" || value === "needs" || value === "none" ? value : "";
+}
+
+function toRound(row: Row): RoundRecord {
+  let participants: RoundParticipant[] = [];
+  try {
+    const parsed: unknown = JSON.parse(String(row.participants ?? "[]"));
+    if (Array.isArray(parsed)) participants = parsed.filter((item): item is RoundParticipant => Boolean(item) && typeof item === "object" && typeof (item as RoundParticipant).agentId === "string");
+  } catch {
+    participants = [];
+  }
+  const status = String(row.status);
+  return {
+    id: String(row.id),
+    mode: isRoundMode(row.mode) ? row.mode : "propuestas",
+    question: String(row.question ?? ""),
+    participants,
+    status: status === "closed" || status === "cancelled" ? status : "open",
+    requestId: String(row.request_id ?? ""),
+    requestMode: isRequestMode(row.request_mode) ? row.request_mode : "corta",
+    hops: Number(row.hops ?? 0),
+    createdAt: Number(row.created_at),
+    closedAt: row.closed_at === null || row.closed_at === undefined ? null : Number(row.closed_at),
+  };
 }
 
 function toMemory(row: Row): MemoryRecord {

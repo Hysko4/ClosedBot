@@ -21,6 +21,7 @@ import {
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { CHANNEL_LIMITS, MAX_CHANNEL_MEMBERS } from "../channels.js";
+import { ROUND_LIMITS, ROUND_MODES } from "../rounds.js";
 import { MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES } from "../schedule.js";
 import {
   AGENT_FIELD_HELP,
@@ -37,11 +38,14 @@ import {
   LIST_MEMORIES_DESCRIPTION,
   LIST_ROUTINES_DESCRIPTION,
   QUESTION_LIMITS,
+  READ_AGENT_DESCRIPTION,
   REMEMBER_DESCRIPTION,
+  ROUND_FIELD_HELP,
   ROUTINE_LIMITS,
   SEARCH_MEMORIES_DESCRIPTION,
   SEND_MESSAGE_DESCRIPTION,
   SET_MEMORY_INCLUSION_DESCRIPTION,
+  START_ROUND_DESCRIPTION,
   TEAM_NAMESPACE,
   TEAM_TOOLS,
   TOOL_ASK_USER,
@@ -53,12 +57,16 @@ import {
   TOOL_LIST_AGENTS,
   TOOL_LIST_MEMORIES,
   TOOL_LIST_ROUTINES,
+  TOOL_READ_AGENT,
   TOOL_REMEMBER,
   TOOL_SEARCH_MEMORIES,
   TOOL_SEND_MESSAGE,
   TOOL_SET_MEMORY_INCLUSION,
+  TOOL_START_ROUND,
   TOOL_UPDATE_AGENT,
+  TOOL_UPDATE_BOARD,
   UPDATE_AGENT_DESCRIPTION,
+  UPDATE_BOARD_DESCRIPTION,
 } from "../team.js";
 import { MEMORY_LIMITS } from "../memories.js";
 import { VERSION } from "../version.js";
@@ -724,6 +732,23 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
           topic: z.string().max(CHANNEL_LIMITS.topic).optional().describe(CHANNEL_FIELD_HELP.topic),
         },
         (args) => call(TOOL_CREATE_CHANNEL, args),
+      ),
+      tool(TOOL_READ_AGENT, READ_AGENT_DESCRIPTION, { agent: z.string().min(1).describe("Id o nombre del agente.") }, (args) => call(TOOL_READ_AGENT, args)),
+      tool(
+        TOOL_START_ROUND,
+        START_ROUND_DESCRIPTION,
+        {
+          mode: z.enum(ROUND_MODES as [string, ...string[]]).describe(ROUND_FIELD_HELP.mode),
+          participants: z.array(z.string().min(1)).min(1).max(ROUND_LIMITS.participants.opiniones).describe(ROUND_FIELD_HELP.participants),
+          question: z.string().min(1).max(ROUND_LIMITS.question).describe(ROUND_FIELD_HELP.question),
+        },
+        (args) => call(TOOL_START_ROUND, args),
+      ),
+      tool(
+        TOOL_UPDATE_BOARD,
+        UPDATE_BOARD_DESCRIPTION,
+        { text: z.string().max(ROUND_LIMITS.board).describe("La pizarra completa, en pocas líneas.") },
+        (args) => call(TOOL_UPDATE_BOARD, args),
       ),
     ];
     const allowed = new Set(names);

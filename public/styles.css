@@ -1924,6 +1924,45 @@ svg {
   color: var(--accent-text);
 }
 
+/* La pizarra de Claude Bot: se despliega bajo la línea de actividad. */
+.msg-board details {
+  max-width: 100%;
+  text-align: right;
+}
+
+.msg-board summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+  text-decoration: underline;
+  text-decoration-color: #4d4d4d;
+  text-underline-offset: 3px;
+}
+
+.msg-board summary::-webkit-details-marker {
+  display: none;
+}
+
+.msg-board .board-text {
+  margin: 8px 0 0 auto;
+  max-width: 560px;
+  text-align: left;
+  background: #161616;
+  border: 1px dashed #333;
+  border-radius: 14px;
+  padding: 9px 13px;
+  font-size: 14px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+/* La respuesta de un agente en una ronda (en la sala de Claude Bot). */
+.msg-round .bubble {
+  border: 1px solid #23304a;
+}
+
 .msg[data-status="interrupted"] .bubble,
 .msg[data-status="failed"] .bubble {
   border: 1px solid #3a2222;
@@ -2345,6 +2384,49 @@ svg {
   background: var(--accent-soft);
   color: var(--accent-text);
   animation: ring 1.4s ease-out infinite;
+}
+
+/* «Que opinen todos» (solo en el chat de Claude Bot): activado, se ve su nombre. */
+.composer-chip {
+  height: 38px;
+  min-width: 38px;
+  border-radius: 19px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 9px;
+  color: #a7a7a7;
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex: none;
+}
+
+.composer-chip:hover {
+  background: var(--raised);
+  color: #e0e0e0;
+}
+
+.composer-chip[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.composer-chip .chip-label {
+  display: none;
+}
+
+.composer-chip[aria-pressed="true"] .chip-label {
+  display: inline;
+  padding-right: 3px;
+}
+
+/* En el teléfono basta el color (y el texto del cuadro dice que opinarán todos). */
+@media (max-width: 560px) {
+  .composer-chip[aria-pressed="true"] .chip-label {
+    display: none;
+  }
 }
 
 .action-button {

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { GREETING_MARKER } from "../instructions.js";
+import { ROUND_INPUT_PREFIX, ROUND_RESULT_PREFIX, TODOS_NOTE_PREFIX } from "../rounds.js";
 import { splitTeamNote } from "../team-state.js";
 import {
   TEAM_NAMESPACE,
@@ -10,10 +11,13 @@ import {
   TOOL_CREATE_ROUTINE,
   TOOL_LIST_AGENTS,
   TOOL_LIST_ROUTINES,
+  TOOL_READ_AGENT,
   TOOL_REMEMBER,
   TOOL_SEARCH_MEMORIES,
   TOOL_SEND_MESSAGE,
+  TOOL_START_ROUND,
   TOOL_UPDATE_AGENT,
+  TOOL_UPDATE_BOARD,
 } from "../team.js";
 import type { AgentClient, ProviderId } from "./client.js";
 import {
@@ -45,8 +49,11 @@ export interface DemoClientOptions {
  *   - `/equipo` lista a los compañeros; `/lento` transmite la respuesta despacio;
  *   - `/pregunta [¿Texto? | Opción A | Opción B]` hace una pregunta con opciones al usuario;
  *   - `/rutina HH:MM Nombre` o `/rutina cada N Nombre` crea una rutina; `/rutinas` las lista;
- *   - solo para el bot principal: `/crear Nombre | Rol | Proyecto` crea un agente y
- *     `/ajustar Nombre | Rol nuevo` le cambia el rol.
+ *   - solo para el bot principal: `/crear Nombre | Rol | Proyecto` crea un agente,
+ *     `/ajustar Nombre | Rol nuevo` le cambia el rol, `/ficha Nombre` lee su ficha,
+ *     `/pizarra texto` escribe la pizarra y `/ronda modo | Ana, Beto | consulta` abre una ronda;
+ *   - en una ronda, cada agente responde con una propuesta, una opinión o «De acuerdo»
+ *     (o «Paso» si la consulta dice `/paso`).
  */
 export class DemoAgentClient extends EventEmitter<ClientEvents> implements AgentClient {
   readonly provider: ProviderId = "demo";
@@ -144,6 +151,24 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
       const team = splitTeamNote(input);
       if (team.note) notes.push(`ClosedBot me contó cómo están tus agentes:\n${team.note.split("\n").slice(1).join("\n")}`);
       input = team.rest;
+      // Una consulta de una ronda de Claude Bot: se responde corto, sin herramientas.
+      if (input.startsWith(ROUND_INPUT_PREFIX)) {
+        await this.#say(threadId, state, demoRoundAnswer(input));
+        return;
+      }
+      // El resultado de una ronda (lo recibe Claude Bot): cuántos respondieron.
+      if (input.startsWith(ROUND_RESULT_PREFIX)) {
+        const header = input.split("\n")[0] ?? "";
+        const count = /respondieron (\d+) de (\d+)/.exec(header);
+        notes.push(`Recibí las respuestas de la ronda${count ? ` (${count[1]} de ${count[2]})` : ""}.`);
+        input = input.slice(header.length).trim();
+      }
+      // «Que opinen todos»: la nota de ClosedBot va antes del mensaje del usuario.
+      if (input.startsWith(TODOS_NOTE_PREFIX)) {
+        const end = input.indexOf("\n\n");
+        notes.push("ClosedBot me pidió que opinen todos antes de repartir.");
+        input = end < 0 ? "" : input.slice(end + 2);
+      }
       const { channel, inner } = splitChannel(input);
       const body = extractBody(inner);
       if (/(^|\s)\/equipo(\s|$)/.test(body)) {
@@ -226,6 +251,37 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
           notes.push(`No pude crear el canal «${name}»: ${errorMessage(error)}`);
         }
       }
+      for (const match of body.matchAll(/^\/ficha\s+(.+)$/gm)) {
+        const agent = (match[1] ?? "").trim();
+        try {
+          notes.push(`Ficha de ${agent}: ${await this.#callTool(threadId, state.turnId, TOOL_READ_AGENT, { agent })}`);
+        } catch (error) {
+          notes.push(`No pude leer la ficha de ${agent}: ${errorMessage(error)}`);
+        }
+      }
+      const board = /^\/pizarra(?:\s+(.*))?$/m.exec(body);
+      if (board) {
+        try {
+          await this.#callTool(threadId, state.turnId, TOOL_UPDATE_BOARD, { text: (board[1] ?? "").trim() });
+          notes.push("Actualicé la pizarra.");
+        } catch (error) {
+          notes.push(`No pude escribir la pizarra: ${errorMessage(error)}`);
+        }
+      }
+      const round = /^\/ronda\s+(.+)$/m.exec(body);
+      if (round) {
+        const [mode = "", people = "", question = ""] = (round[1] ?? "").split("|").map((part) => part.trim());
+        const participants = people
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean);
+        try {
+          await this.#callTool(threadId, state.turnId, TOOL_START_ROUND, { mode, participants, question: question || "Consulta de prueba de la demo." });
+          notes.push(`Abrí una ronda de «${mode}» con ${participants.join(", ")}.`);
+        } catch (error) {
+          notes.push(`No pude abrir la ronda: ${errorMessage(error)}`);
+        }
+      }
       for (const match of body.matchAll(/^\/recuerda(\s+siempre)?\s+(.+)$/gm)) {
         const text = (match[2] ?? "").trim();
         try {
@@ -292,6 +348,20 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
     }
   }
 
+  /** Responde un texto fijo (para las rondas) y termina el turno. */
+  async #say(threadId: string, state: { turnId: string; interrupted: boolean }, reply: string): Promise<void> {
+    const itemId = `${state.turnId}:demo`;
+    let text = "";
+    for (const word of reply.split(/(?<=\s)/)) {
+      if (state.interrupted || !this.#running) break;
+      text += word;
+      this.emit("notification", { method: "item/agentMessage/delta", params: { threadId, turnId: state.turnId, itemId, delta: word } });
+      await sleep(this.#wordDelayMs);
+    }
+    this.emit("notification", { method: "item/completed", params: { threadId, turnId: state.turnId, item: { id: itemId, type: "agentMessage", text } } });
+    this.#finish(threadId, state, state.interrupted ? "interrupted" : "completed");
+  }
+
   #finish(threadId: string, state: { turnId: string }, status: string): void {
     this.#active.delete(threadId);
     this.emit("notification", { method: "turn/completed", params: { threadId, turn: { id: state.turnId, status } } });
@@ -315,6 +385,19 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
     if (isRecord(result) && result.success === false) throw new Error(text || "La herramienta falló.");
     return text;
   }
+}
+
+/** Lo que responde la demo a una consulta de una ronda: corto, como pide la ronda. */
+function demoRoundAnswer(input: string): string {
+  const mode = /^\[Ronda de ClosedBot · ([^\]\n]+)\]/.exec(input)?.[1] ?? "";
+  const start = input.search(/^--- consulta de .+ ---$/m);
+  const end = input.indexOf("\n--- cómo responder ---");
+  const question = start >= 0 && end > start ? input.slice(input.indexOf("\n", start) + 1, end).trim() : "";
+  const summary = question.length > 80 ? `${question.slice(0, 80)}…` : question;
+  if (/(^|\s)\/paso(\s|$)/.test(question)) return "Paso: en modo demo no tengo nada que aportar a esto.";
+  if (mode === "Acuerdo del reparto") return "De acuerdo con el reparto (modo demo).";
+  if (mode === "Que opinen todos") return `Opinión de demo: conviene repartirlo por partes; yo tomaría una de «${summary}».`;
+  return `Propuesta de demo: puedo encargarme de una parte de «${summary}».`;
 }
 
 /** Saludo inicial de la demo, con el nombre del agente y del usuario que trae el pedido. */
