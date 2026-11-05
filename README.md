@@ -361,7 +361,7 @@ test/                  pruebas (node:test)
 
 ## Estado y límites conocidos
 
-- Versión 0.9.0. Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. Las voces de OpenBot se probaron con el modelo real en Windows. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
+- Versión 0.9.1 (la Oficina más los agentes Qwen locales). Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. Las voces de OpenBot se probaron con el modelo real en Windows. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
 - PixelLab se probó con una simulación de su API: **falta la primera prueba con tu cuenta**. Si algo falla, el agente queda con el personaje simple: tocando su figura en la ficha se ve el motivo y «Dibujarlo» lo intenta de nuevo.
 - En la Oficina, cada agente está en una sola sala (la del canal que encarga o, si no, la del primero en que está); en sus otros canales su escritorio queda vacío.
 - Un solo usuario y sin notificaciones push por ahora.
