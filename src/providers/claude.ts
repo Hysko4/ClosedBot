@@ -51,6 +51,8 @@ import {
   TOOL_CREATE_CHANNEL,
   TOOL_CREATE_ROUTINE,
   TOOL_DELETE_ROUTINE,
+  TOOL_REPORT_PROGRESS,
+  REPORT_PROGRESS_DESCRIPTION,
   TOOL_FORGET_MEMORY,
   TOOL_LIST_AGENTS,
   TOOL_LIST_MEMORIES,
@@ -698,6 +700,15 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
       ),
       tool(TOOL_LIST_ROUTINES, LIST_ROUTINES_DESCRIPTION, {}, (args) => call(TOOL_LIST_ROUTINES, args)),
       tool(TOOL_DELETE_ROUTINE, DELETE_ROUTINE_DESCRIPTION, { id: z.string().min(1) }, (args) => call(TOOL_DELETE_ROUTINE, args)),
+      tool(
+        TOOL_REPORT_PROGRESS,
+        REPORT_PROGRESS_DESCRIPTION,
+        {
+          percent: z.number().min(0).max(100).describe("Cuánto llevas, de 0 a 100."),
+          step: z.string().max(200).optional().describe("En qué paso vas, en pocas palabras."),
+        },
+        (args) => call(TOOL_REPORT_PROGRESS, args),
+      ),
       tool(
         TOOL_REMEMBER,
         REMEMBER_DESCRIPTION,

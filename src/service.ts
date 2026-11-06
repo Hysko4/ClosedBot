@@ -92,6 +92,8 @@ import {
   TOOL_SET_MEMORY_INCLUSION,
   TOOL_UPDATE_AGENT,
   TOOL_UPDATE_BOARD,
+  TOOL_REPORT_PROGRESS,
+  parseReportProgressArgs,
   type UpdateAgentArgs,
 } from "./team.js";
 import { describeChanges, describeTeam, parseTeamSnapshot, snapshotAgent, snapshotChannel, snapshotTeam, type TeamSnapshot } from "./team-state.js";
@@ -121,6 +123,8 @@ export const MAIN_AGENT_ROLE = "Bot principal: arma y coordina tus equipos de ag
 export const MAIN_KNOWN_META = "main_known";
 /** La pizarra del trabajo que lleva Claude Bot: la reciben los agentes cuando él les escribe. */
 export const BOARD_META = "main_board";
+/** Avance que informó cada agente de su tarea (report_progress), como JSON { id: AgentProgress }. */
+export const PROGRESS_META = "agent_progress";
 /** Topes para los agentes que crea el bot principal: en total y en un mismo turno. */
 export const MAX_AGENTS = 60;
 export const MAX_AGENTS_PER_TURN = 8;
@@ -213,6 +217,15 @@ export interface AgentView extends AgentRecord {
   notify: NotifyLevel;
   /** Largo de sus instrucciones: `instructions` trae solo el comienzo (las completas, en /instructions). */
   instructionsLength: number;
+  /** Cuánto lleva de su tarea, según lo último que informó con report_progress. */
+  progress: AgentProgress | null;
+}
+
+/** Avance de la tarea de un agente. */
+export interface AgentProgress {
+  percent: number;
+  step: string;
+  at: number;
 }
 
 /** Un recuerdo tal como lo ve la interfaz. */
@@ -478,6 +491,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   readonly #studio: OfficeStudio;
   /** Agentes cuyo último turno falló (para el «!» de la Oficina). */
   readonly #failedTurns = new Set<string>();
+  #progress: Map<string, AgentProgress> | null = null;
 
   constructor(options: ServiceOptions) {
     super();
@@ -871,6 +885,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       this.#store.deleteAgent(id);
       this.#studio.forget(id);
       this.#failedTurns.delete(id);
+      this.#setProgress(id, null);
       this.#emitAgents();
       if (touchedChannels) this.#emitChannels();
       // Sus rutinas se borran con él (ON DELETE CASCADE).
@@ -2248,6 +2263,10 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       state.threadId = threadId;
       const sender = delivery.senderAgentId ? this.#store.getAgent(delivery.senderAgentId) : null;
       const original = delivery.replyTo ? this.#store.getMessage(delivery.replyTo) : null;
+      // Un encargo nuevo (del usuario o de Claude Bot) después de terminar el anterior: la barra vuelve a cero.
+      if (!delivery.replyTo && (!sender || this.#isMain(sender)) && (this.#progressMap().get(agent.id)?.percent ?? 0) >= 100) {
+        this.#setProgress(agent.id, null);
+      }
       // Lo que le escribe Claude Bot a un agente lleva la pizarra del trabajo.
       const board = sender && this.#isMain(sender) && !this.#isMain(fresh) ? boardSection(this.#board(), sender.name) : null;
       const body = composeDeliveryInput(delivery, sender ? { id: sender.id, name: sender.name } : null, original?.text ?? null, board);
@@ -2683,6 +2702,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         proyecto: agent.project || null,
         proveedor: agent.provider,
         estado: agentStateLabel(agent.state),
+        ...(agent.progress ? { avance: `${agent.progress.percent} %${agent.progress.step ? ` · ${agent.progress.step}` : ""}` } : {}),
         eresTu: agent.id === senderId,
         ...(agent.main ? { botPrincipal: true } : {}),
         ...(forMain ? { modelo: agent.model ?? "predeterminado", instrucciones: clip(agent.instructions, 400) } : {}),
@@ -2741,6 +2761,11 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         horario: routine.description,
         proxima: routine.nextRunAt ? formatWhen(routine.nextRunAt) : null,
       });
+    }
+    if (params.tool === TOOL_REPORT_PROGRESS) {
+      const { percent, step } = parseReportProgressArgs(params.arguments);
+      this.#setProgress(senderId, { percent, step, at: Date.now() });
+      return toolResult({ guardado: true, avance: `${percent} %` });
     }
     if (params.tool === TOOL_LIST_ROUTINES) {
       return toolResult({
@@ -3391,6 +3416,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       instructions: agent.instructions.length > INSTRUCTIONS_PREVIEW ? `${agent.instructions.slice(0, INSTRUCTIONS_PREVIEW)}…` : agent.instructions,
       instructionsLength: agent.instructions.length,
       notify: this.#notifyLevel(agent),
+      progress: this.#progressMap().get(agent.id) ?? null,
       state,
       queued,
       unread: agent.lastAt > agent.readAt,
@@ -3451,6 +3477,33 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 
   #emitQueue(agentId: string): void {
     this.#emit({ type: "queue", agentId, queue: this.#queueView(agentId) });
+  }
+
+  #progressMap(): Map<string, AgentProgress> {
+    if (this.#progress) return this.#progress;
+    const map = new Map<string, AgentProgress>();
+    try {
+      const saved: unknown = JSON.parse(this.#store.getMeta(PROGRESS_META) ?? "{}");
+      if (isRecord(saved)) {
+        for (const [id, value] of Object.entries(saved)) {
+          if (!isRecord(value) || typeof value.percent !== "number" || typeof value.at !== "number") continue;
+          map.set(id, { percent: value.percent, step: typeof value.step === "string" ? value.step : "", at: value.at });
+        }
+      }
+    } catch {
+      // Un valor dañado no impide arrancar: se empieza sin avances.
+    }
+    this.#progress = map;
+    return map;
+  }
+
+  #setProgress(agentId: string, progress: AgentProgress | null): void {
+    const map = this.#progressMap();
+    if (!progress && !map.has(agentId)) return;
+    if (progress) map.set(agentId, progress);
+    else map.delete(agentId);
+    this.#store.setMeta(PROGRESS_META, JSON.stringify(Object.fromEntries(map)));
+    this.#emitAgents();
   }
 
   #emitAgents(): void {

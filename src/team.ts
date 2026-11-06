@@ -29,6 +29,7 @@ export const TOOL_FORGET_MEMORY = "forget_memory";
 export const TOOL_SEARCH_MEMORIES = "search_memories";
 export const TOOL_LIST_MEMORIES = "list_memories";
 export const TOOL_SET_MEMORY_INCLUSION = "set_memory_inclusion";
+export const TOOL_REPORT_PROGRESS = "report_progress";
 
 /** Herramientas de recuerdos (todos los agentes). */
 export const MEMORY_TOOLS = [TOOL_REMEMBER, TOOL_FORGET_MEMORY, TOOL_SEARCH_MEMORIES, TOOL_LIST_MEMORIES, TOOL_SET_MEMORY_INCLUSION] as const;
@@ -41,6 +42,7 @@ export const TEAM_TOOLS = [
   TOOL_CREATE_ROUTINE,
   TOOL_LIST_ROUTINES,
   TOOL_DELETE_ROUTINE,
+  TOOL_REPORT_PROGRESS,
   ...MEMORY_TOOLS,
 ] as const;
 
@@ -72,6 +74,10 @@ export const SEARCH_MEMORIES_DESCRIPTION =
 export const LIST_MEMORIES_DESCRIPTION = "Lista todos tus recuerdos con su id y si se usan siempre o solo si hacen falta.";
 export const SET_MEMORY_INCLUSION_DESCRIPTION =
   "Cambia si un recuerdo se usa siempre (always true: va en tus instrucciones) o solo cuando lo buscas (always false). Deja en «siempre» solo lo que sirve en casi todas tus tareas.";
+
+export const REPORT_PROGRESS_DESCRIPTION =
+  "Informa cuánto llevas de la tarea que te encargaron (0 a 100) y en qué paso vas, en pocas palabras. El usuario lo ve como una barra sobre tu personaje en la Oficina. Úsala al empezar una tarea de varios pasos, después de cada paso importante y con 100 al entregar. Es solo un aviso: sigue trabajando.";
+export const PROGRESS_LIMITS = { step: 120 } as const;
 
 export const CREATE_CHANNEL_DESCRIPTION =
   "Crea un canal: una conversación del usuario con varios agentes a la vez. El encargado responde lo que no nombra a nadie y reparte el trabajo; con @Nombre el usuario le habla a uno en particular. Al armar un equipo, crea su canal (uno por equipo, con el nombre del proyecto y el líder como encargado); créalo también cuando el usuario lo pida. Antes revisa con list_agents los canales que ya existen.";
@@ -214,6 +220,20 @@ const BASE_DYNAMIC_TOOLS = [
       type: "object",
       properties: { id: { type: "string", minLength: 1 } },
       required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: TOOL_REPORT_PROGRESS,
+    description: REPORT_PROGRESS_DESCRIPTION,
+    inputSchema: {
+      type: "object",
+      properties: {
+        percent: { type: "integer", minimum: 0, maximum: 100, description: "Cuánto llevas, de 0 a 100." },
+        step: { type: "string", maxLength: PROGRESS_LIMITS.step, description: "En qué paso vas, en pocas palabras." },
+      },
+      required: ["percent"],
       additionalProperties: false,
     },
   },
@@ -568,6 +588,15 @@ export function parseRememberArgs(value: unknown): { text: string; always: boole
   const text = requiredText(record.text, "text", MEMORY_LIMITS.text);
   if (record.always !== undefined && record.always !== null && typeof record.always !== "boolean") throw new Error("`always` debe ser true o false.");
   return { text, always: record.always === true };
+}
+
+export function parseReportProgressArgs(value: unknown): { percent: number; step: string } {
+  const args = argsRecord(value);
+  const raw = typeof args.percent === "string" ? Number(args.percent.replace("%", "").trim()) : args.percent;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) throw new Error("percent debe ser un número de 0 a 100.");
+  const percent = Math.max(0, Math.min(100, Math.round(raw)));
+  const step = typeof args.step === "string" ? args.step.replace(/\s+/g, " ").trim().slice(0, PROGRESS_LIMITS.step) : "";
+  return { percent, step };
 }
 
 export function parseMemoryIdArgs(value: unknown): { id: string } {

@@ -1035,6 +1035,8 @@ export function createOffice(host) {
     const agent = actor.agent;
     const unit = 1 / actor.panel.scale;
     const size = Math.max(30 * unit, Math.min(64, 54 * (actor.seat.height / 430)) * 1.1);
+    const progress = visibleProgress(agent);
+    if (progress) drawProgress(ctx, actor, progress, size, unit);
     const x = actor.head.x + size * 0.55;
     const y = actor.head.y - size * 0.35;
     const failed = live.failed.get(agent.id);
@@ -1050,6 +1052,35 @@ export function createOffice(host) {
       return bubble(ctx, x, y, size, { icon: activity.icon ?? activityIcon(activity.text), fill: "#f7f2ea", ink: "#2c2118" });
     }
     return bubble(ctx, x, y, size, { dots: now, fill: "#f7f2ea", ink: "#2c2118" });
+  }
+
+  /** Barra con el porcentaje de su tarea, bajo la burbuja. */
+  function drawProgress(ctx, actor, progress, size, unit) {
+    const w = Math.max(70 * unit, size * 1.9);
+    const h = Math.max(15 * unit, size * 0.34);
+    const x = actor.head.x - w / 2;
+    const y = actor.head.y - size * 1.42 - h;
+    const done = progress.percent >= 100;
+    ctx.save();
+    ctx.fillStyle = "rgba(20, 12, 4, 0.78)";
+    roundRect(ctx, x - 2 * unit, y - 2 * unit, w + 4 * unit, h + 4 * unit, h * 0.5);
+    ctx.fill();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.14)";
+    roundRect(ctx, x, y, w, h, h * 0.45);
+    ctx.fill();
+    if (progress.percent > 0) {
+      ctx.fillStyle = done ? "#46a758" : "#e0a526";
+      roundRect(ctx, x, y, Math.max(h, (w * progress.percent) / 100), h, h * 0.45);
+      ctx.fill();
+    }
+    ctx.fillStyle = "#fff";
+    ctx.font = `800 ${h * 0.78}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.shadowColor = "rgba(0, 0, 0, 0.7)";
+    ctx.shadowBlur = 2 * unit;
+    ctx.fillText(done ? "Listo" : `${progress.percent} %`, x + w / 2, y + h / 2 + h * 0.04);
+    ctx.restore();
   }
 
   function bubble(ctx, x, y, size, options) {
@@ -1412,6 +1443,14 @@ export function createOffice(host) {
 
   /** Qué está haciendo, en una línea. */
   function describe(agent) {
+    const text = describeState(agent);
+    const progress = visibleProgress(agent);
+    if (!progress) return text;
+    const amount = progress.percent >= 100 ? "terminó su tarea" : `${progress.percent} %`;
+    return `${text} · ${amount}${progress.step ? ` (${progress.step})` : ""}`;
+  }
+
+  function describeState(agent) {
     if (live.asking.has(agent.id)) return "Te hizo una pregunta";
     const failed = live.failed.get(agent.id);
     if (failed && Date.now() - failed < 45_000) return "No pudo terminar";
@@ -1582,6 +1621,15 @@ export function createOffice(host) {
 }
 
 // ---------- utilidades de dibujo ----------
+
+/** El avance que vale la pena mostrar: el de una tarea en curso (hasta 12 h) o «Listo» por media hora. */
+export function visibleProgress(agent, now = Date.now()) {
+  const progress = agent?.progress;
+  if (!progress || typeof progress.percent !== "number") return null;
+  const age = now - (progress.at ?? 0);
+  if (progress.percent >= 100 ? age > 30 * 60_000 : age > 12 * 3_600_000) return null;
+  return progress;
+}
 
 function roundRect(ctx, x, y, w, h, r) {
   const radius = Math.min(r, w / 2, h / 2);

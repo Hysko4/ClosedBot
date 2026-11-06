@@ -1,6 +1,6 @@
 // ClosedBot — interfaz web (sin dependencias ni paso de compilación).
 
-import { createOffice } from "./office.js";
+import { createOffice, visibleProgress } from "./office.js";
 
 const $ = (selector) => document.querySelector(selector);
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -1041,8 +1041,9 @@ function agentRow(agent) {
   name.textContent = agent.name;
   const preview = document.createElement("span");
   preview.className = "preview";
+  const progress = visibleProgress(agent);
   if (agent.state === "working") {
-    preview.textContent = "Trabajando…";
+    preview.textContent = progress && progress.percent < 100 ? `Trabajando… ${progress.percent} %` : "Trabajando…";
     preview.dataset.tone = "working";
   } else if (agent.state === "paused") {
     preview.textContent = "Cola en pausa";
@@ -3161,6 +3162,17 @@ async function moveAgent(agentId, project) {
   await patchAgent(agentId, { project });
 }
 
+/** A quiénes mueve «Mover a»: si el agente está entre los marcados, a todos los marcados. */
+function moveTargets(agentId) {
+  if (state.selection?.has(agentId) && state.selection.size > 1) return [...state.selection].filter((id) => !findAgent(id)?.main);
+  return [agentId];
+}
+
+async function moveAgents(ids, project) {
+  for (const id of ids) await moveAgent(id, project);
+  if (ids.length > 1) endSelection();
+}
+
 /** Crea la sección si no existe (si ya existe, se usa esa). */
 async function ensureSection(name) {
   try {
@@ -3172,6 +3184,7 @@ async function ensureSection(name) {
 }
 
 async function createSectionFor(agentId) {
+  const ids = moveTargets(agentId);
   await promptText({
     title: "Nueva sección",
     label: "Nombre de la sección",
@@ -3179,8 +3192,11 @@ async function createSectionFor(agentId) {
     okLabel: "Crear y mover",
     submit: async (name) => {
       await ensureSection(name);
-      const result = await api(`/api/agents/${encodeURIComponent(agentId)}`, { method: "PATCH", body: { project: name } });
-      replaceAgent(result.agent);
+      for (const id of ids) {
+        const result = await api(`/api/agents/${encodeURIComponent(id)}`, { method: "PATCH", body: { project: name } });
+        replaceAgent(result.agent);
+      }
+      if (ids.length > 1) endSelection();
     },
   });
 }
@@ -3959,7 +3975,7 @@ function agentMenuItems(agentId) {
   }
   return [
     { label: agent.pinned ? "Desfijar" : "Fijar", icon: "pin", run: () => patchAgent(agent.id, { pinned: !agent.pinned }) },
-    { label: "Mover a", icon: "move", submenu: () => moveMenuItems(agent.id) },
+    { label: moveTargets(agent.id).length > 1 ? `Mover ${moveTargets(agent.id).length} a` : "Mover a", icon: "move", submenu: () => moveMenuItems(agent.id) },
     readItem,
     { label: "Cambiar nombre", icon: "pencil", run: () => renameAgent(agent.id) },
     agent.hidden
@@ -3977,12 +3993,13 @@ function moveMenuItems(agentId) {
   const agent = findAgent(agentId);
   if (!agent) return [];
   const current = agent.project.toLowerCase();
+  const ids = moveTargets(agentId);
   const items = allSections().map((name) => ({
     label: name,
-    checked: name.toLowerCase() === current,
-    run: () => moveAgent(agentId, name),
+    checked: ids.length === 1 && name.toLowerCase() === current,
+    run: () => moveAgents(ids, name),
   }));
-  items.push({ label: "Sin asignar", checked: !agent.project, run: () => moveAgent(agentId, "") });
+  items.push({ label: "Sin asignar", checked: ids.length === 1 && !agent.project, run: () => moveAgents(ids, "") });
   items.push("-", { label: "Crear sección", icon: "folderPlus", run: () => createSectionFor(agentId) });
   return items;
 }

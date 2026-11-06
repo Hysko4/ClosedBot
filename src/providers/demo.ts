@@ -6,6 +6,7 @@ import { splitTeamNote } from "../team-state.js";
 import {
   TEAM_NAMESPACE,
   TOOL_ASK_USER,
+  TOOL_REPORT_PROGRESS,
   TOOL_CREATE_AGENT,
   TOOL_CREATE_CHANNEL,
   TOOL_CREATE_ROUTINE,
@@ -48,6 +49,7 @@ export interface DemoClientOptions {
  *   - `/equipo` lista a los compañeros; `/lento` transmite la respuesta despacio;
  *   - `/pregunta [¿Texto? | Opción A | Opción B]` hace una pregunta con opciones al usuario;
  *   - `/rutina HH:MM Nombre` o `/rutina cada N Nombre` crea una rutina; `/rutinas` las lista;
+ *   - `/avance N paso` informa que lleva N % de su tarea (report_progress);
  *   - `/imagen descripción` «genera» una imagen (como el generador de imágenes de Codex);
  *   - solo para el bot principal: `/crear Nombre | Rol | Proyecto | Aspecto` crea un agente (el
  *     aspecto es opcional), `/ajustar Nombre | Rol nuevo | Aspecto nuevo` le cambia el rol o el aspecto,
@@ -154,6 +156,15 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
       const body = extractBody(inner);
       if (/(^|\s)\/equipo(\s|$)/.test(body)) {
         notes.push(`Compañeros: ${await this.#callTool(threadId, state.turnId, TOOL_LIST_AGENTS, {})}`);
+      }
+      const progress = /^\/avance\s+(\d{1,3})\s*%?\s*(.*)$/m.exec(body);
+      if (progress) {
+        try {
+          await this.#callTool(threadId, state.turnId, TOOL_REPORT_PROGRESS, { percent: Number(progress[1]), step: (progress[2] ?? "").trim() });
+          notes.push(`Llevo ${progress[1]} %.`);
+        } catch (error) {
+          notes.push(`No pude informar el avance: ${errorMessage(error)}`);
+        }
       }
       const question = /^\/pregunta\b(.*)$/m.exec(body);
       if (question) {
