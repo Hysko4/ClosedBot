@@ -129,12 +129,84 @@
             <button type="button" class="round-button mobile-only" id="office-back" aria-label="Volver a la lista">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
             </button>
-            <h2 class="office-title">Oficina</h2>
-            <span class="office-status" id="office-status" role="status"></span>
+            <div class="office-heading">
+              <h2 class="office-title">Oficina</h2>
+              <span class="office-status" id="office-status"></span>
+            </div>
             <button type="button" class="button ghost office-draw" id="office-draw" hidden></button>
+            <button type="button" class="button primary office-new" data-office-action="create" title="Crear un agente" aria-label="Nuevo agente">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+              <span>Nuevo agente</span>
+            </button>
+            <button type="button" class="round-button office-help" title="Cómo funciona la Oficina" aria-label="Cómo funciona la Oficina" aria-expanded="false" aria-controls="office-guide">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.3 9.2a2.8 2.8 0 1 1 3.9 2.6c-.8.3-1.2 1-1.2 1.8v.6M12 17.2h.01" /><circle cx="12" cy="12" r="8.5" /></svg>
+            </button>
           </header>
           <div class="office-scroll"></div>
           <div class="office-tip" role="tooltip" hidden></div>
+          <div class="office-empty" hidden>
+            <h3>Tu oficina está vacía</h3>
+            <p>Aquí verás a tus agentes trabajar. Pídele a <span class="main-name">Claude Bot</span> que arme un equipo para lo que necesitas, o crea un agente tú.</p>
+            <div class="office-empty-actions">
+              <button type="button" class="button primary" data-office-action="main">Hablar con <span class="main-name">Claude Bot</span></button>
+              <button type="button" class="button ghost" data-office-action="create">Crear un agente</button>
+            </div>
+            <button type="button" class="link-button" data-office-action="guide">¿Cómo funciona la Oficina?</button>
+          </div>
+          <aside class="office-guide" id="office-guide" role="dialog" aria-labelledby="office-guide-title" hidden>
+            <header class="office-guide-head">
+              <h3 id="office-guide-title">Cómo funciona la Oficina</h3>
+              <button type="button" class="round-button small-round office-guide-close" aria-label="Cerrar la guía">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>
+              </button>
+            </header>
+            <div class="office-guide-body">
+              <p class="office-guide-lead">Aquí ves a tus agentes trabajar en vivo. Cada robot es un agente.</p>
+
+              <h4>Lo que ves</h4>
+              <ul class="guide-list">
+                <li>
+                  <span class="guide-mark" data-tone="hall" aria-hidden="true"></span>
+                  <p><strong>Salón de <span class="main-name">Claude Bot</span>.</strong> Arma los equipos y reparte el trabajo. Toca su tarjeta para ver la <strong>pizarra</strong>, donde anota el plan.</p>
+                </li>
+                <li>
+                  <span class="guide-mark" data-tone="team" aria-hidden="true"></span>
+                  <p><strong>Equipos.</strong> Cada plataforma de color es un equipo, o sea, un canal de la lista. El encargado se sienta adelante y reparte el trabajo. Toca la tarjeta para abrir el chat del equipo.</p>
+                </li>
+                <li>
+                  <span class="guide-mark" data-tone="loose" aria-hidden="true"></span>
+                  <p><strong>Sin grupo.</strong> Agentes que todavía no están en un equipo.</p>
+                </li>
+                <li>
+                  <span class="guide-mark" data-tone="ghost" aria-hidden="true"></span>
+                  <p><strong>Nuevo equipo.</strong> La plataforma punteada: tócala para armar un equipo o suelta un agente encima.</p>
+                </li>
+              </ul>
+
+              <h4>Qué hace cada robot</h4>
+              <ul class="guide-legend">
+                <li><canvas data-sample="working" aria-hidden="true"></canvas><p><strong>Trabajando.</strong> Brilla y el globo muestra qué hace: comandos, archivos, la web, imágenes…</p></li>
+                <li><canvas data-sample="asking" aria-hidden="true"></canvas><p><strong>Te hizo una pregunta.</strong> Ábrelo y responde para que siga.</p></li>
+                <li><canvas data-sample="failed" aria-hidden="true"></canvas><p><strong>No pudo terminar.</strong> Ábrelo para ver qué pasó.</p></li>
+                <li><canvas data-sample="queued" aria-hidden="true"></canvas><p><strong>En cola.</strong> Tiene encargos esperando su turno.</p></li>
+                <li><canvas data-sample="paused" aria-hidden="true"></canvas><p><strong>En pausa.</strong> Sus encargos esperan hasta que lo reanudes.</p></li>
+                <li><canvas data-sample="progress" aria-hidden="true"></canvas><p><strong>Avance.</strong> Cuánto lleva de su tarea. En la tarjeta, el del equipo.</p></li>
+                <li><canvas data-sample="pulse" aria-hidden="true"></canvas><p><strong>Luz que viaja.</strong> Un compañero le pasó un encargo.</p></li>
+              </ul>
+
+              <h4>Qué puedes hacer</h4>
+              <ul class="guide-steps">
+                <li><span class="guide-key">Tocar</span><p>un robot abre su chat.</p></li>
+                <li><span class="guide-key">Arrastrar</span><p>un robot a otra plataforma lo cambia de equipo. En el teléfono, mantenlo presionado y arrástralo.</p></li>
+                <li><span class="guide-key guide-plus" aria-label="Más">+</span><p>junto a una tarjeta crea un agente en ese equipo.</p></li>
+                <li><span class="guide-key">Clic derecho</span><p>(o mantener presionado sin mover) en un robot o una tarjeta muestra más opciones: ficha, encargado, pausa, cambiar de equipo…</p></li>
+              </ul>
+            </div>
+            <footer class="office-guide-foot">
+              <button type="button" class="button ghost" data-office-action="main">Hablar con <span class="main-name">Claude Bot</span></button>
+              <button type="button" class="button primary" data-office-action="create">Crear un agente</button>
+            </footer>
+          </aside>
           <div class="office-board" role="dialog" aria-label="Pizarra de Claude Bot" hidden>
             <header class="office-board-head">
               <h3>Pizarra</h3>
@@ -147,6 +219,7 @@
         </section>
 
         <section class="conversation" id="conversation" hidden>
+          <div class="dock-resize" id="dock-resize" role="separator" aria-orientation="horizontal" aria-label="Alto del chat" title="Arrastra para cambiar el alto del chat (doble clic: el de siempre)" tabindex="0"></div>
           <header class="chat-header">
             <button type="button" class="round-button mobile-only" id="back" aria-label="Volver a la lista">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
@@ -159,6 +232,9 @@
               </button>
             </div>
             <span class="header-spacer mobile-only" aria-hidden="true"></span>
+            <button type="button" class="round-button dock-close" id="dock-close" title="Cerrar el chat (sigues en la Oficina)" aria-label="Cerrar el chat">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>
+            </button>
           </header>
 
           <div class="messages" id="messages" role="log" aria-live="polite" aria-relevant="additions">
@@ -408,6 +484,10 @@
           <h2 class="create-title" id="create-title">Crear nuevo agente</h2>
           <div class="create-preview" id="create-preview" aria-hidden="true"></div>
           <input class="create-name" id="create-name" name="name" maxlength="60" placeholder="Ponle nombre a tu agente" aria-label="Nombre del agente" autocomplete="off" />
+          <label class="field create-role" id="create-role-field" hidden>
+            <span>Qué hará (opcional)</span>
+            <input id="create-role" maxlength="200" placeholder="Ej.: Diseñadora de niveles" autocomplete="off" />
+          </label>
           <div class="shape-grid" id="shape-grid" role="radiogroup" aria-label="Figura"></div>
           <div class="color-row" id="color-row" role="radiogroup" aria-label="Color"></div>
           <label class="field create-look" hidden>

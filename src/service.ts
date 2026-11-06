@@ -309,6 +309,29 @@ export interface ChannelInput {
   leadId?: unknown;
 }
 
+/** La Oficina: a qué equipo pasa un agente que el usuario arrastró. */
+export interface TeamMoveInput {
+  /** El canal de la plataforma de donde salió (null si estaba en «Sin grupo»). */
+  from?: unknown;
+  /** El canal al que entra; null o vacío lo deja «Sin grupo». */
+  to?: unknown;
+  /** Nombre de un equipo nuevo (canal) que se crea con él de encargado. */
+  name?: unknown;
+}
+
+export interface TeamMove {
+  agent: AgentView;
+  /** El equipo en el que quedó (null si quedó «Sin grupo»). */
+  team: ChannelView | null;
+  /** Nombres de los canales que dejó. */
+  left: string[];
+  /** Los que se quedaron sin agentes y pasaron a «Canales eliminados». */
+  archived: string[];
+  /** Los canales como quedaron (como en el evento «channels»), para que la interfaz no espere al evento. */
+  channels: ChannelView[];
+  deleted: ChannelView[];
+}
+
 export type ServiceEvent =
   | { type: "agents"; agents: AgentView[] }
   | { type: "channels"; channels: ChannelView[]; deleted: ChannelView[] }
@@ -1467,6 +1490,97 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const updated = this.#store.updateChannel(id, next);
     this.#emitChannels();
     return this.#channelView(updated);
+  }
+
+  /**
+   * La Oficina: el usuario arrastró a un agente a otra plataforma. Deja el canal de donde salió (`from`) y entra
+   * al de destino (`to`) o a uno nuevo (`name`, con él de encargado); sin destino queda «Sin grupo» y deja todos
+   * sus canales. Si su sección era la del equipo que deja (o no tenía), pasa a la del nuevo, para que la barra
+   * lateral muestre lo mismo que la Oficina. Un canal que se queda sin agentes pasa a «Canales eliminados».
+   */
+  moveAgentToTeam(agentId: string, input: TeamMoveInput): TeamMove {
+    const agent = this.#requireAgent(agentId);
+    if (this.#isMain(agent)) throw new ServiceError("Claude Bot se queda en su salón: desde ahí coordina a todos los equipos.", 409);
+    const from = typeof input.from === "string" && input.from ? this.#requireChannel(input.from) : null;
+    const newName = typeof input.name === "string" && input.name.trim() ? channelName(input.name) : null;
+    const target = !newName && typeof input.to === "string" && input.to ? this.#requireChannel(input.to) : null;
+    if (target?.deletedAt) throw new ServiceError(`«${target.name}» está en «Canales eliminados»: restáuralo antes de sumarle agentes.`, 409);
+    if (target && !target.memberIds.includes(agent.id) && target.memberIds.length >= MAX_CHANNEL_MEMBERS) {
+      throw new ServiceError(`«${target.name}» ya tiene ${MAX_CHANNEL_MEMBERS} agentes, el máximo de un equipo.`, 409);
+    }
+    if (newName) {
+      if (this.#store.listChannels().length >= MAX_CHANNELS) {
+        throw new ServiceError(`Ya tienes ${MAX_CHANNELS} canales, el máximo. Elimina alguno que no uses.`, 409);
+      }
+      if (this.#store.findChannelByName(newName)) throw new ServiceError(`Ya existe un equipo llamado «${newName}».`, 409);
+    }
+    // Lo que deja: el canal de donde salió o, si queda «Sin grupo», todos los suyos.
+    const leaving = (target || newName ? (from ? [from] : []) : this.#store.listChannels())
+      .filter((channel) => !channel.deletedAt && channel.memberIds.includes(agent.id) && channel.id !== target?.id);
+    // Su sección sigue al equipo si era la del que deja (o si no tenía ninguna).
+    const before = from && from.memberIds.includes(agent.id) ? this.#teamSection(from) : "";
+    const follows = !agent.project || agent.project.toLowerCase() === before.toLowerCase();
+
+    const archived: ChannelRecord[] = [];
+    let team: ChannelRecord | null = null;
+    this.#store.transaction(() => {
+      if (newName) {
+        team = this.#store.createChannel({ name: newName, topic: "", leadId: agent.id, memberIds: [agent.id] });
+      } else if (target) {
+        team = target.memberIds.includes(agent.id)
+          ? target
+          : this.#store.updateChannel(target.id, { memberIds: [...target.memberIds, agent.id], leadId: target.leadId ?? agent.id });
+      }
+      for (const channel of leaving) {
+        const memberIds = channel.memberIds.filter((id) => id !== agent.id);
+        if (!memberIds.length) {
+          archived.push(channel);
+          continue;
+        }
+        // Si era el encargado, lo reemplaza el primero que queda (mejor un agente que Claude Bot).
+        const lead =
+          channel.leadId && channel.leadId !== agent.id && memberIds.includes(channel.leadId)
+            ? channel.leadId
+            : (memberIds.find((id) => id !== this.#mainAgentId) ?? memberIds[0] ?? null);
+        this.#store.updateChannel(channel.id, { memberIds, leadId: lead });
+      }
+      if (follows) {
+        const project = team ? this.#teamSection(team, agent.id) : "";
+        if (project !== agent.project) this.#store.updateAgent(agent.id, { project });
+      }
+    });
+    if (newName) this.#log("info", `Creé el canal «${newName}» desde la Oficina.`);
+    // Igual que al eliminar agentes: el canal vacío va a «Canales eliminados» (y se cancela lo que esperaba turno).
+    // Se guarda con él como miembro: si lo restauras, vuelve a estar ahí.
+    for (const channel of archived) this.deleteChannel(channel.id);
+    this.#emitAgents();
+    this.#emitChannels();
+    const moved = this.#requireAgent(agent.id);
+    const joined = team as ChannelRecord | null;
+    return {
+      agent: this.#view(moved),
+      team: joined ? this.#channelView(this.#store.getChannel(joined.id) ?? joined) : null,
+      left: leaving.map((channel) => channel.name),
+      archived: archived.map((channel) => channel.name),
+      channels: this.listChannels(),
+      deleted: this.listDeletedChannels(),
+    };
+  }
+
+  /** La sección de un equipo: la más común entre sus agentes (sin Claude Bot) o, si no tienen, su nombre. */
+  #teamSection(channel: ChannelRecord, exclude?: string): string {
+    const counts = new Map<string, { name: string; count: number }>();
+    for (const id of channel.memberIds) {
+      if (id === exclude || id === this.#mainAgentId) continue;
+      const project = this.#store.getAgent(id)?.project ?? "";
+      if (!project) continue;
+      const entry = counts.get(project.toLowerCase()) ?? { name: project, count: 0 };
+      entry.count += 1;
+      counts.set(project.toLowerCase(), entry);
+    }
+    let best: { name: string; count: number } | null = null;
+    for (const entry of counts.values()) if (!best || entry.count > best.count) best = entry;
+    return best?.name ?? cleanProject(channel.name);
   }
 
   /** Lo mueve a «Canales eliminados»: lo que esperaba turno se cancela y se puede restaurar después. */

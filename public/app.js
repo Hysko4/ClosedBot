@@ -31,6 +31,8 @@ const COLLAPSED_KEY = "closedbot:secciones-plegadas";
 const MAX_CHANNEL_MEMBERS = 12;
 
 const state = {
+  /** En la Oficina cerraste la ficha del costado: no se vuelve a abrir sola al elegir otro agente. */
+  officeSideClosed: false,
   agents: [],
   providers: [],
   routines: [],
@@ -327,7 +329,7 @@ function handleEvent(event) {
       updateActionButton();
       renderDetailsIfOpen();
       noteVoiceTurn();
-      if (state.currentId && !findAgent(state.currentId)) void navigate(null);
+      if (state.currentId && !findAgent(state.currentId)) leaveDeletedAgent();
       else if (state.currentId && findAgent(state.currentId)?.unread) scheduleMarkRead(state.currentId);
       break;
     case "sections":
@@ -433,7 +435,9 @@ function handleEvent(event) {
 
 /** Qué está abierto según la dirección: #/a/<agente> o #/c/<canal>. */
 function currentRoute() {
-  if (/^#\/oficina\/?$/.test(location.hash)) return { kind: "office" };
+  if (/^#\/oficina\/?$/.test(location.hash)) return { kind: "office", agentId: null };
+  const docked = location.hash.match(/^#\/oficina\/a\/([^/?#]+)/);
+  if (docked) return { kind: "office", agentId: decodeURIComponent(docked[1]) };
   const agent = location.hash.match(/^#\/a\/([^/?#]+)/);
   if (agent) return { kind: "agent", id: decodeURIComponent(agent[1]) };
   const channel = location.hash.match(/^#\/c\/([^/?#]+)/);
@@ -462,8 +466,16 @@ async function route() {
   closeContextMenu();
   hideMentionMenu();
   const inOffice = target?.kind === "office";
+  // En la Oficina (en pantallas anchas), el agente elegido muestra su chat abajo y su ficha a la derecha.
+  const docked = inOffice && target.agentId && wideLayout() ? findAgent(target.agentId) : null;
   document.body.classList.toggle("in-office", inOffice);
+  document.body.classList.toggle("office-docked", Boolean(docked));
+  if (!docked) closeDockedDetails();
   $("#open-office").setAttribute("aria-current", inOffice ? "page" : "false");
+  if (docked) {
+    await openDocked(docked);
+    return;
+  }
   if (inOffice) {
     if (convKey()) {
       stopDictation({ cancel: true });
@@ -479,6 +491,7 @@ async function route() {
     $("#chat-empty").hidden = true;
     renderSidebar();
     office.show();
+    office.select(null);
     void refreshPixelLab();
     return;
   }
@@ -531,6 +544,141 @@ async function route() {
 function goBack() {
   if (state.navigatedInApp && history.length > 1) history.back();
   else location.replace("#/");
+}
+
+/** Escritorio o tableta: hay lugar para la Oficina, el chat y la ficha a la vez. */
+function wideLayout() {
+  return window.matchMedia("(min-width: 761px)").matches;
+}
+
+/** Tocar un robot en la Oficina: en pantallas anchas lo elige ahí mismo; en el teléfono abre su chat. */
+function selectInOffice(agentId) {
+  if (!wideLayout()) return void navigate(agentId);
+  const target = `#/oficina/a/${encodeURIComponent(agentId)}`;
+  if (location.hash === target) return void route();
+  // Elegir otro agente no suma pasos al «atrás» del navegador.
+  location.replace(target);
+}
+
+function closeOfficeDock() {
+  if (location.hash.startsWith("#/oficina")) location.replace("#/oficina");
+}
+
+/** El agente abierto ya no existe: si estabas en la Oficina, sigues ahí; si no, vuelves a la lista. */
+function leaveDeletedAgent() {
+  if (currentRoute()?.kind === "office") closeOfficeDock();
+  else void navigate(null);
+}
+
+/** La Oficina con un agente elegido: su conversación abajo (la misma de siempre) y su ficha a la derecha. */
+async function openDocked(agent) {
+  const key = agent.id;
+  const changed = convKey() !== key;
+  if (changed) {
+    stopDictation({ cancel: true });
+    stopSpeaking();
+    state.keepUnread.delete(key);
+  }
+  state.currentId = agent.id;
+  state.currentChannelId = null;
+  document.body.classList.add("show-chat");
+  document.body.classList.remove("in-channel");
+  $("#attach").hidden = false;
+  $("#chat-empty").hidden = true;
+  $("#conversation").hidden = false;
+  renderSidebar();
+  renderHeader();
+  office.show();
+  office.select(agent.id);
+  if (changed) {
+    restoreDraft();
+    renderAttachments();
+    renderQueue();
+    // La ficha se abre con cada agente que eliges, salvo que la hayas cerrado.
+    if (!state.officeSideClosed) openDetails(agent.id, null, { docked: true });
+    else closeDockedDetails();
+    await loadConversation(key);
+  } else if (!state.officeSideClosed && !$("#details-dialog").open) {
+    openDetails(agent.id, null, { docked: true });
+  }
+  if (!coarsePointer) $("#composer-input").focus({ preventScroll: true });
+  scheduleMarkRead(key, 0);
+  void refreshPixelLab();
+}
+
+/** La ficha abierta al costado de la Oficina (no la ventana de siempre): se cierra al salir de ahí. */
+function closeDockedDetails() {
+  const dialog = $("#details-dialog");
+  if (dialog.open && !dialog.matches(":modal")) dialog.close();
+  document.body.classList.remove("office-side-open");
+}
+
+function toggleDockedDetails() {
+  const dialog = $("#details-dialog");
+  if (dialog.open && !dialog.matches(":modal")) {
+    state.officeSideClosed = true;
+    closeDockedDetails();
+  } else if (state.currentId) {
+    state.officeSideClosed = false;
+    openDetails(state.currentId, null, { docked: true });
+  }
+}
+
+const DOCK_HEIGHT_KEY = "closedbot:oficina-chat-alto";
+
+/** El alto del chat en la Oficina si lo cambiaste arrastrando su borde (null: el de siempre). */
+function setDockHeight(px, { save = false } = {}) {
+  // Nunca tapa toda la Oficina, aunque después achiques la ventana.
+  if (px == null) document.body.style.removeProperty("--office-dock");
+  else document.body.style.setProperty("--office-dock", `min(${Math.round(px)}px, calc(100vh - 200px))`);
+  if (!save) return;
+  try {
+    if (px == null) localStorage.removeItem(DOCK_HEIGHT_KEY);
+    else localStorage.setItem(DOCK_HEIGHT_KEY, String(Math.round(px)));
+  } catch {
+    // Sin almacenamiento: vale hasta recargar.
+  }
+}
+
+/** El borde de arriba del chat en la Oficina: arrastrarlo (o las flechas) cambia su alto; doble clic lo devuelve. */
+function bindDockResize() {
+  const handle = $("#dock-resize");
+  try {
+    const saved = Number(localStorage.getItem(DOCK_HEIGHT_KEY));
+    if (saved >= 160) setDockHeight(saved);
+  } catch {
+    // Sin almacenamiento: el alto de siempre.
+  }
+  const clamp = (px) => Math.max(160, Math.min(px, window.innerHeight - 200));
+  handle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const bottom = $("#conversation").getBoundingClientRect().bottom;
+    let height = null;
+    handle.setPointerCapture(event.pointerId);
+    document.body.classList.add("dock-resizing");
+    const onMove = (move) => {
+      height = clamp(bottom - move.clientY);
+      setDockHeight(height);
+    };
+    const onEnd = () => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onEnd);
+      handle.removeEventListener("pointercancel", onEnd);
+      document.body.classList.remove("dock-resizing");
+      if (height != null) setDockHeight(height, { save: true });
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onEnd);
+    handle.addEventListener("pointercancel", onEnd);
+  });
+  handle.addEventListener("dblclick", () => setDockHeight(null, { save: true }));
+  handle.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const current = $("#conversation").getBoundingClientRect().height;
+    setDockHeight(clamp(current + (event.key === "ArrowUp" ? 32 : -32)), { save: true });
+  });
 }
 
 /** Avisa al servidor de que el usuario ya vio la conversación (o el canal) abierta. */
@@ -769,6 +917,11 @@ const ICONS = {
   shield: ["M12 3.8l7 2.7v5.2c0 4.2-2.9 7.3-7 8.5-4.1-1.2-7-4.3-7-8.5V6.5z", "M9.2 12l2 2 3.8-3.9"],
   arrowUp: ["M12 18.5V5.8", "M6.8 11L12 5.8 17.2 11"],
   arrowDown: ["M12 5.5v12.7", "M6.8 13l5.2 5.2 5.2-5.2"],
+  chat: ["M5 6.5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-6l-4 3.5v-3.5H7a2 2 0 0 1-2-2z"],
+  pause: ["M9.5 6.5v11M14.5 6.5v11"],
+  play: ["M8.5 6.2l9 5.8-9 5.8z"],
+  star: ["M12 4.6l2.2 4.6 5 .7-3.6 3.5.9 5-4.5-2.4-4.5 2.4.9-5-3.6-3.5 5-.7z"],
+  help: ["M9.3 9.2a2.8 2.8 0 1 1 3.9 2.6c-.8.3-1.2 1-1.2 1.8v.6", "M12 17.2h.01", "M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 1 0 0-17"],
 };
 
 function icon(name, className = "") {
@@ -3517,7 +3670,8 @@ async function deleteAgents(ids, { confirmed = false } = {}) {
     state.selection = null;
     selectionAnchor = null;
   }
-  if (gone.has(state.currentId) || closedChannels.has(state.currentChannelId)) await navigate(null);
+  if (gone.has(state.currentId)) leaveDeletedAgent();
+  else if (closedChannels.has(state.currentChannelId)) await navigate(null);
   else renderSidebar();
   if (failures.length) showToast(`No se pudo eliminar ${failures.join(" · ")}`, "error");
   else if (!one) showToast(`Se eliminaron ${gone.size} agentes.`);
@@ -3526,6 +3680,8 @@ async function deleteAgents(ids, { confirmed = false } = {}) {
 // ---------- canales ----------
 
 let editingChannelId = null;
+/** El canal se creó desde la Oficina: se queda ahí en vez de abrir el canal. */
+let channelFromOffice = false;
 let mention = null; // lista de @ abierta: { start, end, options, index }
 
 /** Clave de lo abierto: el id del agente o «c:<id>» si es un canal. */
@@ -3702,13 +3858,15 @@ async function deleteChannel(channelId) {
   }
 }
 
-function openChannelDialog(channelId = null) {
+function openChannelDialog(channelId = null, { fromOffice = false } = {}) {
+  closeContextMenu();
   const channel = channelId ? findChannel(channelId) : null;
   editingChannelId = channel?.id ?? null;
+  channelFromOffice = fromOffice;
   const form = $("#channel-form");
   form.reset();
-  $("#channel-dialog-title").textContent = channel ? "Editar canal" : "Nuevo canal";
-  $("#channel-save").textContent = channel ? "Guardar" : "Crear canal";
+  $("#channel-dialog-title").textContent = channel ? (fromOffice ? "Editar equipo" : "Editar canal") : fromOffice ? "Nuevo equipo" : "Nuevo canal";
+  $("#channel-save").textContent = channel ? "Guardar" : fromOffice ? "Crear equipo" : "Crear canal";
   $("#channel-delete").hidden = !channel;
   $("#channel-error").textContent = "";
   form.elements.name.value = channel?.name ?? "";
@@ -3820,7 +3978,11 @@ async function saveChannel(event) {
       : await api("/api/channels", { method: "POST", body });
     replaceChannel(result.channel);
     closeDialog($("#channel-dialog"));
-    if (!editing) void navigateChannel(result.channel.id);
+    if (!editing && channelFromOffice) {
+      // Sus agentes se ven en la plataforma nueva (aunque estén también en otro equipo).
+      for (const id of result.channel.memberIds) office?.placed(id, result.channel.id);
+      showToast(`Listo: «${result.channel.name}» ya tiene su plataforma en la Oficina.`);
+    } else if (!editing) void navigateChannel(result.channel.id);
   } catch (failure) {
     error.textContent = failure.message;
   } finally {
@@ -4147,14 +4309,15 @@ function sidebarMenuFor(target) {
   return { items: sidebarMenuItems(), anchor: null };
 }
 
-function openContextMenu(items, { x = 0, y = 0, anchor = null, source = null } = {}) {
+/** «touch»: lo abrió un dedo (mantener presionado). Queda fuera del dedo y no toma el toque con que lo soltaste. */
+function openContextMenu(items, { x = 0, y = 0, anchor = null, source = null, touch = false } = {}) {
   if (!items.length) return;
   closeContextMenu();
   const menu = $("#context-menu");
   fillMenu(menu, items, false);
   menu.hidden = false;
-  placeMenu(menu, anchor?.getBoundingClientRect() ?? null, x, y);
-  menuState = { source: source ?? anchor, openedAt: Date.now(), submenuFor: null };
+  placeMenu(menu, anchor?.getBoundingClientRect() ?? null, x, y, touch);
+  menuState = { source: source ?? anchor, openedAt: Date.now(), submenuFor: null, guardUntil: touch ? Date.now() + 450 : 0 };
   if (menuState.source?.getAttribute?.("aria-haspopup") === "menu") menuState.source.setAttribute("aria-expanded", "true");
   menu.focus({ preventScroll: true });
 }
@@ -4193,6 +4356,8 @@ function fillMenu(menu, items, isSub) {
       if (!coarsePointer) button.addEventListener("pointerenter", () => openSubmenu(button, item.submenu, { focus: false }));
     } else {
       button.addEventListener("click", () => {
+        // El mismo toque que abrió el menú (al soltar el dedo) no elige una opción.
+        if (menuState && Date.now() < menuState.guardUntil) return;
         closeContextMenu();
         void item.run();
       });
@@ -4202,7 +4367,7 @@ function fillMenu(menu, items, isSub) {
   }
 }
 
-function placeMenu(menu, anchorRect, x, y) {
+function placeMenu(menu, anchorRect, x, y, touch = false) {
   menu.style.left = "0px";
   menu.style.top = "0px";
   const rect = menu.getBoundingClientRect();
@@ -4215,10 +4380,12 @@ function placeMenu(menu, anchorRect, x, y) {
     top = anchorRect.bottom + 4;
     if (top + rect.height > height - 8) top = anchorRect.top - rect.height - 4;
   } else {
+    // Con el dedo, un poco más lejos: que no quede debajo de él.
+    const gap = touch ? 14 : 2;
     left = x + 2;
-    top = y + 2;
+    top = y + gap;
     if (left + rect.width > width - 8) left = x - rect.width - 2;
-    if (top + rect.height > height - 8) top = y - rect.height - 2;
+    if (top + rect.height > height - 8) top = y - rect.height - gap;
   }
   left = Math.max(8, Math.min(left, width - rect.width - 8));
   top = Math.max(8, Math.min(top, height - rect.height - 8));
@@ -4365,7 +4532,7 @@ function bindSidebarMenus() {
       if (!spec) return;
       press.fired = true;
       navigator.vibrate?.(8);
-      openContextMenu(spec.items, { x: press.x, y: press.y + 8 });
+      openContextMenu(spec.items, { x: press.x, y: press.y, touch: true });
     }, LONG_PRESS_MS);
   });
   sidebar.addEventListener("pointermove", (event) => {
@@ -4402,7 +4569,7 @@ function bindSidebarMenus() {
     cancel();
     if (touch) {
       press.fired = true;
-      openContextMenu(spec.items, { x: event.clientX, y: event.clientY + 8 });
+      openContextMenu(spec.items, { x: event.clientX, y: event.clientY, touch: true });
     } else if (event.button !== 2 && !event.clientX && !event.clientY) {
       // Teclado (Mayús+F10 o la tecla de menú): junto al elemento.
       openContextMenu(spec.items, { anchor: spec.anchor ?? event.target, source: event.target });
@@ -4525,14 +4692,17 @@ function refreshEffortOptions(form, effort = "") {
 // ---------- crear agente: figura, color y nombre ----------
 
 const COLOR_NAMES = ["Morado", "Rojo", "Verde", "Naranja", "Gris", "Azul", "Rosado", "Turquesa", "Mostaza", "Lavanda", "Celeste", "Lima"];
-const createState = { shape: 0, color: 0, project: "", agentId: null };
+const createState = { shape: 0, color: 0, project: "", agentId: null, channelId: null, fromOffice: false };
 
 /** «+»: nombre, figura y color, como en la app de referencia. Con agentId cambia la apariencia de uno que ya existe. */
-function openCreateDialog({ project = "", agentId = null } = {}) {
+function openCreateDialog({ project = "", agentId = null, channelId = null, fromOffice = false } = {}) {
   closeContextMenu();
   const agent = agentId ? findAgent(agentId) : null;
+  const channel = !agent && channelId ? findChannel(channelId) : null;
   createState.agentId = agent?.id ?? null;
   createState.project = agent ? agent.project : project;
+  createState.channelId = channel?.id ?? null;
+  createState.fromOffice = !agent && fromOffice;
   if (agent) {
     const [shape, color] = avatarParts(agent);
     const index = BLOB_COLORS.indexOf(color);
@@ -4542,7 +4712,16 @@ function openCreateDialog({ project = "", agentId = null } = {}) {
     createState.shape = Math.floor(Math.random() * BLOB_SHAPES.length);
     createState.color = Math.floor(Math.random() * BLOB_COLORS.length);
   }
-  $("#create-title").textContent = agent ? `Apariencia de ${agent.name}` : project ? `Nuevo agente en «${project}»` : "Crear nuevo agente";
+  $("#create-title").textContent = agent
+    ? `Apariencia de ${agent.name}`
+    : channel
+      ? `Nuevo agente en «${channel.name}»`
+      : project
+        ? `Nuevo agente en «${project}»`
+        : "Crear nuevo agente";
+  // Desde la Oficina también se dice qué hará: así llega sabiendo su papel en el equipo.
+  $("#create-role-field").hidden = !createState.fromOffice;
+  $("#create-role").value = "";
   $("#create-save").textContent = agent ? "Guardar" : "Crear";
   const name = $("#create-name");
   name.value = agent?.name ?? "";
@@ -4584,6 +4763,146 @@ function openOffice() {
   location.hash = "#/oficina";
 }
 
+/** «+ Nuevo agente», el «+» de un equipo o la plataforma punteada: se crea sin salir de la Oficina. */
+function createFromOffice({ channelId = null } = {}) {
+  openCreateDialog({ channelId, fromOffice: true });
+}
+
+/** La plataforma punteada: el diálogo de canal, como «Nuevo equipo». */
+function createTeamFromOffice() {
+  openChannelDialog(null, { fromOffice: true });
+}
+
+/** Lo que cambió al mover a un agente de equipo: la ficha, los canales y un aviso. */
+function applyTeamMove(result, { quiet = false, created = false } = {}) {
+  replaceAgent(result.agent);
+  state.channels = result.channels;
+  state.deletedChannels = result.deleted;
+  renderSidebar();
+  renderDeletedChannelsIfOpen();
+  if (quiet) return;
+  const who = result.agent.name;
+  let text = created
+    ? `Listo: «${result.team.name}» es un equipo nuevo, con ${who} a cargo.`
+    : result.team
+      ? `${who} pasó a «${result.team.name}».`
+      : `${who} quedó sin grupo.`;
+  if (result.archived.length === 1) text += ` «${result.archived[0]}» se quedó sin agentes y pasó a «Canales eliminados».`;
+  else if (result.archived.length > 1) text += ` ${result.archived.length} canales se quedaron sin agentes y pasaron a «Canales eliminados».`;
+  showToast(text);
+}
+
+/** La Oficina: cambia a un agente de equipo (al arrastrarlo o desde su menú). Devuelve la respuesta o null. */
+async function moveAgentToTeam(agentId, { from = null, to = null } = {}, { quiet = false } = {}) {
+  try {
+    const result = await api(`/api/agents/${encodeURIComponent(agentId)}/team`, { method: "POST", body: { from, to } });
+    applyTeamMove(result, { quiet });
+    return result;
+  } catch (error) {
+    showToast(error.message, "error");
+    return null;
+  }
+}
+
+/** Un equipo nuevo con este agente a cargo: pide el nombre (si cancelas, no cambia nada). */
+async function moveAgentToNewTeam(agentId, from = null) {
+  const agent = findAgent(agentId);
+  if (!agent) return null;
+  let result = null;
+  await promptText({
+    title: "Nuevo equipo",
+    label: `Nombre del equipo de ${agent.name}`,
+    placeholder: "Ej.: Marketing",
+    okLabel: "Crear equipo",
+    submit: async (name) => {
+      result = await api(`/api/agents/${encodeURIComponent(agentId)}/team`, { method: "POST", body: { from, name } });
+    },
+  });
+  if (result) applyTeamMove(result, { created: true });
+  return result;
+}
+
+async function moveFromMenu(agentId, body) {
+  const result = body.name === undefined ? await moveAgentToTeam(agentId, body) : await moveAgentToNewTeam(agentId, body.from);
+  if (result) office?.placed(agentId, result.team?.id ?? null);
+}
+
+/** Los equipos a los que puede pasar (el submenú «Cambiar de equipo»). */
+function officeTeamItems(agentId, fromId) {
+  const items = state.channels
+    .filter((channel) => channel.id !== fromId)
+    .map((channel) => ({
+      label: channel.name,
+      icon: "hash",
+      disabled: channel.memberIds.length >= MAX_CHANNEL_MEMBERS && !channel.memberIds.includes(agentId),
+      run: () => moveFromMenu(agentId, { from: fromId, to: channel.id }),
+    }));
+  if (fromId) items.push({ label: "Sin grupo", icon: "dash", run: () => moveFromMenu(agentId, { from: fromId, to: null }) });
+  if (items.length) items.push("-");
+  items.push({ label: "Equipo nuevo…", icon: "plus", run: () => moveFromMenu(agentId, { from: fromId, name: "" }) });
+  return items;
+}
+
+async function makeLead(channelId, agentId) {
+  try {
+    const result = await api(`/api/channels/${encodeURIComponent(channelId)}`, { method: "PATCH", body: { leadId: agentId } });
+    replaceChannel(result.channel);
+    showToast(`«${result.channel.name}» ahora lo encarga ${agentName(agentId)}: se sienta adelante y reparte el trabajo.`);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+/** «Ver su ficha» en la Oficina: en pantallas anchas, al costado (con su chat abajo). */
+function officeDetails(agentId) {
+  if (!wideLayout()) return void openDetails(agentId, null, { docked: false });
+  state.officeSideClosed = false;
+  if (state.currentId === agentId && document.body.classList.contains("office-docked")) openDetails(agentId, null, { docked: true });
+  else selectInOffice(agentId);
+}
+
+/** Clic derecho (o mantener presionado) sobre un robot de la Oficina. */
+function officeAgentMenu(agentId, { x = 0, y = 0, channelId = null, touch = false } = {}) {
+  const agent = findAgent(agentId);
+  if (!agent) return;
+  const items = [
+    { label: agent.main ? `Hablar con ${agent.name}` : "Abrir su chat", icon: "chat", run: () => selectInOffice(agent.id) },
+    { label: "Ver su ficha", icon: "details", run: () => officeDetails(agent.id) },
+  ];
+  if (!agent.main) {
+    const channel = channelId ? findChannel(channelId) : null;
+    items.push({ label: "Cambiar de equipo", icon: "move", submenu: () => officeTeamItems(agent.id, channel?.id ?? null) });
+    if (channel && channel.leadId !== agent.id) items.push({ label: `Nombrar encargado de «${channel.name}»`, icon: "star", run: () => makeLead(channel.id, agent.id) });
+    items.push({ label: agent.paused ? "Reanudar" : "Pausar", icon: agent.paused ? "play" : "pause", run: () => agentAction("pause", agent.id) });
+  }
+  items.push({ label: "Cambiar nombre", icon: "pencil", run: () => renameAgent(agent.id) });
+  if (!agent.main) items.push("-", { label: "Eliminar", icon: "trash", danger: true, run: () => agentAction("delete", agent.id) });
+  openContextMenu(items, { x, y, touch });
+}
+
+/** Clic derecho (o mantener presionado) sobre una tarjeta o la plataforma punteada. */
+function officeTeamMenu({ kind, channelId = null, empty = false }, { x = 0, y = 0, touch = false } = {}) {
+  const main = mainAgent();
+  const items = [];
+  if (kind === "board") {
+    if (main) items.push({ label: `Hablar con ${main.name}`, icon: "chat", run: () => selectInOffice(main.id) });
+    items.push({ label: "Ver la pizarra", icon: "book", run: () => office?.showBoard() });
+  } else if (kind === "channel" && findChannel(channelId)) {
+    items.push(
+      { label: "Abrir el chat del equipo", icon: "chat", run: () => navigateChannel(channelId) },
+      { label: "Crear un agente aquí", icon: "plus", run: () => createFromOffice({ channelId }) },
+      { label: "Editar el equipo", icon: "pencil", run: () => openChannelDialog(channelId, { fromOffice: true }) },
+      "-",
+      { label: "Eliminar el equipo", icon: "trash", danger: true, run: () => deleteChannel(channelId) },
+    );
+  } else if (kind === "loose" || kind === "ghost") {
+    items.push({ label: kind === "loose" ? "Crear un agente sin equipo" : "Crear un agente", icon: "plus", run: () => createFromOffice({}) });
+    if (!empty) items.push({ label: "Armar un equipo nuevo", icon: "team", run: createTeamFromOffice });
+  }
+  items.push("-", { label: "Cómo funciona la Oficina", icon: "help", run: () => office?.openGuide() });
+  openContextMenu(items, { x, y, touch });
+}
+
 async function refreshPixelLab() {
   try {
     pixelLab = (await api("/api/pixellab")).pixelLab;
@@ -4598,11 +4917,8 @@ function renderPixelLab() {
   const configured = Boolean(pixelLab?.configured);
   $("#pixellab-connect").hidden = configured;
   $("#pixellab-connected").hidden = !configured;
-  const draw = $("#office-draw");
-  const status = $("#office-status");
   // La Oficina dibuja robots: ya no ofrece dibujar personajes de PixelLab.
-  draw.hidden = true;
-  status.textContent = "";
+  $("#office-draw").hidden = true;
 }
 
 async function connectPixelLab(event) {
@@ -4730,13 +5046,27 @@ async function saveCreate(event) {
       closeDialog($("#create-dialog"));
       replaceAgent(result.agent);
     } else {
+      const { channelId, fromOffice } = createState;
+      const role = fromOffice ? $("#create-role").value.trim() : "";
       // greet: como lo creaste tú, se presenta con un primer mensaje (los que arma Claude Bot no).
-      const body = { name, avatar, appearance, project: createState.project, provider: preferredProvider(), greet: true };
+      const body = { name, avatar, appearance, project: createState.project, provider: preferredProvider(), greet: true, ...(role ? { role } : {}) };
       const result = await api("/api/agents", { method: "POST", body });
       closeDialog($("#create-dialog"));
       if (!findAgent(result.agent.id)) state.agents.push(result.agent);
       renderSidebar();
-      await navigate(result.agent.id);
+      if (fromOffice) {
+        // Se queda en la Oficina: lo ves llegar a su escritorio (y, si vino del «+» de un equipo, entra a ese equipo).
+        const moved = channelId ? await moveAgentToTeam(result.agent.id, { to: channelId }, { quiet: true }) : null;
+        if (moved) office?.placed(result.agent.id, moved.team?.id ?? null);
+        office?.highlight(result.agent.id);
+        showToast(
+          moved?.team
+            ? `${result.agent.name} ya está en «${moved.team.name}». Toca su robot para hablarle.`
+            : `${result.agent.name} ya está en la Oficina. Toca su robot para hablarle o arrástralo a un equipo.`,
+        );
+      } else {
+        await navigate(result.agent.id);
+      }
     }
   } catch (problem) {
     error.textContent = problem.message;
@@ -5427,10 +5757,12 @@ const details = {
   runs: new Map(),
 };
 
-function openDetails(agentId = state.currentId, page = null) {
+function openDetails(agentId = state.currentId, page = null, { docked = document.body.classList.contains("office-docked") } = {}) {
   closeContextMenu();
   const agent = findAgent(agentId);
   if (!agent) return;
+  // En la Oficina con un agente elegido, la ficha de otro agente abre ese agente ahí.
+  if (docked && agent.id !== state.currentId) return void selectInOffice(agent.id);
   if (details.agentId !== agent.id) {
     details.root = "agent";
     details.path = "";
@@ -5445,7 +5777,21 @@ function openDetails(agentId = state.currentId, page = null) {
   }
   details.agentId = agent.id;
   showPage(page, { focus: false });
-  openDialog($("#details-dialog"));
+  const dialog = $("#details-dialog");
+  if (docked) {
+    // Al costado, sin tapar la Oficina ni el chat: la ventana no es modal.
+    if (dialog.open && dialog.matches(":modal")) dialog.close();
+    if (!dialog.open) {
+      const focused = document.activeElement;
+      dialog.show();
+      if (focused instanceof HTMLElement && focused !== document.body) focused.focus({ preventScroll: true });
+    }
+    state.officeSideClosed = false;
+    document.body.classList.add("office-side-open");
+  } else {
+    if (dialog.open && !dialog.matches(":modal")) dialog.close();
+    openDialog(dialog);
+  }
   void loadMemories(agent.id);
   void loadSkills(agent.id);
 }
@@ -7064,11 +7410,22 @@ function bindUi() {
     agents: () => state.agents,
     channels: () => state.channels,
     colorOf: (agent) => (agent.main ? "#d97757" : avatarParts(agent)[1]),
-    openAgent: (id) => void navigate(id),
+    openAgent: selectInOffice,
     openChannel: (id) => void navigateChannel(id),
+    openMain: () => {
+      const main = mainAgent();
+      if (main) selectInOffice(main.id);
+    },
+    wide: wideLayout,
     imageUrl: (agentId, path) => libraryUrl(agentId, "shared", path, true),
     renderMarkdown: (text, target) => renderMarkdown(text, target),
     api,
+    createAgent: createFromOffice,
+    createTeam: createTeamFromOffice,
+    moveAgent: (agentId, body) => moveAgentToTeam(agentId, body),
+    moveToNewTeam: (agentId, from) => moveAgentToNewTeam(agentId, from),
+    agentMenu: officeAgentMenu,
+    teamMenu: officeTeamMenu,
   });
   $("#settings-close").addEventListener("click", () => closeDialog($("#settings-dialog")));
   $("#names-form").addEventListener("submit", saveNames);
@@ -7079,7 +7436,14 @@ function bindUi() {
   $("#back").addEventListener("click", goBack);
   $("#details-button").addEventListener("click", () => {
     if (state.currentChannelId) openChannelDialog(state.currentChannelId);
+    else if (document.body.classList.contains("office-docked")) toggleDockedDetails();
     else openDetails(state.currentId);
+  });
+  $("#dock-close").addEventListener("click", closeOfficeDock);
+  bindDockResize();
+  // Si la ventana se angosta o se ensancha estando en la Oficina, se rearma (con o sin el panel).
+  window.matchMedia("(min-width: 761px)").addEventListener("change", () => {
+    if (currentRoute()?.kind === "office") void route();
   });
 
   // Canales: crear o editar, y «Canales eliminados».
@@ -7134,7 +7498,12 @@ function bindUi() {
 
   // Ficha del agente: lista de ajustes y subpantallas.
   const detailsDialog = $("#details-dialog");
-  for (const button of detailsDialog.querySelectorAll(".details-close")) button.addEventListener("click", () => closeDialog(detailsDialog));
+  for (const button of detailsDialog.querySelectorAll(".details-close")) {
+    button.addEventListener("click", () => {
+      if (!detailsDialog.matches(":modal") && document.body.classList.contains("office-docked")) state.officeSideClosed = true;
+      closeDialog(detailsDialog);
+    });
+  }
   detailsDialog.addEventListener("click", (event) => {
     // Clic en el fondo oscuro (fuera del panel): se cierra.
     if (event.target === detailsDialog) closeDialog(detailsDialog);
@@ -7147,6 +7516,7 @@ function bindUi() {
   });
   detailsDialog.addEventListener("close", () => {
     if (speech.current?.messageId === "voice-test") stopSpeaking();
+    document.body.classList.remove("office-side-open");
   });
   $("#details-avatar").addEventListener("click", () => openCreateDialog({ agentId: details.agentId }));
   $("#details-profile").addEventListener("click", () => showPage("profile"));

@@ -289,6 +289,12 @@ export function createApp(options: AppOptions): App {
 
   route("POST", "/api/agents/:id/reset", async (ctx) => ({ agent: await service.resetConversation(param(ctx, 0)) }));
 
+  // La Oficina: el usuario arrastró al agente a otro equipo (o a uno nuevo, o a «Sin grupo»).
+  route("POST", "/api/agents/:id/team", async (ctx) => {
+    const body = await readJson(ctx.req);
+    return service.moveAgentToTeam(param(ctx, 0), { from: body.from, to: body.to, name: body.name });
+  });
+
   route("POST", "/api/agents/:id/pause", async (ctx) => {
     const body = await readJson(ctx.req);
     if (typeof body.paused !== "boolean") throw new HttpError(400, "Indica paused: true o false.");

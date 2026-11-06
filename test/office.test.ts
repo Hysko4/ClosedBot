@@ -531,3 +531,142 @@ test("Oficina: el «?» queda hasta que respondes la pregunta, tocando una opci�
     await h.close();
   }
 });
+
+test("Oficina: arrastrar a un agente lo cambia de equipo, con su sección, y el canal vacío pasa a «Canales eliminados»", async () => {
+  const h = await createHarness({ mainAgent: true });
+  try {
+    const s = h.service;
+    const mainId = s.listAgents().find((agent) => agent.main)!.id;
+    const make = (name: string, project: string) => s.createAgent({ name, role: "Prueba", provider: "demo", project }, { greet: false });
+    const ana = make("Ana", "Creación de Juegos");
+    const beto = make("Beto", "Creación de Juegos");
+    const dani = make("Dani", "Marketing");
+    const eli = make("Eli", "");
+    const fer = make("Fer", "Investigación");
+    const juegos = s.createChannel({ name: "Creación de Juegos", memberIds: [ana.id, beto.id, mainId], leadId: ana.id });
+    const mkt = s.createChannel({ name: "Marketing", memberIds: [dani.id], leadId: dani.id });
+    const channel = (id: string) => s.getChannel(id);
+
+    // De un equipo a otro: deja el de origen (con un nuevo encargado que no es Claude Bot) y su sección sigue al equipo.
+    let move = s.moveAgentToTeam(ana.id, { from: juegos.id, to: mkt.id });
+    assert.deepEqual(channel(mkt.id).memberIds, [dani.id, ana.id]);
+    assert.equal(channel(mkt.id).leadId, dani.id, "el encargado del destino no cambia");
+    assert.deepEqual(channel(juegos.id).memberIds, [beto.id, mainId]);
+    assert.equal(channel(juegos.id).leadId, beto.id, "el nuevo encargado es un agente, no Claude Bot");
+    assert.equal(move.agent.project, "Marketing");
+    assert.equal(move.team?.id, mkt.id);
+    assert.deepEqual(move.left, ["Creación de Juegos"]);
+    assert.deepEqual(move.archived, []);
+
+    // Desde «Sin grupo» y sin sección: entra al equipo y toma su sección.
+    move = s.moveAgentToTeam(eli.id, { from: null, to: juegos.id });
+    assert.ok(channel(juegos.id).memberIds.includes(eli.id));
+    assert.equal(move.agent.project, "Creación de Juegos");
+
+    // Una sección propia (que no es la del equipo) no se toca.
+    move = s.moveAgentToTeam(fer.id, { to: mkt.id });
+    assert.equal(move.agent.project, "Investigación");
+
+    // A un equipo nuevo, con él de encargado: el de origen se queda sin agentes y pasa a «Canales eliminados».
+    move = s.moveAgentToTeam(dani.id, { from: mkt.id, name: "Ventas" });
+    assert.equal(move.team?.name, "Ventas");
+    assert.deepEqual(move.team?.memberIds, [dani.id]);
+    assert.equal(move.team?.leadId, dani.id);
+    assert.equal(move.agent.project, "Ventas");
+    assert.deepEqual(move.archived, []);
+    s.moveAgentToTeam(ana.id, { from: mkt.id, to: move.team!.id });
+    move = s.moveAgentToTeam(fer.id, { from: mkt.id, to: juegos.id });
+    assert.deepEqual(move.archived, ["Marketing"]);
+    assert.ok(s.listDeletedChannels().some((item) => item.id === mkt.id), "Marketing quedó vacío");
+    assert.deepEqual(s.listDeletedChannels().find((item) => item.id === mkt.id)?.memberIds, [fer.id], "al restaurarlo vuelve con él");
+
+    // A «Sin grupo»: deja todos sus equipos y la sección que venía del equipo.
+    s.moveAgentToTeam(beto.id, { from: juegos.id, to: s.listChannels().find((item) => item.name === "Ventas")!.id });
+    s.updateChannel(juegos.id, { memberIds: [beto.id, eli.id, mainId] });
+    move = s.moveAgentToTeam(beto.id, { from: juegos.id, to: null });
+    assert.equal(move.team, null);
+    assert.equal(s.listChannels().filter((item) => item.memberIds.includes(beto.id)).length, 0);
+    assert.equal(move.agent.project, "", "su sección era la del equipo");
+    assert.deepEqual(move.left.sort(), ["Creación de Juegos", "Ventas"]);
+
+    // Lo que no se puede.
+    assert.throws(() => s.moveAgentToTeam(mainId, { to: juegos.id }), (error: unknown) => error instanceof ServiceError && error.status === 409 && /salón/.test(error.message));
+    assert.throws(() => s.moveAgentToTeam(eli.id, { to: mkt.id }), /Canales eliminados/);
+    assert.throws(() => s.moveAgentToTeam(eli.id, { name: "Creación de Juegos" }), /Ya existe/);
+    assert.throws(() => s.moveAgentToTeam(eli.id, { to: "nada" }), (error: unknown) => error instanceof ServiceError && error.status === 404);
+    const crowd = Array.from({ length: 11 }, (_, index) => make(`Extra ${index}`, "").id);
+    const full = s.createChannel({ name: "Lleno", memberIds: [...crowd, eli.id] });
+    assert.throws(() => s.moveAgentToTeam(fer.id, { to: full.id }), /12 agentes/);
+    // Soltarlo en su mismo equipo no cambia nada.
+    const same = s.moveAgentToTeam(eli.id, { from: full.id, to: full.id });
+    assert.deepEqual(same.left, []);
+    assert.equal(channel(full.id).memberIds.length, 12);
+  } finally {
+    await h.close();
+  }
+});
+
+test("Oficina HTTP: POST /api/agents/:id/team mueve al agente y responde los errores en español", async () => {
+  const h = await createHarness({ mainAgent: true });
+  h.store.setMeta(PASSWORD_META, await hashPassword(PASSWORD));
+  const app = createApp({ service: h.service, auth: new Auth({ store: h.store, sessionDays: 1 }), publicDir, sharedDir: join(h.dir, "compartida"), workspacesDir: join(h.dir, "agentes"), maxHops: 6, secureCookies: "never" });
+  await new Promise<void>((resolve) => app.server.listen(0, "127.0.0.1", () => resolve()));
+  const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
+  try {
+    let cookie = "";
+    const call = (path: string, body: unknown) =>
+      fetch(`${base}${path}`, { method: "POST", headers: { cookie, "x-cuadrilla": "1", "content-type": "application/json" }, body: JSON.stringify(body) });
+    const login = await call("/api/login", { password: PASSWORD });
+    cookie = (login.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+    const ana = h.service.createAgent({ name: "Ana", role: "Prueba", provider: "demo" }, { greet: false });
+    const response = await call(`/api/agents/${ana.id}/team`, { name: "Arte" });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as Record<string, any>;
+    assert.equal(body.team.name, "Arte");
+    assert.equal(body.agent.project, "Arte");
+    const mainId = h.service.listAgents().find((agent) => agent.main)!.id;
+    const refused = await call(`/api/agents/${mainId}/team`, { to: body.team.id });
+    assert.equal(refused.status, 409);
+    assert.match(((await refused.json()) as Record<string, any>).error, /Claude Bot/);
+  } finally {
+    app.closeStreams();
+    await new Promise<void>((resolve) => app.server.close(() => resolve()));
+    await h.close();
+  }
+});
+
+test("Oficina (interfaz): el robot se sienta en el equipo donde lo dejaste y el aviso de soltar dice qué pasará", async () => {
+  const office = (await import(new URL("../../public/office.js", import.meta.url).href)) as {
+    planOffice: (input: unknown) => { panels: Array<Record<string, any>>; home: Map<string, string> };
+    dropVerdict: (name: string, from: unknown, target: unknown) => { ok: boolean; text: string };
+  };
+  const agents = ["main", "ana", "beto", "dani"].map((id) => ({ id }));
+  const channels = [
+    { id: "juegos", name: "Creación de Juegos", memberIds: ["ana", "beto"], leadId: "beto" },
+    { id: "mkt", name: "Marketing", memberIds: ["dani", "ana"], leadId: "dani" },
+  ];
+  assert.equal(office.planOffice({ agents, channels, mainId: "main" }).home.get("ana"), "juegos", "sin preferencia: el primer equipo donde está");
+  const prefer = new Map([
+    ["ana", "mkt"],
+    ["beto", "mkt"],
+    ["main", "juegos"],
+  ]);
+  const { home } = office.planOffice({ agents, channels, mainId: "main", prefer });
+  assert.equal(home.get("ana"), "mkt", "manda el equipo donde lo dejaste");
+  assert.equal(home.get("beto"), "juegos", "una preferencia de un equipo que ya no es el suyo no cuenta");
+  assert.equal(home.has("main"), false, "Claude Bot sigue en su salón");
+
+  const hall = { id: "hall", kind: "hall", title: "Claude Bot", channelId: null };
+  const juegos = { id: "c:juegos", kind: "room", title: "Creación de Juegos", channelId: "juegos", members: 2 };
+  const full = { id: "c:lleno", kind: "room", title: "Lleno", channelId: "lleno", members: 12 };
+  const loose = { id: "loose", kind: "room", title: "Sin grupo", channelId: null };
+  const ghost = { id: "new", kind: "new", title: "Nuevo equipo", channelId: null };
+  assert.deepEqual(office.dropVerdict("Eli", loose, juegos), { ok: true, text: "Mover a Eli a «Creación de Juegos»" });
+  assert.deepEqual(office.dropVerdict("Eli", loose, ghost), { ok: true, text: "Armar un equipo nuevo con Eli" });
+  assert.deepEqual(office.dropVerdict("Ana", juegos, loose), { ok: true, text: "Sacar a Ana de «Creación de Juegos»" });
+  assert.deepEqual(office.dropVerdict("Ana", juegos, juegos), { ok: false, text: "Ya está en «Creación de Juegos»" });
+  assert.deepEqual(office.dropVerdict("Eli", loose, loose), { ok: false, text: "Ya está sin grupo" });
+  assert.deepEqual(office.dropVerdict("Eli", loose, hall), { ok: false, text: "Ese es el salón de Claude Bot" });
+  assert.deepEqual(office.dropVerdict("Eli", loose, full), { ok: false, text: "«Lleno» ya tiene 12 agentes" });
+  assert.equal(office.dropVerdict("Eli", loose, null).ok, false);
+});
