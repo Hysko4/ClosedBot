@@ -1274,12 +1274,38 @@ async function loadOlder() {
   }
 }
 
+/**
+ * La fila de la respuesta nace al empezar el turno y su texto se completa al final, así que sus
+ * pasos quedan con un orden posterior. En pantalla la respuesta va después de los pasos de su turno.
+ */
+function orderForDisplay(messages) {
+  const lastStep = new Map();
+  messages.forEach((message, index) => {
+    if (message.role === "activity" && message.turnId) lastStep.set(message.turnId, index);
+  });
+  const ordered = [];
+  const waiting = new Map();
+  messages.forEach((message, index) => {
+    const moves = message.role === "assistant" && message.turnId && lastStep.get(message.turnId) > index;
+    if (moves) {
+      waiting.set(message.turnId, [...(waiting.get(message.turnId) ?? []), message]);
+      return;
+    }
+    ordered.push(message);
+    if (message.role === "activity" && lastStep.get(message.turnId) === index && waiting.has(message.turnId)) {
+      ordered.push(...waiting.get(message.turnId));
+      waiting.delete(message.turnId);
+    }
+  });
+  return ordered;
+}
+
 function renderAllMessages() {
   const container = $("#message-list");
   container.replaceChildren();
   elements.clear();
   dirty.clear();
-  for (const message of state.messages.get(convKey()) ?? []) {
+  for (const message of orderForDisplay(state.messages.get(convKey()) ?? [])) {
     const node = buildMessage(message);
     elements.set(message.id, node);
     container.append(node);
@@ -1310,7 +1336,15 @@ function upsertMessage(target, message) {
   const merged = list.find((item) => item.id === message.id);
   const node = buildMessage(merged);
   if (existing) existing.replaceWith(node);
-  else $("#message-list").append(node);
+  else {
+    // Un paso nuevo va antes de la respuesta de su turno, para que esta quede al final.
+    const answer = merged.role === "activity" && merged.turnId
+      ? list.find((item) => item.role === "assistant" && item.turnId === merged.turnId)
+      : null;
+    const answerNode = answer ? elements.get(answer.id) : null;
+    if (answerNode) answerNode.before(node);
+    else $("#message-list").append(node);
+  }
   elements.set(message.id, node);
   if (!$("#main-intro").hidden) renderMainIntro();
   if (!$("#channel-intro").hidden) renderChannelIntro();
