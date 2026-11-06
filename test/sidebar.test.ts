@@ -154,7 +154,8 @@ test("secciones: crear vacías, renombrar moviendo a sus agentes y eliminar sin 
     assert.deepEqual(h.service.deleteSection("Correo y agenda"), []);
     assert.equal(h.service.getAgent(ana.id).project, "", "pasa a «Sin asignar»");
     assert.equal(h.service.listAgents().length, 2);
-    assert.throws(() => h.service.deleteSection("No existe"), (error: unknown) => error instanceof ServiceError && error.status === 404);
+    // Una que ya no existe (p. ej. se borraron todos sus agentes) no es un error: no queda nada que hacer.
+    assert.deepEqual(h.service.deleteSection("No existe"), h.service.listSections());
     assert.ok(h.events.some((event) => event.type === "sections"));
   } finally {
     await h.close();

@@ -3235,19 +3235,34 @@ async function renameSection(name) {
 }
 
 async function deleteSection(name) {
-  const count = state.agents.filter((agent) => !agent.main && agent.project.toLowerCase() === name.toLowerCase()).length;
+  const members = state.agents.filter((agent) => !agent.main && agent.project.toLowerCase() === name.toLowerCase());
+  const count = members.length;
   const text = count
-    ? `${count === 1 ? "Su agente pasa" : `Sus ${count} agentes pasan`} a «Sin asignar». No se borra ningún agente.`
+    ? count === 1
+      ? "Solo la sección: su agente pasa a «Sin asignar» y sigue en la Oficina. Con su agente: se borra también, y su canal si queda vacío."
+      : `Solo la sección: sus ${count} agentes pasan a «Sin asignar» y siguen en la Oficina. Con sus agentes: se borran también, y su canal si queda vacío.`
     : "No tiene agentes, así que no se borra nada más.";
-  if (!(await confirmAction(`¿Eliminar la sección «${name}»?`, text, "Eliminar sección"))) return;
+  const choice = await confirmAction(
+    `¿Eliminar la sección «${name}»?`,
+    text,
+    count ? "Solo la sección" : "Eliminar sección",
+    "danger",
+    count ? { label: count === 1 ? "Con su agente" : `Con sus ${count} agentes`, value: "all" } : null,
+  );
+  if (!choice) return;
+  if (choice === "all") {
+    await deleteAgents(members.map((agent) => agent.id), { confirmed: true });
+    if (state.agents.some((agent) => members.some((member) => member.id === agent.id))) return;
+  }
   try {
     const result = await api("/api/sections/delete", { method: "POST", body: { name } });
     state.sections = result.sections;
-    if (state.collapsed.delete(sectionKey(name))) saveCollapsed();
-    renderSidebar();
   } catch (error) {
-    showToast(error.message, "error");
+    // Sin agentes y sin guardar, la sección ya no existe: no hay nada más que borrar.
+    if (error.status !== 404) return showToast(error.message, "error");
   }
+  if (state.collapsed.delete(sectionKey(name))) saveCollapsed();
+  renderSidebar();
 }
 
 // ---------- seleccionar varios agentes y eliminarlos juntos ----------
@@ -3399,7 +3414,7 @@ function forgetAgent(id) {
  * Elimina uno o varios agentes con una sola confirmación. Al que está trabajando se le detiene
  * el turno, y un canal que se queda sin miembros pasa a «Canales eliminados».
  */
-async function deleteAgents(ids) {
+async function deleteAgents(ids, { confirmed = false } = {}) {
   closeContextMenu();
   if (selectionBusy) return;
   const agents = [...new Set(ids)].map((id) => selectableAgent(id)).filter(Boolean);
@@ -3419,7 +3434,7 @@ async function deleteAgents(ids) {
   if (emptied.length === 1) text.push(`El canal «${emptied[0].name}» pasa a «Canales eliminados».`);
   else if (emptied.length) text.push(`Los canales ${joinNames(emptied.map((channel) => `«${channel.name}»`))} pasan a «Canales eliminados».`);
   text.push(one ? "Su carpeta de trabajo queda en el equipo por si la necesitas." : "Sus archivos se quedan en sus carpetas.");
-  if (!(await confirmAction(one ? `¿Eliminar a ${one.name}?` : `¿Eliminar ${agents.length} agentes?`, text.join(" "), "Eliminar"))) return;
+  if (!confirmed && !(await confirmAction(one ? `¿Eliminar a ${one.name}?` : `¿Eliminar ${agents.length} agentes?`, text.join(" "), "Eliminar"))) return;
 
   selectionBusy = true;
   renderSelectBar();
@@ -6968,16 +6983,21 @@ function closeDialog(dialog) {
   if (dialog.open) dialog.close();
 }
 
-function confirmAction(title, text, okLabel, tone = "danger") {
+/** `extra`: un segundo botón ({ label, value }); entonces devuelve "ok", ese valor o "" si cancela. */
+function confirmAction(title, text, okLabel, tone = "danger", extra = null) {
   const dialog = $("#confirm-dialog");
   $("#confirm-title").textContent = title;
   $("#confirm-text").textContent = text;
   $("#confirm-ok").textContent = okLabel;
   $("#confirm-ok").className = `button ${tone}`;
+  const second = $("#confirm-extra");
+  second.hidden = !extra;
+  second.textContent = extra?.label ?? "";
+  second.value = extra?.value ?? "extra";
   dialog.returnValue = "";
   openDialog(dialog);
   return new Promise((resolve) => {
-    dialog.addEventListener("close", () => resolve(dialog.returnValue === "ok"), { once: true });
+    dialog.addEventListener("close", () => resolve(extra ? (dialog.returnValue === "cancel" ? "" : dialog.returnValue) : dialog.returnValue === "ok"), { once: true });
   });
 }
 

@@ -1016,7 +1016,9 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   /** Quita una sección: sus agentes pasan a «Sin asignar». */
   deleteSection(rawName: unknown): string[] {
     const name = cleanProject(rawName);
-    if (!name || !this.#sectionExists(name)) throw new ServiceError("Sección no encontrada.", 404);
+    if (!name) throw new ServiceError("Sección no encontrada.", 404);
+    // Si ya no existe (p. ej. se borraron todos sus agentes), no queda nada que hacer.
+    if (!this.#sectionExists(name)) return this.listSections();
     let moved = 0;
     for (const agent of this.#store.listAgents()) {
       if (agent.project.toLowerCase() !== name.toLowerCase()) continue;
