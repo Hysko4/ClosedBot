@@ -4503,30 +4503,15 @@ function openCreateDialog({ project = "", agentId = null } = {}) {
   name.value = agent?.name ?? "";
   $("#create-look").value = agent?.appearance ?? "";
   $("#create-error").textContent = "";
-  renderCreateCharacter(agent);
+  renderCreateCharacter();
   renderCreatePickers();
   openDialog($("#create-dialog"));
   if (!coarsePointer) name.focus();
 }
 
-/** En «Apariencia» de un agente: su personaje de PixelLab y, si PixelLab está conectado, volver a dibujarlo. */
-function renderCreateCharacter(agent) {
-  const row = $("#create-character");
-  const character = agent?.character ?? null;
-  if (!agent || !pixelLab?.configured) {
-    row.hidden = true;
-    return;
-  }
-  row.hidden = false;
-  const label = {
-    drawing: "PixelLab está dibujando su personaje…",
-    ready: "Su personaje de PixelLab está listo.",
-    failed: `No se pudo dibujar: ${character?.error ?? "error de PixelLab"}`,
-  }[character?.status] ?? "Aún no tiene personaje de PixelLab.";
-  $("#create-character-text").textContent = label;
-  const redo = $("#create-character-redo");
-  redo.hidden = character?.status === "drawing";
-  redo.textContent = character?.status === "ready" ? "Dibujar de nuevo" : "Dibujarlo";
+/** La Oficina ya no usa personajes de PixelLab (los agentes son robots): la fila queda oculta. */
+function renderCreateCharacter() {
+  $("#create-character").hidden = true;
 }
 
 async function redrawCharacter() {
@@ -4570,20 +4555,9 @@ function renderPixelLab() {
   $("#pixellab-connected").hidden = !configured;
   const draw = $("#office-draw");
   const status = $("#office-status");
-  const drawing = pixelLab?.drawing?.length ?? 0;
-  const missing = pixelLab?.missing ?? 0;
-  if (!pixelLab) draw.hidden = true;
-  else if (!configured) {
-    draw.hidden = false;
-    draw.textContent = "Conectar PixelLab";
-  } else {
-    draw.hidden = drawing > 0 || missing === 0;
-    draw.textContent = missing === 1 ? "Dibujar el personaje que falta" : `Dibujar ${missing} personajes`;
-  }
-  if (drawing) {
-    const names = pixelLab.drawing.map((id) => findAgent(id)?.name).filter(Boolean);
-    status.textContent = names.length === 1 ? `PixelLab está dibujando a ${names[0]}…` : `PixelLab está dibujando ${drawing} personajes…`;
-  } else status.textContent = "";
+  // La Oficina dibuja robots: ya no ofrece dibujar personajes de PixelLab.
+  draw.hidden = true;
+  status.textContent = "";
 }
 
 async function connectPixelLab(event) {

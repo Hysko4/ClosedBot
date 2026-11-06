@@ -370,6 +370,8 @@ export interface ServiceOptions {
   mainMaxSteps?: number;
   /** Carpeta de la Oficina (personajes y arte); por defecto «oficina» junto a la carpeta compartida. */
   officeDir?: string;
+  /** Pedir a PixelLab el personaje de cada agente nuevo (la Oficina de robots no lo usa: apagado por omisión). */
+  autoCharacters?: boolean;
   /** Cómo hablar con PixelLab (las pruebas usan un servidor falso). */
   pixelLab?: PixelLabOptions;
   /** De dónde y cómo bajar el arte en alta resolución (las pruebas usan uno falso). */
@@ -808,8 +810,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         ...(input.notify === undefined ? {} : { notify: cleanNotify(input.notify) }),
       });
     }
-    // Con PixelLab conectado, cada agente nuevo recibe su personaje.
-    if (this.#requestCharacter(created)) created = this.#store.getAgent(created.id) ?? created;
+    // La Oficina dibuja robots: los personajes de PixelLab solo se piden si se activa `autoCharacters`.
+    if (this.#options.autoCharacters && this.#requestCharacter(created)) created = this.#store.getAgent(created.id) ?? created;
     this.#emitAgents();
     if (options.greet) this.#greet(created);
     return this.#view(created);
@@ -852,7 +854,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (next.instructions !== undefined) writeInstructions(agent.workspace, next.instructions);
     let updated = this.#store.updateAgent(id, next);
     // Otro aspecto: PixelLab lo vuelve a dibujar.
-    if (next.appearance !== undefined && next.appearance !== agent.appearance && this.#requestCharacter(updated)) {
+    if (this.#options.autoCharacters && next.appearance !== undefined && next.appearance !== agent.appearance && this.#requestCharacter(updated)) {
       updated = this.#store.getAgent(id) ?? updated;
     }
     if (agent.threadId) this.#loadedThreads.delete(`${agent.provider}:${agent.threadId}`);

@@ -313,8 +313,8 @@
           </p>
           <h3 class="section-title" id="tts-title">Voces para leer en voz alta</h3>
           <ul class="provider-list" id="tts-settings"></ul>
-          <h3 class="section-title">Personajes de la Oficina</h3>
-          <form class="pixellab-form" id="pixellab-form" novalidate>
+          <h3 class="section-title" hidden>Personajes de la Oficina</h3>
+          <form class="pixellab-form" id="pixellab-form" novalidate hidden>
             <div class="pixellab-row" id="pixellab-connect">
               <input id="pixellab-token" type="password" autocomplete="off" spellcheck="false" placeholder="Token de PixelLab" aria-label="Token de PixelLab" />
               <button type="submit" class="button ghost" id="pixellab-save">Conectar</button>
@@ -410,7 +410,7 @@
           <input class="create-name" id="create-name" name="name" maxlength="60" placeholder="Ponle nombre a tu agente" aria-label="Nombre del agente" autocomplete="off" />
           <div class="shape-grid" id="shape-grid" role="radiogroup" aria-label="Figura"></div>
           <div class="color-row" id="color-row" role="radiogroup" aria-label="Color"></div>
-          <label class="field create-look">
+          <label class="field create-look" hidden>
             <span>Su personaje en la Oficina (opcional)</span>
             <textarea id="create-look" rows="2" maxlength="300" placeholder="Ej.: pelo rojo, chaleco verde y lentes redondos"></textarea>
           </label>

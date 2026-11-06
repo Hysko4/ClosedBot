@@ -463,10 +463,11 @@ test("Oficina HTTP: la foto del momento, el arte con caché, PixelLab y los cuad
   }
 });
 
-test("Oficina (interfaz): una sala por grupo con un escritorio por integrante, y el resto en «Sin grupo»", async () => {
+test("Oficina (interfaz): una plataforma por grupo con un escritorio por integrante, y el resto en «Sin grupo»", async () => {
   const office = (await import(new URL("../../public/office.js", import.meta.url).href)) as {
     planOffice: (input: unknown) => { panels: Array<Record<string, any>>; home: Map<string, string> };
-    arrangeDesks: (ids: string[]) => Array<Record<string, any>>;
+    platformSeats: (ids: string[]) => Array<{ i: number; j: number }>;
+    platformSide: (count: number) => number;
     boardLines: (text: string) => string[];
     activityIcon: (text: string, payload?: unknown) => string;
   };
@@ -479,7 +480,7 @@ test("Oficina (interfaz): una sala por grupo con un escritorio por integrante, y
   assert.deepEqual(
     panels.map((panel) => [panel.title, panel.seats.map((seat: { agentId: string }) => seat.agentId)]),
     [
-      ["Salón", ["main"]],
+      ["Claude Bot", ["main"]],
       ["Creación de Juegos", ["beto", "ana", "cata"]],
       ["Marketing", ["ana", "dani"]],
       ["Sin grupo", ["eli"]],
@@ -491,34 +492,17 @@ test("Oficina (interfaz): una sala por grupo con un escritorio por integrante, y
   assert.equal(home.has("main"), false);
   assert.equal(home.has("eli"), false);
 
-  // Caben todos los escritorios en la sala, sin encimarse, y se achican a medida que son más.
-  const area = { left: 290, right: 2430, top: 560, bottom: 1460 };
-  let previous = Infinity;
+  // Un escritorio por integrante: la plataforma crece con el equipo y nadie comparte celda.
   for (let n = 1; n <= 16; n += 1) {
-    const seats = office.arrangeDesks(Array.from({ length: n }, (_, index) => `a${index}`));
+    const seats = office.platformSeats(Array.from({ length: n }, (_, index) => `a${index}`));
+    const side = office.platformSide(n);
     assert.equal(seats.length, n);
-    const scale = seats[0]!.scale as number;
-    assert.ok(scale <= 0.92 && scale >= 0.4, `escala ${scale} con ${n}`);
-    assert.ok(scale <= previous + 0.012, `con ${n} no crece`);
-    previous = scale;
-    const boxes = seats.map((seat) => ({
-      left: seat.anchorX - 383 * scale,
-      right: seat.anchorX + 383 * scale,
-      top: seat.anchorY - 585 * scale,
-      bottom: seat.anchorY,
-    }));
-    for (const box of boxes) {
-      assert.ok(box.left >= area.left - 1 && box.right <= area.right + 1 && box.top >= area.top - 1 && box.bottom <= area.bottom + 1, `${n} escritorios: fuera de la sala`);
-    }
-    for (let i = 0; i < boxes.length; i += 1) {
-      for (let j = i + 1; j < boxes.length; j += 1) {
-        const a = boxes[i]!;
-        const b = boxes[j]!;
-        const sameRow = Math.abs(seats[i]!.anchorY - seats[j]!.anchorY) < 1;
-        if (sameRow) assert.ok(a.right <= b.left + 1 || b.right <= a.left + 1, `${n} escritorios: se enciman`);
-      }
-    }
+    assert.ok(side * side >= n, `${n} caben en ${side}×${side}`);
+    assert.equal(new Set(seats.map((seat) => `${seat.i},${seat.j}`)).size, n, `${n}: celdas repetidas`);
+    assert.ok(seats.every((seat) => seat.i < side && seat.j < side));
   }
+  assert.equal(office.platformSide(1), 2);
+  assert.equal(office.platformSide(9), 3);
 
   assert.deepEqual(office.boardLines("## Objetivo\n- **Ana**: cartas\n\n1) Probar\n"), ["Objetivo", "• Ana: cartas", "1) Probar"]);
   assert.equal(office.activityIcon("Ejecutó: npm test"), "terminal");

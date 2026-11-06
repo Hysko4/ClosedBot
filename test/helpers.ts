@@ -68,7 +68,7 @@ export async function createHarness(options: {
     ...(options.installCommands ? { installCommands: options.installCommands } : {}),
     ...(options.mainAgent ? { mainAgent: true } : {}),
     ...(options.mainMaxSteps ? { mainMaxSteps: options.mainMaxSteps } : {}),
-    ...(options.pixelLab ? { pixelLab: options.pixelLab } : {}),
+    ...(options.pixelLab ? { pixelLab: options.pixelLab, autoCharacters: true } : {}),
     ...(options.officeArt ? { officeArt: options.officeArt } : {}),
   });
   service.on("event", (event) => events.push(event));
