@@ -670,3 +670,23 @@ test("Oficina (interfaz): el robot se sienta en el equipo donde lo dejaste y el 
   assert.deepEqual(office.dropVerdict("Eli", loose, full), { ok: false, text: "«Lleno» ya tiene 12 agentes" });
   assert.equal(office.dropVerdict("Eli", loose, null).ok, false);
 });
+
+test("Oficina (interfaz): una plataforma con un solo agente toma su color; un equipo de varios, el del equipo", async () => {
+  const office = (await import(new URL("../../public/office.js", import.meta.url).href)) as {
+    platformColor: (spec: unknown, agentColor: (id: string) => string | null) => string;
+  };
+  const colors: Record<string, string> = { ana: "#e5484d", beto: "#4cbb73" };
+  const agentColor = (id: string) => colors[id] ?? null;
+  const seat = (agentId: string) => ({ agentId, kind: "desk", i: 0, j: 0 });
+  const solo = { kind: "room", channelId: null, seats: [seat("ana")] };
+  assert.equal(office.platformColor(solo, agentColor), "#e5484d", "«Sin grupo» con un agente rojo: roja");
+  const soloTeam = { kind: "room", channelId: "arte", seats: [seat("beto")] };
+  assert.equal(office.platformColor(soloTeam, agentColor), "#4cbb73", "un equipo de uno: el color de su agente");
+  const team = { kind: "room", channelId: "arte", seats: [seat("ana"), seat("beto")] };
+  const teamColor = office.platformColor(team, agentColor);
+  assert.ok(teamColor !== "#e5484d" && teamColor !== "#4cbb73", "un equipo de varios: el color del equipo");
+  assert.equal(office.platformColor({ ...team, seats: [seat("beto"), seat("ana")] }, agentColor), teamColor, "fijo por canal");
+  const loose = { kind: "room", channelId: null, seats: [seat("ana"), seat("beto")] };
+  assert.equal(office.platformColor(loose, agentColor), "#b9bfd4", "«Sin grupo» con varios: neutro");
+  assert.equal(office.platformColor({ kind: "hall", channelId: null, seats: [seat("main")] }, agentColor), "#8fa8ff", "el salón no cambia");
+});

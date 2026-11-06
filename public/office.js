@@ -7,6 +7,8 @@
 const NEON = ["#2de2c8", "#3fb6ff", "#ff4fa3", "#f5d63d", "#9b7bff", "#ff8a3d", "#5cf27e", "#ff5d5d"];
 const HALL_COLOR = "#8fa8ff";
 const GHOST_COLOR = "#b4c2ff";
+/** «Sin grupo» con varios agentes: no es un equipo, así que va en un color neutro. */
+const LOOSE_COLOR = "#b9bfd4";
 /** Mitad del ancho y del alto de una celda isométrica, en píxeles de mundo. */
 const TILE_W = 74;
 const TILE_H = 37;
@@ -94,6 +96,20 @@ export function dropVerdict(name, from, target) {
   }
   if ((target.members ?? 0) >= MAX_MEMBERS) return { ok: false, text: `«${target.title}» ya tiene ${MAX_MEMBERS} agentes` };
   return { ok: true, text: `Mover a ${name} a «${target.title}»` };
+}
+
+/**
+ * Color de una plataforma: con un solo agente, el de ese agente; un equipo de varios, el suyo (fijo por canal);
+ * «Sin grupo» con varios, uno neutro. `agentColor(id)` da el color de un agente (o null si no se sabe).
+ */
+export function platformColor(spec, agentColor) {
+  if (spec.kind === "hall") return HALL_COLOR;
+  if (spec.seats?.length === 1) {
+    const color = agentColor(spec.seats[0].agentId);
+    if (color) return color;
+  }
+  if (spec.channelId) return NEON[hashText(spec.channelId) % NEON.length];
+  return LOOSE_COLOR;
 }
 
 /** Punto relativo a la esquina de atrás de una plataforma → celda isométrica (i, j), con decimales. */
@@ -286,11 +302,10 @@ export function createOffice(host) {
     const main = agents.find((agent) => agent.main) ?? null;
     const plan = planOffice({ agents, channels, mainId: main?.id ?? null, prefer });
     const byId = new Map(agents.map((agent) => [agent.id, agent]));
-    let roomIndex = 0;
+    const agentColor = (id) => (byId.has(id) ? host.colorOf(byId.get(id)) : null);
     platforms = plan.panels.map((spec) => {
       const hall = spec.kind === "hall";
-      const color = hall ? HALL_COLOR : NEON[(spec.channelId ? hashText(spec.channelId) : roomIndex) % NEON.length];
-      if (!hall) roomIndex += 1;
+      const color = platformColor(spec, agentColor);
       return { ...spec, color, side: hall ? 2 : platformSide(spec.seats.length), x: 0, y: 0 };
     });
     empty = !agents.some((agent) => !agent.main);
@@ -2028,6 +2043,7 @@ export function createOffice(host) {
           id: platform.id,
           kind: platform.kind,
           title: platform.title,
+          color: platform.color,
           center: screen({ x: platform.cx, y: platform.cy }),
           card: platform.card ? screen({ x: platform.card.x + platform.card.w / 2, y: platform.card.y + platform.card.h / 2 }) : null,
           add: platform.add ? screen(platform.add) : null,
