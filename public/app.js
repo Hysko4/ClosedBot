@@ -1423,6 +1423,14 @@ function buildMessage(message) {
       node.append(line, imageStrip(message.agentId, [message.payload.path]));
       return node;
     }
+    // Agentes que eliminó Claude Bot cuando lo confirmaste en su tarjeta.
+    if (kind === "agents-deleted") {
+      const text = document.createElement("span");
+      text.textContent = message.text;
+      node.append(icon("trash"), text);
+      if (message.channelId) node.prepend(whoLabel(message.agentId));
+      return node;
+    }
     if (kind === "agent-created" || kind === "agent-updated") {
       const target = findAgent(message.payload.agentId);
       const created = kind === "agent-created";
@@ -1624,6 +1632,8 @@ function buildDecision(message) {
   const payload = message.payload ?? {};
   const options = Array.isArray(payload.options) ? payload.options : [];
   const answered = Number.isInteger(payload.answer);
+  // La tarjeta con la que confirmas los agentes que Claude Bot va a eliminar: «Eliminar» va en rojo.
+  const deleting = payload.kind === "delete-agents";
   const card = document.createElement("div");
   card.className = "decision";
   card.dataset.answered = String(answered);
@@ -1643,6 +1653,7 @@ function buildDecision(message) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "decision-option";
+    if (deleting && index === 0) button.dataset.tone = "danger";
     button.disabled = answered || answering.has(message.id);
     if (answered) button.dataset.chosen = String(payload.answer === index);
     const letter = document.createElement("span");

@@ -21,6 +21,7 @@ export const TOOL_LIST_ROUTINES = "list_routines";
 export const TOOL_DELETE_ROUTINE = "delete_routine";
 export const TOOL_CREATE_AGENT = "create_agent";
 export const TOOL_UPDATE_AGENT = "update_agent";
+export const TOOL_DELETE_AGENTS = "delete_agents";
 export const TOOL_CREATE_CHANNEL = "create_channel";
 export const TOOL_READ_AGENT = "read_agent";
 export const TOOL_UPDATE_BOARD = "update_board";
@@ -47,10 +48,10 @@ export const TEAM_TOOLS = [
 ] as const;
 
 /**
- * Herramientas que solo tiene el bot principal: arman y ajustan los equipos (también el proveedor de cada
- * agente) y les crean su canal, leen la ficha completa de cada agente y llevan la pizarra del trabajo.
+ * Herramientas que solo tiene el bot principal: arman, ajustan y eliminan los equipos (también el proveedor
+ * de cada agente) y les crean su canal, leen la ficha completa de cada agente y llevan la pizarra del trabajo.
  */
-export const MAIN_TOOLS = [TOOL_CREATE_AGENT, TOOL_UPDATE_AGENT, TOOL_CREATE_CHANNEL, TOOL_READ_AGENT, TOOL_UPDATE_BOARD] as const;
+export const MAIN_TOOLS = [TOOL_CREATE_AGENT, TOOL_UPDATE_AGENT, TOOL_DELETE_AGENTS, TOOL_CREATE_CHANNEL, TOOL_READ_AGENT, TOOL_UPDATE_BOARD] as const;
 
 export const LIST_AGENTS_DESCRIPTION =
   "Lista los agentes de tu equipo con su id, nombre, rol, proyecto y estado (libre, trabajando o con cola). Al bot principal le muestra además los canales, la pizarra y cuánto plan le queda a cada cuenta.";
@@ -66,6 +67,12 @@ export const CREATE_AGENT_DESCRIPTION =
   "Crea un agente nuevo en el equipo del usuario, con nombre, rol, descripción, instrucciones permanentes y proyecto (el grupo de la barra lateral donde aparece). Antes revisa con list_agents que no exista uno parecido. Usa el mismo proyecto para todos los agentes de un equipo.";
 export const UPDATE_AGENT_DESCRIPTION =
   "Cambia el nombre, el rol, la descripción, las instrucciones, el proyecto, el proveedor, el modelo o el aspecto de un agente que ya existe (indícalo por id o nombre). Solo cambia lo que pases. Cambia el proveedor cuando el agente no puede hacer su parte con el que tiene (p. ej. imágenes) y solo si está libre: empieza una conversación nueva con sus mismas instrucciones y recuerdos. No sirve para cambiarte a ti mismo.";
+export const DELETE_AGENTS_DESCRIPTION =
+  "Elimina uno o varios agentes (por id o nombre) cuando el usuario te lo pide; pásalos todos en una sola llamada. ClosedBot le muestra al usuario una tarjeta para confirmar y, si toca «Eliminar», los elimina con su historial, su cola y sus rutinas (sus archivos quedan en sus carpetas, y un canal que se queda sin miembros pasa a «Canales eliminados»). No le preguntes antes con ask_user: la tarjeta ya es la confirmación. Después de llamarla, termina tu turno: el resultado te llega como un mensaje nuevo. No puedes eliminarte a ti mismo.";
+/** Agentes que se pueden eliminar de una vez (todos los que caben en el equipo). */
+export const MAX_DELETE_AGENTS = 60;
+export const DELETE_AGENTS_FIELD_HELP = "Ids o nombres de los agentes que el usuario pidió eliminar, todos juntos.";
+
 export const REMEMBER_DESCRIPTION =
   "Guarda un recuerdo duradero: un dato, preferencia o decisión del usuario que te servirá en otras conversaciones (no lo uses para notas de la tarea actual). Con always true se usa siempre (va en tus instrucciones desde tu próximo mensaje); si no, lo buscas con search_memories cuando haga falta. Antes de guardar, revisa que no lo tengas ya.";
 export const FORGET_MEMORY_DESCRIPTION = "Borra uno de tus recuerdos por su id (míralo con list_memories o search_memories). Úsalo si quedó viejo, es falso o el usuario te pide olvidarlo.";
@@ -340,6 +347,25 @@ const MAIN_DYNAMIC_TOOLS = [
   },
   {
     type: "function",
+    name: TOOL_DELETE_AGENTS,
+    description: DELETE_AGENTS_DESCRIPTION,
+    inputSchema: {
+      type: "object",
+      properties: {
+        agents: {
+          type: "array",
+          items: { type: "string", minLength: 1 },
+          minItems: 1,
+          maxItems: MAX_DELETE_AGENTS,
+          description: DELETE_AGENTS_FIELD_HELP,
+        },
+      },
+      required: ["agents"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
     name: TOOL_CREATE_CHANNEL,
     description: CREATE_CHANNEL_DESCRIPTION,
     inputSchema: {
@@ -390,7 +416,7 @@ export function teamDynamicTools(main: boolean) {
     type: "namespace",
     name: TEAM_NAMESPACE,
     description: main
-      ? "Arma y ajusta los equipos de agentes del usuario y sus canales, habla con ellos, pregúntale al usuario, programa rutinas y guarda recuerdos."
+      ? "Arma, ajusta y elimina los equipos de agentes del usuario y sus canales, habla con ellos, pregúntale al usuario, programa rutinas y guarda recuerdos."
       : "Habla con tus compañeros de ClosedBot, pregúntale al usuario, programa rutinas y guarda recuerdos.",
     tools: main ? [...BASE_DYNAMIC_TOOLS, ...MAIN_DYNAMIC_TOOLS] : [...BASE_DYNAMIC_TOOLS],
   };
@@ -546,6 +572,25 @@ export function parseUpdateAgentArgs(value: unknown): UpdateAgentArgs {
   return args;
 }
 
+/** Ids o nombres de los agentes a eliminar, sin repetir. */
+export function parseDeleteAgentsArgs(value: unknown): { agents: string[] } {
+  const record = argsRecord(value);
+  const raw = record.agents ?? record.agent ?? record.names ?? record.ids;
+  const list = typeof raw === "string" ? [raw] : raw;
+  if (!Array.isArray(list) || list.length === 0 || !list.every((item) => typeof item === "string" && item.trim())) {
+    throw new Error("`agents` debe ser una lista con los ids o nombres de los agentes a eliminar.");
+  }
+  const seen = new Set<string>();
+  const agents = (list as string[]).map((item) => item.trim()).filter((item) => {
+    const key = item.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (agents.length > MAX_DELETE_AGENTS) throw new Error(`Se pueden eliminar hasta ${MAX_DELETE_AGENTS} agentes de una vez.`);
+  return { agents };
+}
+
 export interface CreateChannelArgs {
   name: string;
   /** Ids o nombres de los miembros, en orden. */
@@ -617,8 +662,8 @@ export function parseMemoryInclusionArgs(value: unknown): { id: string; always: 
 
 function parseProvider(value: unknown): ProviderId | null {
   if (value === undefined || value === null || value === "") return null;
-  if (value === "claude" || value === "codex" || value === "grok" || value === "gemini" || value === "demo") return value;
-  throw new Error("`provider` debe ser claude, codex, grok o gemini.");
+  if (value === "claude" || value === "codex" || value === "grok" || value === "gemini" || value === "local" || value === "demo") return value;
+  throw new Error("`provider` debe ser claude, codex, grok, gemini o local.");
 }
 
 function argsRecord(value: unknown): Record<string, unknown> {

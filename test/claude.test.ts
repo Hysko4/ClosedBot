@@ -284,7 +284,7 @@ test("Claude: solo Claude Bot recibe las herramientas para crear y ajustar agent
     ];
     assert.deepEqual(
       await teamToolNames(mainOptions),
-      [...base, "create_agent", "create_channel", "read_agent", "update_agent", "update_board"].sort(),
+      [...base, "create_agent", "create_channel", "delete_agents", "read_agent", "update_agent", "update_board"].sort(),
     );
     assert.deepEqual(await teamToolNames(claraOptions), base);
     assert.match((mainOptions.systemPrompt as { append: string }).append, /Eres el bot principal de ClosedBot/);

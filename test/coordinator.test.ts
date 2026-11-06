@@ -178,7 +178,7 @@ test("Claude Bot le cambia el proveedor a un agente: solo si está libre y si es
     reply = await talk(h, mainId, "/proveedor Ana | grok");
     assert.match(reply, /No pude cambiarle el proveedor a Ana: Grok no está disponible en este equipo: elige otro de proveedoresListos\./);
     reply = await talk(h, mainId, "/proveedor Ana | gpt");
-    assert.match(reply, /`provider` debe ser claude, codex, grok o gemini\./);
+    assert.match(reply, /`provider` debe ser claude, codex, grok, gemini o local\./);
     reply = await talk(h, mainId, "/proveedor Claude Bot | codex");
     assert.match(reply, /No puedes cambiarte a ti mismo/);
     h.service.sendUserMessage(ana.id, "/lento Cuéntame una historia larga");

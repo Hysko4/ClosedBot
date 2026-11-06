@@ -37,8 +37,8 @@ test("preguntas: el agente pregunta con opciones y la respuesta le llega como me
       "las herramientas de ClosedBot no dejan líneas de actividad repetidas",
     );
 
-    assert.throws(() => h.service.answerDecision(ana.id, decision.id, 5), (error: unknown) => error instanceof ServiceError && error.status === 400);
-    const answer = h.service.answerDecision(ana.id, decision.id, 1);
+    await assert.rejects(h.service.answerDecision(ana.id, decision.id, 5), (error: unknown) => error instanceof ServiceError && error.status === 400);
+    const answer = await h.service.answerDecision(ana.id, decision.id, 1);
     assert.equal(answer.decision.payload?.answer, 1);
     assert.equal(answer.message.text, "B. Sushi");
     assert.match(answer.delivery.text, /eligió la opción B, «Sushi»/);
@@ -46,10 +46,10 @@ test("preguntas: el agente pregunta con opciones y la respuesta le llega como me
     await waitFor(() => h.store.getMessage(answer.message.id)?.status === "completed", 5_000, "respuesta procesada");
     const replies = h.service.listMessages(ana.id).filter((message) => message.role === "assistant");
     assert.match(replies.at(-1)?.text ?? "", /Respuesta del usuario a tu pregunta/);
-    assert.throws(() => h.service.answerDecision(ana.id, decision.id, 0), (error: unknown) => error instanceof ServiceError && error.status === 409);
+    await assert.rejects(h.service.answerDecision(ana.id, decision.id, 0), (error: unknown) => error instanceof ServiceError && error.status === 409);
 
     const beto = h.service.createAgent({ name: "Beto", provider: "demo" });
-    assert.throws(() => h.service.answerDecision(beto.id, decision.id, 0), (error: unknown) => error instanceof ServiceError && error.status === 404);
+    await assert.rejects(h.service.answerDecision(beto.id, decision.id, 0), (error: unknown) => error instanceof ServiceError && error.status === 404);
   } finally {
     await h.close();
   }

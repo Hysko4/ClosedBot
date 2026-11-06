@@ -595,7 +595,7 @@ export function createApp(options: AppOptions): App {
 
   route("POST", "/api/agents/:id/decisions/:messageId", async (ctx) => {
     const body = await readJson(ctx.req);
-    const { decision, message } = service.answerDecision(param(ctx, 0), param(ctx, 1), body.choice);
+    const { decision, message } = await service.answerDecision(param(ctx, 0), param(ctx, 1), body.choice);
     return { decision, message };
   });
 

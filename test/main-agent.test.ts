@@ -3,7 +3,8 @@ import { test } from "node:test";
 import { buildInstructions, MAIN_AGENT_GUIDE } from "../src/instructions.js";
 import type { AgentClient } from "../src/providers/client.js";
 import { DemoAgentClient } from "../src/providers/demo.js";
-import { MAIN_AGENT_NAME, MAIN_AGENT_ROLE, MAX_AGENTS_PER_TURN, ServiceError } from "../src/service.js";
+import { DELETE_AGENTS_CARD, MAIN_AGENT_NAME, MAIN_AGENT_ROLE, MAX_AGENTS_PER_TURN, ServiceError } from "../src/service.js";
+import { parseCreateAgentArgs, parseDeleteAgentsArgs, parseUpdateAgentArgs } from "../src/team.js";
 import { createHarness, tempDir, waitFor, type Harness } from "./helpers.js";
 
 /** Demo que guarda lo que recibe en cada turno (para ver la nota de ClosedBot); con `fail`, el próximo turno no empieza. */
@@ -200,7 +201,7 @@ test("Claude Bot crea el canal del equipo: con el líder de encargado, sin inclu
     assert.equal(h.service.listChannels().find((item) => item.name === "Revisión")?.leadId, programador.id);
     const ana = h.service.createAgent({ name: "Ana", provider: "demo" });
     const refused = await talk(h, ana.id, "/canal Intrusos | | Ana");
-    assert.match(refused, /No pude crear el canal «Intrusos»: Solo el bot principal puede crear o cambiar agentes y crear canales/);
+    assert.match(refused, /No pude crear el canal «Intrusos»: Solo el bot principal puede crear, cambiar o eliminar agentes y crear canales/);
     assert.equal(h.service.listChannels().length, 2);
   } finally {
     await h.close();
@@ -328,7 +329,7 @@ test("solo el bot principal crea agentes, y tiene un tope por pedido", async () 
   try {
     const ana = h.service.createAgent({ name: "Ana", provider: "demo" });
     const refused = await talk(h, ana.id, "/crear Intruso | Rol | Proyecto\n/ajustar Claude Bot | Otro rol");
-    assert.match(refused, /No pude crear a Intruso: Solo el bot principal puede crear o cambiar agentes/);
+    assert.match(refused, /No pude crear a Intruso: Solo el bot principal puede crear, cambiar o eliminar agentes/);
     assert.match(refused, /No pude ajustar a Claude Bot: Solo el bot principal/);
     assert.equal(h.store.findAgentByName("Intruso"), null);
 
@@ -343,6 +344,135 @@ test("solo el bot principal crea agentes, y tiene un tope por pedido", async () 
   } finally {
     await h.close();
   }
+});
+
+test("Claude Bot elimina agentes: deja una tarjeta para confirmar y, al tocar «Eliminar», los elimina", async () => {
+  const inputs: string[] = [];
+  const h = await createHarness({ mainAgent: true, createClient: recordingClient(inputs) });
+  try {
+    const mainId = h.service.mainAgentId() as string;
+    await talk(
+      h,
+      mainId,
+      [
+        "/crear Directora | Coordina el equipo | Creación de Juegos",
+        "/crear Programador | Escribe el código | Creación de Juegos",
+        "/crear Artista | Dibuja los personajes | Creación de Juegos",
+        "/canal Creación de Juegos | Directora | Directora, Programador",
+        "/canal Arte | Artista | Artista, Directora",
+      ].join("\n"),
+    );
+    const directora = h.store.findAgentByName("Directora");
+    const programador = h.store.findAgentByName("Programador");
+    const artista = h.store.findAgentByName("Artista");
+    assert.ok(directora && programador && artista);
+
+    // Pedirlo no elimina nada todavía: deja la tarjeta para que el usuario lo confirme.
+    const reply = await talk(h, mainId, "/eliminar Directora, programador, Directora");
+    assert.match(reply, /Te dejé la tarjeta para eliminar a Directora, programador/);
+    assert.ok(h.store.getAgent(directora.id) && h.store.getAgent(programador.id));
+    const card = h.service.listMessages(mainId).filter((item) => item.role === "decision").at(-1);
+    assert.ok(card);
+    assert.equal(card.text, "¿Eliminar a «Directora» y «Programador»?");
+    assert.equal(card.payload?.kind, DELETE_AGENTS_CARD);
+    assert.deepEqual(card.payload?.agentIds, [directora.id, programador.id]);
+    assert.deepEqual(card.payload?.options, [
+      {
+        label: "Eliminar",
+        detail: "Se borran con su historial, su cola y sus rutinas; sus archivos quedan en sus carpetas. El canal «Creación de Juegos» pasa a «Canales eliminados».",
+      },
+      { label: "Cancelar", detail: "No se elimina a nadie." },
+    ]);
+    assert.equal(card.payload?.recommended, null, "no se recomienda eliminar");
+    assert.equal(h.service.getAgent(mainId).preview, "Pregunta: ¿Eliminar a «Directora» y «Programador»?");
+
+    // Al que está trabajando se le detiene el turno.
+    h.service.sendUserMessage(programador.id, "/lento escribe un informe largo para el equipo");
+    await waitFor(() => h.service.getAgent(programador.id).state === "working", 5_000, "Programador trabajando");
+    const answer = await h.service.answerDecision(mainId, card.id, 0);
+    assert.equal(answer.decision.payload?.answer, 0);
+    assert.equal(answer.message.text, "A. Eliminar");
+    assert.equal(
+      answer.delivery.text,
+      "El usuario confirmó y ClosedBot eliminó a «Directora» y «Programador», con su historial, su cola y sus rutinas (sus archivos siguen en sus carpetas). El canal «Creación de Juegos» pasó a «Canales eliminados». Confírmaselo al usuario en una línea y sigue con lo que quede de su pedido.",
+    );
+    assert.equal(h.store.getAgent(directora.id), null);
+    assert.equal(h.store.getAgent(programador.id), null);
+    assert.deepEqual(
+      h.service.listDeletedChannels().map((channel) => channel.name),
+      ["Creación de Juegos"],
+      "el canal que quedó vacío pasa a «Canales eliminados»",
+    );
+    const arte = h.service.listChannels().find((channel) => channel.name === "Arte");
+    assert.deepEqual([arte?.memberIds, arte?.leadId], [[artista.id], artista.id], "el otro canal sigue con los que quedan");
+    const activity = h.service.listMessages(mainId).find((item) => item.payload?.kind === "agents-deleted");
+    assert.equal(activity?.text, "Eliminó a «Directora» y «Programador»");
+    assert.deepEqual(activity?.payload?.channels, ["Creación de Juegos"]);
+
+    // Claude Bot recibe el resultado tal cual: no se le cuenta después como un cambio del usuario.
+    await waitFor(() => h.store.getMessage(answer.message.id)?.status === "completed", 5_000, "Claude Bot recibe el resultado");
+    assert.ok(inputs.includes(answer.delivery.text), inputs.at(-1));
+    await assert.rejects(h.service.answerDecision(mainId, card.id, 0), (error: unknown) => error instanceof ServiceError && error.status === 409);
+
+    // «Cancelar» no elimina a nadie.
+    await talk(h, mainId, "/eliminar Artista");
+    const second = h.service.listMessages(mainId).filter((item) => item.role === "decision").at(-1);
+    assert.ok(second && second.id !== card.id);
+    assert.equal(second.text, "¿Eliminar a «Artista»?");
+    assert.equal(
+      (second.payload?.options as Array<{ detail: string }>)[0]?.detail,
+      "Se borra con su historial, su cola y sus rutinas; sus archivos quedan en su carpeta. El canal «Arte» pasa a «Canales eliminados».",
+    );
+    const cancelled = await h.service.answerDecision(mainId, second.id, 1);
+    assert.equal(cancelled.message.text, "B. Cancelar");
+    assert.match(cancelled.delivery.text, /tocó «Cancelar» en la tarjeta para eliminar a «Artista»: no se eliminó a nadie/);
+    assert.ok(h.store.getAgent(artista.id));
+    await waitFor(() => h.store.getMessage(cancelled.message.id)?.status === "completed", 5_000, "Claude Bot recibe que se canceló");
+    assert.equal(inputs.at(-1), cancelled.delivery.text);
+  } finally {
+    await h.close();
+  }
+});
+
+test("Claude Bot no se elimina a sí mismo, otro agente no puede eliminar y lo que ya no existe se avisa", async () => {
+  const h = await createHarness({ mainAgent: true });
+  try {
+    const mainId = h.service.mainAgentId() as string;
+    const ana = h.service.createAgent({ name: "Ana", provider: "demo" });
+    const beto = h.service.createAgent({ name: "Beto", provider: "demo" });
+    const cards = () => h.service.listMessages(mainId).filter((item) => item.role === "decision");
+
+    assert.match(await talk(h, mainId, `/eliminar Ana, ${MAIN_AGENT_NAME}`), /No puedes eliminarte a ti mismo/);
+    assert.match(await talk(h, mainId, "/eliminar Nadie"), /No existe el agente «Nadie»/);
+    assert.equal(cards().length, 0, "sin tarjeta si algo no cuadra");
+    const refused = await talk(h, ana.id, "/eliminar Beto");
+    assert.match(refused, /Solo el bot principal puede crear, cambiar o eliminar agentes/);
+    assert.equal(h.service.listMessages(ana.id).filter((item) => item.role === "decision").length, 0);
+
+    // Si el usuario eliminó a uno antes de confirmar, se elimina al resto y se le cuenta.
+    await talk(h, mainId, "/eliminar Ana, Beto");
+    const card = cards().at(-1);
+    assert.ok(card);
+    await h.service.deleteAgent(beto.id);
+    const answer = await h.service.answerDecision(mainId, card.id, 0);
+    assert.equal(h.store.getAgent(ana.id), null);
+    assert.match(answer.delivery.text, /eliminó a «Ana», con su historial.*«Beto» ya no existía\./);
+    assert.equal(h.service.listMessages(mainId).find((item) => item.payload?.kind === "agents-deleted")?.text, "Eliminó a «Ana»");
+    assert.ok(h.store.getAgent(mainId), "Claude Bot sigue");
+  } finally {
+    await h.close();
+  }
+});
+
+test("delete_agents y el proveedor local: lo que entiende Claude Bot", () => {
+  assert.deepEqual(parseDeleteAgentsArgs({ agents: [" Ana ", "ana", "Beto"] }), { agents: ["Ana", "Beto"] });
+  assert.deepEqual(parseDeleteAgentsArgs({ agents: "Ana" }), { agents: ["Ana"] });
+  assert.throws(() => parseDeleteAgentsArgs({ agents: [] }), /lista con los ids o nombres/);
+  assert.throws(() => parseDeleteAgentsArgs({}), /lista con los ids o nombres/);
+  // Qwen local también se puede elegir (estaba en la lista de proveedores, pero se rechazaba).
+  assert.equal(parseCreateAgentArgs({ name: "Qwen", role: "Ayuda", instructions: "Ayuda.", project: "Local", provider: "local" }).provider, "local");
+  assert.equal(parseUpdateAgentArgs({ agent: "Qwen", provider: "local" }).provider, "local");
+  assert.throws(() => parseUpdateAgentArgs({ agent: "Qwen", provider: "otro" }), /claude, codex, grok, gemini o local/);
 });
 
 test("list_agents muestra proyecto y bot principal; las instrucciones solo las ve Claude Bot", async () => {

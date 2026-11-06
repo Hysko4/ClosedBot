@@ -525,7 +525,7 @@ test("Oficina: el «?» queda hasta que respondes la pregunta, tocando una opci�
 
     // Beto: tocas una opción.
     const decision = h.service.listMessages(beto.id).filter((item) => item.role === "decision").at(-1)!;
-    h.service.answerDecision(beto.id, decision.id, 0);
+    await h.service.answerDecision(beto.id, decision.id, 0);
     assert.deepEqual(asking(), []);
   } finally {
     await h.close();

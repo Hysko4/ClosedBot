@@ -64,6 +64,7 @@ import {
   parseCreateAgentArgs,
   parseCreateChannelArgs,
   parseCreateRoutineArgs,
+  parseDeleteAgentsArgs,
   parseMemoryIdArgs,
   parseReadAgentArgs,
   parseMemoryInclusionArgs,
@@ -80,6 +81,7 @@ import {
   TOOL_CREATE_AGENT,
   TOOL_CREATE_CHANNEL,
   TOOL_CREATE_ROUTINE,
+  TOOL_DELETE_AGENTS,
   TOOL_DELETE_ROUTINE,
   TOOL_FORGET_MEMORY,
   TOOL_LIST_AGENTS,
@@ -128,6 +130,8 @@ export const PROGRESS_META = "agent_progress";
 /** Topes para los agentes que crea el bot principal: en total y en un mismo turno. */
 export const MAX_AGENTS = 60;
 export const MAX_AGENTS_PER_TURN = 8;
+/** Tarjeta con la que el usuario confirma los agentes que Claude Bot quiere eliminar (delete_agents). */
+export const DELETE_AGENTS_CARD = "delete-agents";
 /**
  * Encargos seguidos que puede hacer Claude Bot en un mismo pedido del usuario (cada send_message cuenta uno, a uno
  * o a varios agentes). Cuando él escribe, la cuenta de reenvíos entre agentes (MAX_HOPS) vuelve a empezar.
@@ -1667,9 +1671,16 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 
   // ---------- preguntas al usuario ----------
 
-  /** El usuario eligió una opción de una tarjeta de decisión: la respuesta le llega al agente como mensaje. */
-  answerDecision(agentId: string, messageId: string, choice: unknown): { decision: MessageRecord; message: MessageRecord; delivery: DeliveryRecord } {
+  /**
+   * El usuario eligió una opción de una tarjeta de decisión: la respuesta le llega al agente como mensaje.
+   * Si es la tarjeta para eliminar agentes y tocó «Eliminar», antes se eliminan.
+   */
+  async answerDecision(agentId: string, messageId: string, choice: unknown): Promise<{ decision: MessageRecord; message: MessageRecord; delivery: DeliveryRecord }> {
     this.#requireAgent(agentId);
+    const card = this.#store.getMessage(messageId);
+    if (card && card.agentId === agentId && card.role === "decision" && card.payload?.kind === DELETE_AGENTS_CARD) {
+      return this.#answerDeleteAgents(agentId, messageId, choice);
+    }
     const result = this.#store.transaction(() => {
       const decision = this.#store.getMessage(messageId);
       if (!decision || decision.agentId !== agentId || decision.role !== "decision") throw new ServiceError("Pregunta no encontrada.", 404);
@@ -1718,6 +1729,143 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (result.decision.channelId) this.#emitChannels();
     this.#scheduleDrain(agentId);
     return result;
+  }
+
+  /**
+   * Respuesta a la tarjeta de delete_agents. Con «Eliminar», ClosedBot elimina a los agentes (al que trabaja le
+   * detiene el turno, y un canal que se queda sin miembros pasa a «Canales eliminados»), deja la línea
+   * «Eliminó a…» en el chat del bot y le cuenta el resultado en un mensaje.
+   */
+  async #answerDeleteAgents(agentId: string, messageId: string, choice: unknown): Promise<{ decision: MessageRecord; message: MessageRecord; delivery: DeliveryRecord }> {
+    // Primero queda respondida: así un segundo toque (o el otro dispositivo) no la responde otra vez.
+    const answered = this.#store.transaction(() => {
+      const decision = this.#store.getMessage(messageId);
+      if (!decision || decision.agentId !== agentId || decision.role !== "decision") throw new ServiceError("Pregunta no encontrada.", 404);
+      const payload = decision.payload ?? {};
+      if (payload.answer !== null && payload.answer !== undefined) throw new ServiceError("Esa pregunta ya tiene respuesta.", 409);
+      const options = readOptions(payload);
+      const index = typeof choice === "number" ? choice : Number.NaN;
+      const option = Number.isInteger(index) ? options[index] : undefined;
+      if (!option) throw new ServiceError("Elige una de las opciones de la tarjeta.");
+      const updated = this.#store.updateMessage(messageId, { payload: { ...payload, answer: index, answeredAt: Date.now() } }) as MessageRecord;
+      return { decision: updated, index, option };
+    });
+    this.#emit({ type: "message", agentId, message: answered.decision });
+    const payload = answered.decision.payload ?? {};
+    const ids = Array.isArray(payload.agentIds) ? payload.agentIds.filter((id): id is string => typeof id === "string") : [];
+    const names = Array.isArray(payload.names) ? payload.names.filter((name): name is string => typeof name === "string") : [];
+    let outcome: { text: string; deleted: string[]; closed: string[] } | null = null;
+    if (answered.index === 0) {
+      try {
+        outcome = await this.#deleteConfirmed(agentId, ids, names);
+      } catch (error) {
+        // Que el bot se entere igual: la tarjeta ya quedó respondida.
+        outcome = { text: `El usuario confirmó, pero no se pudo terminar de eliminar: ${errorText(error)}. Cuéntaselo al usuario en una línea.`, deleted: [], closed: [] };
+      }
+    }
+    const letter = OPTION_LETTERS[answered.index] ?? String(answered.index + 1);
+    const agentText = outcome
+      ? outcome.text
+      : `El usuario tocó «${answered.option.label}» en la tarjeta para eliminar a ${joinNames(names.map((name) => `«${name}»`)) || "esos agentes"}: no se eliminó a nadie. No insistas; sigue con lo demás que te haya pedido.`;
+    const channelId = answered.decision.channelId;
+    const result = this.#store.transaction(() => {
+      const message = this.#store.insertMessage({
+        agentId,
+        role: "user",
+        text: `${letter}. ${answered.option.label}`,
+        status: channelId ? "completed" : "queued",
+        payload: { decisionId: messageId, choice: answered.index, ...(channelId ? { to: [agentId] } : {}) },
+        channelId,
+      });
+      const activity =
+        outcome && outcome.deleted.length
+          ? this.#store.insertMessage({
+              agentId,
+              role: "activity",
+              text: `Eliminó a ${joinNames(outcome.deleted.map((name) => `«${name}»`))}`,
+              status: "completed",
+              payload: { kind: "agents-deleted", names: outcome.deleted, channels: outcome.closed },
+              channelId,
+            })
+          : null;
+      const { delivery } = this.#store.enqueueDelivery({
+        agentId,
+        messageId: message.id,
+        senderKind: "user",
+        text: agentText,
+        idempotencyKey: `decision:${messageId}`,
+        channelId,
+      });
+      const linked = this.#store.updateMessage(message.id, { deliveryId: delivery.id }) as MessageRecord;
+      if (channelId && this.#store.getChannel(channelId)) this.#store.updateChannel(channelId, { readAt: Date.now() });
+      return { message: linked, activity, delivery };
+    });
+    if (!channelId) this.#store.updateAgent(agentId, { readAt: Date.now() });
+    this.#emit({ type: "message", agentId, message: result.message });
+    if (result.activity) this.#emit({ type: "message", agentId, message: result.activity });
+    this.#emitQueue(agentId);
+    this.#emitAgents();
+    if (channelId) this.#emitChannels();
+    this.#scheduleDrain(agentId);
+    return { decision: answered.decision, message: result.message, delivery: result.delivery };
+  }
+
+  /** Elimina a los agentes que confirmó el usuario y arma lo que se le cuenta al bot principal. */
+  async #deleteConfirmed(mainId: string, ids: string[], names: string[]): Promise<{ text: string; deleted: string[]; closed: string[] }> {
+    const targets = ids.map((id) => this.#store.getAgent(id)).filter((agent): agent is AgentRecord => agent !== null && agent.id !== mainId);
+    // Los que ya no estaban (los eliminó el usuario entre medio): se nombran como estaban en la tarjeta.
+    const missing = ids.flatMap((id, index) => (this.#store.getAgent(id) ? [] : [names[index] ?? "un agente"]));
+    const doomed = new Set(targets.map((agent) => agent.id));
+    const touched = new Set(
+      [...this.#store.listChannels(), ...this.#store.listChannels({ deleted: true })]
+        .filter((channel) => channel.memberIds.some((id) => doomed.has(id)))
+        .map((channel) => channel.id),
+    );
+    // Igual que «Eliminar» con varios marcados: un canal cuyos miembros se eliminan todos pasa a «Canales eliminados».
+    const emptied = this.#store.listChannels().filter((channel) => channel.memberIds.length > 0 && channel.memberIds.every((id) => doomed.has(id)));
+    const deleted: AgentRecord[] = [];
+    const failures: string[] = [];
+    for (const agent of targets) {
+      try {
+        await this.deleteAgent(agent.id, { stop: true });
+        deleted.push(agent);
+      } catch (error) {
+        if (error instanceof ServiceError && error.status === 404) missing.push(agent.name);
+        else failures.push(`«${agent.name}» (${errorText(error)})`);
+      }
+    }
+    const gone = new Set(deleted.map((agent) => agent.id));
+    const closed: ChannelRecord[] = [];
+    for (const channel of emptied) {
+      if (!channel.memberIds.every((id) => gone.has(id))) continue;
+      try {
+        this.deleteChannel(channel.id);
+        closed.push(channel);
+      } catch (error) {
+        failures.push(`el canal «${channel.name}» (${errorText(error)})`);
+      }
+    }
+    // Lo hizo el propio bot con su herramienta: no se le cuenta después como un cambio del usuario.
+    this.#absorbKnown((known) => {
+      for (const agent of deleted) delete known.agents[agent.id];
+      for (const id of touched) {
+        const channel = this.#store.getChannel(id);
+        if (channel && known.channels[id]) known.channels[id] = snapshotChannel(channel);
+      }
+    });
+    const quoted = (list: string[]) => joinNames(list.map((name) => `«${name}»`));
+    const text = [
+      deleted.length
+        ? `El usuario confirmó y ClosedBot eliminó a ${quoted(deleted.map((agent) => agent.name))}, con su historial, su cola y sus rutinas (sus archivos siguen en sus carpetas).`
+        : "El usuario confirmó, pero no se eliminó a nadie.",
+      closed.length === 1 ? `El canal «${closed[0]?.name}» pasó a «Canales eliminados».` : closed.length ? `Los canales ${quoted(closed.map((channel) => channel.name))} pasaron a «Canales eliminados».` : null,
+      missing.length ? `${quoted(missing)} ya no ${missing.length === 1 ? "existía" : "existían"}.` : null,
+      failures.length ? `No se pudo eliminar ${failures.join("; ")}.` : null,
+      "Confírmaselo al usuario en una línea y sigue con lo que quede de su pedido.",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return { text, deleted: deleted.map((agent) => agent.name), closed: closed.map((channel) => channel.name) };
   }
 
   // ---------- lo que sabe cada agente: instrucciones, recuerdos y habilidades ----------
@@ -2744,11 +2892,12 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       // Un hilo de Codex de la 0.8.0 todavía la tiene: Codex fija sus herramientas al crear el hilo.
       throw new Error("Las rondas ya no existen: decide tú quién hace cada parte y encárgasela con send_message.");
     }
-    if (params.tool === TOOL_CREATE_AGENT || params.tool === TOOL_UPDATE_AGENT || params.tool === TOOL_CREATE_CHANNEL) {
+    if (params.tool === TOOL_CREATE_AGENT || params.tool === TOOL_UPDATE_AGENT || params.tool === TOOL_DELETE_AGENTS || params.tool === TOOL_CREATE_CHANNEL) {
       if (senderId !== this.#mainAgentId) {
-        throw new Error("Solo el bot principal puede crear o cambiar agentes y crear canales. Si hace falta, pídeselo al usuario.");
+        throw new Error("Solo el bot principal puede crear, cambiar o eliminar agentes y crear canales. Si hace falta, pídeselo al usuario.");
       }
       if (params.tool === TOOL_CREATE_CHANNEL) return this.#createChannelFromMain(senderId, parseCreateChannelArgs(params.arguments), params.turnId);
+      if (params.tool === TOOL_DELETE_AGENTS) return this.#deleteAgentsFromMain(senderId, parseDeleteAgentsArgs(params.arguments).agents, params.turnId);
       return params.tool === TOOL_CREATE_AGENT
         ? this.#createAgentFromMain(senderId, parseCreateAgentArgs(params.arguments), params.turnId)
         : this.#updateAgentFromMain(senderId, parseUpdateAgentArgs(params.arguments), params.turnId);
@@ -2883,13 +3032,23 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   }
 
   #askUser(agentId: string, args: AskUserArgs, turnId: string | null): DynamicToolResult {
+    const message = this.#postDecision(agentId, args, turnId);
+    return toolResult({
+      preguntado: true,
+      messageId: message.id,
+      nota: "La tarjeta ya está en la conversación. Termina tu turno ahora: la respuesta del usuario te llegará como un mensaje nuevo.",
+    });
+  }
+
+  /** Deja una tarjeta de decisión en la conversación del agente (y en su canal, si trabaja para uno) y avisa al usuario. */
+  #postDecision(agentId: string, args: AskUserArgs, turnId: string | null, extra: Record<string, unknown> = {}): MessageRecord {
     const message = this.#store.insertMessage({
       agentId,
       role: "decision",
       text: args.question,
       status: "completed",
       turnId,
-      payload: { options: args.options, recommended: args.recommended, answer: null, answeredAt: null },
+      payload: { ...extra, options: args.options, recommended: args.recommended, answer: null, answeredAt: null },
       channelId: this.#active.get(agentId)?.channelId ?? null,
     });
     const state = this.#active.get(agentId);
@@ -2899,10 +3058,52 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#alert(agentId, "question", args.question, message.channelId);
     this.#emitAgents();
     if (message.channelId) this.#emitChannels();
+    return message;
+  }
+
+  /**
+   * delete_agents del bot principal: no elimina nada todavía. Deja una tarjeta para que el usuario lo confirme
+   * con un toque; al tocar «Eliminar», ClosedBot los elimina (ver #answerDeleteAgents).
+   */
+  #deleteAgentsFromMain(mainId: string, refs: string[], turnId: string | null): DynamicToolResult {
+    const targets = [...new Map(refs.map((ref) => {
+      const agent = this.#resolveAgentRef(ref);
+      return [agent.id, agent] as const;
+    })).values()];
+    if (targets.some((agent) => agent.id === mainId)) {
+      throw new Error("No puedes eliminarte a ti mismo. Quítate de la lista y vuelve a llamarla con los demás.");
+    }
+    const names = targets.map((agent) => `«${agent.name}»`);
+    const doomed = new Set(targets.map((agent) => agent.id));
+    const emptied = this.#store.listChannels().filter((channel) => channel.memberIds.length > 0 && channel.memberIds.every((id) => doomed.has(id)));
+    const one = targets.length === 1;
+    const effects = [
+      one ? "Se borra con su historial, su cola y sus rutinas; sus archivos quedan en su carpeta." : "Se borran con su historial, su cola y sus rutinas; sus archivos quedan en sus carpetas.",
+      emptied.length === 1
+        ? `El canal «${emptied[0]?.name}» pasa a «Canales eliminados».`
+        : emptied.length
+          ? `Los canales ${joinNames(emptied.map((channel) => `«${channel.name}»`))} pasan a «Canales eliminados».`
+          : "",
+    ].filter(Boolean);
+    const question = targets.length <= 8 ? `¿Eliminar a ${joinNames(names)}?` : `¿Eliminar ${targets.length} agentes: ${names.slice(0, 7).join(", ")} y ${targets.length - 7} más?`;
+    const message = this.#postDecision(
+      mainId,
+      {
+        question,
+        options: [
+          { label: "Eliminar", detail: effects.join(" ") },
+          { label: "Cancelar", detail: "No se elimina a nadie." },
+        ],
+        recommended: null,
+      },
+      turnId,
+      { kind: DELETE_AGENTS_CARD, agentIds: targets.map((agent) => agent.id), names: targets.map((agent) => agent.name) },
+    );
     return toolResult({
-      preguntado: true,
+      tarjeta: true,
       messageId: message.id,
-      nota: "La tarjeta ya está en la conversación. Termina tu turno ahora: la respuesta del usuario te llegará como un mensaje nuevo.",
+      agentes: targets.map((agent) => agent.name),
+      nota: "El usuario ya tiene la tarjeta para confirmar: cuando toque «Eliminar», ClosedBot los elimina y te llega un mensaje con el resultado. Termina tu turno ahora sin volver a preguntárselo; si quieres, dile en una línea qué vas a eliminar.",
     });
   }
 
@@ -2914,7 +3115,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       throw new Error(`Ya creaste ${MAX_AGENTS_PER_TURN} agentes en este turno, el máximo por pedido. Muéstrale el equipo al usuario y sigue en otro turno si te lo pide.`);
     }
     if (this.#store.listAgents().length >= MAX_AGENTS) {
-      throw new Error(`Ya hay ${MAX_AGENTS} agentes, el máximo que puedes crear. Pídele al usuario que elimine los que no use.`);
+      throw new Error(`Ya hay ${MAX_AGENTS} agentes, el máximo que puedes crear. Pregúntale al usuario cuáles eliminar; si te lo pide, elimínalos con delete_agents.`);
     }
     const provider = args.provider ?? main.provider;
     const status = this.#providers.find((item) => item.id === provider);
@@ -3737,6 +3938,12 @@ function paramsPrint(params: Record<string, unknown>): string {
 function clip(text: string, max: number): string {
   const value = text.trim();
   return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
+/** «A», «A y B», «A, B y C». */
+function joinNames(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  return `${items.slice(0, -1).join(", ")} y ${items[items.length - 1]}`;
 }
 
 function toolResult(value: unknown): DynamicToolResult {

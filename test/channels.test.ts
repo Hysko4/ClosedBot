@@ -234,7 +234,7 @@ test("canal: una pregunta se hace y se contesta en el canal", async () => {
     );
     await waitFor(() => h.service.getAgent(ana.id).state === "idle", 5_000, "Ana libre");
     assert.equal(h.service.getChannel(channel.id).preview, "Pregunta de Ana: ¿Seguimos?");
-    const answer = h.service.answerDecision(ana.id, decision.id, 0);
+    const answer = await h.service.answerDecision(ana.id, decision.id, 0);
     assert.equal(answer.message.channelId, channel.id);
     assert.equal(answer.message.status, "completed");
     assert.equal(answer.message.text, "A. Sí");

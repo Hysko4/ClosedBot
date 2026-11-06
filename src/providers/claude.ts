@@ -67,6 +67,10 @@ import {
   UPDATE_AGENT_DESCRIPTION,
   UPDATE_BOARD_DESCRIPTION,
   UPDATE_PROVIDER_HELP,
+  DELETE_AGENTS_DESCRIPTION,
+  DELETE_AGENTS_FIELD_HELP,
+  MAX_DELETE_AGENTS,
+  TOOL_DELETE_AGENTS,
 } from "../team.js";
 import { MEMORY_LIMITS } from "../memories.js";
 import { VERSION } from "../version.js";
@@ -760,6 +764,12 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
           model: z.string().max(AGENT_LIMITS.model).optional().describe("Modelo nuevo; vacío vuelve al modelo por defecto."),
         },
         (args) => call(TOOL_UPDATE_AGENT, args),
+      ),
+      tool(
+        TOOL_DELETE_AGENTS,
+        DELETE_AGENTS_DESCRIPTION,
+        { agents: z.array(z.string().min(1)).min(1).max(MAX_DELETE_AGENTS).describe(DELETE_AGENTS_FIELD_HELP) },
+        (args) => call(TOOL_DELETE_AGENTS, args),
       ),
       tool(
         TOOL_CREATE_CHANNEL,

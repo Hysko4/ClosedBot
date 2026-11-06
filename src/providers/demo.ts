@@ -10,6 +10,7 @@ import {
   TOOL_CREATE_AGENT,
   TOOL_CREATE_CHANNEL,
   TOOL_CREATE_ROUTINE,
+  TOOL_DELETE_AGENTS,
   TOOL_LIST_AGENTS,
   TOOL_LIST_ROUTINES,
   TOOL_READ_AGENT,
@@ -53,8 +54,8 @@ export interface DemoClientOptions {
  *   - `/imagen descripción` «genera» una imagen (como el generador de imágenes de Codex);
  *   - solo para el bot principal: `/crear Nombre | Rol | Proyecto | Aspecto` crea un agente (el
  *     aspecto es opcional), `/ajustar Nombre | Rol nuevo | Aspecto nuevo` le cambia el rol o el aspecto,
- *     `/proveedor Nombre | codex` le cambia el proveedor, `/ficha Nombre` lee su ficha y
- *     `/pizarra texto` escribe la pizarra.
+ *     `/proveedor Nombre | codex` le cambia el proveedor, `/eliminar Nombre, Nombre` pide eliminar
+ *     agentes (la tarjeta para confirmar), `/ficha Nombre` lee su ficha y `/pizarra texto` escribe la pizarra.
  */
 export class DemoAgentClient extends EventEmitter<ClientEvents> implements AgentClient {
   readonly provider: ProviderId = "demo";
@@ -234,6 +235,18 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
           notes.push(`Le cambié el proveedor a ${agent}: ahora usa ${provider}.`);
         } catch (error) {
           notes.push(`No pude cambiarle el proveedor a ${agent}: ${errorMessage(error)}`);
+        }
+      }
+      for (const match of body.matchAll(/^\/eliminar\s+(.+)$/gm)) {
+        const agents = (match[1] ?? "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean);
+        try {
+          await this.#callTool(threadId, state.turnId, TOOL_DELETE_AGENTS, { agents });
+          notes.push(`Te dejé la tarjeta para eliminar a ${agents.join(", ")}: confírmalo con «Eliminar».`);
+        } catch (error) {
+          notes.push(`No pude eliminar a ${agents.join(", ")}: ${errorMessage(error)}`);
         }
       }
       for (const match of body.matchAll(/^\/canal\s+(.+)$/gm)) {

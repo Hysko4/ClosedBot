@@ -2145,6 +2145,14 @@ svg {
   color: #fff;
 }
 
+.decision-option[data-tone="danger"] .decision-label {
+  color: var(--danger);
+}
+
+.decision-option[data-tone="danger"][data-chosen="true"] .decision-letter {
+  background: var(--danger);
+}
+
 .decision-note {
   margin: 4px 4px 4px;
   font-size: 12.5px;
