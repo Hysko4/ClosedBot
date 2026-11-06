@@ -1683,6 +1683,8 @@ export function createOffice(host) {
     if (!guide) return;
     boardView.hidden = true;
     guide.hidden = false;
+    // La guía trae los mismos botones que el cartel de la oficina vacía: no se muestran los dos a la vez.
+    root.classList.add("guide-open");
     helpButton?.setAttribute("aria-expanded", "true");
     paintSamples(performance.now());
     guide.querySelector(".office-guide-close")?.focus({ preventScroll: true });
@@ -1691,6 +1693,7 @@ export function createOffice(host) {
   function closeGuide() {
     if (!guide || guide.hidden) return;
     guide.hidden = true;
+    root.classList.remove("guide-open");
     helpButton?.setAttribute("aria-expanded", "false");
   }
 

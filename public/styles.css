@@ -4405,6 +4405,11 @@ svg {
   border-color: var(--accent);
 }
 
+/* Con la guía abierta, el cartel de la oficina vacía se esconde: la guía trae los mismos botones. */
+.office.guide-open .office-empty {
+  display: none;
+}
+
 /* Panel del agente en la Oficina (escritorio): su chat abajo y su ficha a la derecha. */
 .dock-close,
 .dock-resize {
