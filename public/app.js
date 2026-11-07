@@ -328,6 +328,7 @@ function handleEvent(event) {
       updateWorkingIndicator();
       updateActionButton();
       renderDetailsIfOpen();
+      renderTeamTools();
       noteVoiceTurn();
       if (state.currentId && !findAgent(state.currentId)) leaveDeletedAgent();
       else if (state.currentId && findAgent(state.currentId)?.unread) scheduleMarkRead(state.currentId);
@@ -341,6 +342,8 @@ function handleEvent(event) {
       if (event.deleted) state.deletedChannels = event.deleted;
       renderSidebar();
       renderDeletedChannelsIfOpen();
+      loadMissingTeamTools();
+      renderTeamTools();
       if ($("#channel-dialog").open && editingChannelId && !findChannel(editingChannelId)) closeDialog($("#channel-dialog"));
       if (state.currentChannelId) {
         // Lo eliminaron (desde otro dispositivo o desde el menú): se vuelve a la lista.
@@ -416,6 +419,10 @@ function handleEvent(event) {
       if (details.agentId === event.agentId) {
         details.skills = { agentId: event.agentId, items: event.skills };
         renderDetailsIfOpen();
+      }
+      if (teamTools.skills.has(event.agentId)) {
+        teamTools.skills.set(event.agentId, event.skills);
+        renderTeamTools();
       }
       break;
     default:
@@ -597,11 +604,11 @@ async function openDocked(agent) {
     renderAttachments();
     renderQueue();
     // La ficha se abre con cada agente que eliges, salvo que la hayas cerrado.
-    if (!state.officeSideClosed) openDetails(agent.id, null, { docked: true });
+    if (!state.officeSideClosed) openDetails(agent.id, takeDetailsPage(agent.id), { docked: true });
     else closeDockedDetails();
     await loadConversation(key);
   } else if (!state.officeSideClosed && !$("#details-dialog").open) {
-    openDetails(agent.id, null, { docked: true });
+    openDetails(agent.id, takeDetailsPage(agent.id), { docked: true });
   }
   if (!coarsePointer) $("#composer-input").focus({ preventScroll: true });
   scheduleMarkRead(key, 0);
@@ -877,6 +884,7 @@ const ICONS = {
   file: ["M7.5 3.5h6.5l4.5 4.5v12.5h-11z", "M14 3.5V8h4.5"],
   search: ["M11 5a6 6 0 1 0 0 12a6 6 0 1 0 0-12", "M16 16l4 4"],
   spark: ["M12 4.5l1.7 5.8 5.8 1.7-5.8 1.7-1.7 5.8-1.7-5.8-5.8-1.7 5.8-1.7z"],
+  plug: ["M9 3.5v4M15 3.5v4", "M6.5 7.5h11v3a5.5 5.5 0 0 1-11 0z", "M12 16v4.5"],
   clip: ["M8.5 12.5l6-6a3 3 0 0 1 4.2 4.2l-7.4 7.4a5 5 0 0 1-7-7L11 4.4"],
   close: ["M7 7l10 10M17 7L7 17"],
   team: ["M9.5 4.8a3.2 3.2 0 1 0 0 6.4a3.2 3.2 0 1 0 0-6.4", "M3.8 19c.6-3.2 3-5 5.7-5s5.1 1.8 5.7 5", "M18.5 8v6M15.5 11h6"],
@@ -4974,11 +4982,23 @@ async function makeLead(channelId, agentId) {
 }
 
 /** «Ver su ficha» en la Oficina: en pantallas anchas, al costado (con su chat abajo). */
-function officeDetails(agentId) {
-  if (!wideLayout()) return void openDetails(agentId, null, { docked: false });
+/** page: una página de la ficha (null = la lista de ajustes). */
+function officeDetails(agentId, page = null) {
+  if (!wideLayout()) return void openDetails(agentId, page, { docked: false });
   state.officeSideClosed = false;
-  if (state.currentId === agentId && document.body.classList.contains("office-docked")) openDetails(agentId, null, { docked: true });
-  else selectInOffice(agentId);
+  if (state.currentId === agentId && document.body.classList.contains("office-docked")) return void openDetails(agentId, page, { docked: true });
+  // Se elige en la Oficina y su ficha se abre ahí, en esa página.
+  pendingDetailsPage = page ? { agentId, page } : null;
+  selectInOffice(agentId);
+}
+
+/** La página de la ficha que pidió el menú de la Oficina para el agente que se está eligiendo. */
+let pendingDetailsPage = null;
+
+function takeDetailsPage(agentId) {
+  const pending = pendingDetailsPage?.agentId === agentId ? pendingDetailsPage.page : null;
+  pendingDetailsPage = null;
+  return pending;
 }
 
 /** Clic derecho (o mantener presionado) sobre un robot de la Oficina. */
@@ -4988,6 +5008,7 @@ function officeAgentMenu(agentId, { x = 0, y = 0, channelId = null, touch = fals
   const items = [
     { label: agent.main ? `Hablar con ${agent.name}` : "Abrir su chat", icon: "chat", run: () => selectInOffice(agent.id) },
     { label: "Ver su ficha", icon: "details", run: () => officeDetails(agent.id) },
+    { label: "Ver sus MCP", icon: "plug", run: () => openAgentMcp(agent.id) },
   ];
   if (!agent.main) {
     const channel = channelId ? findChannel(channelId) : null;
@@ -5011,6 +5032,7 @@ function officeTeamMenu({ kind, channelId = null, empty = false }, { x = 0, y = 
     items.push(
       { label: "Abrir el chat del equipo", icon: "chat", run: () => navigateChannel(channelId) },
       { label: "Crear un agente aquí", icon: "plus", run: () => createFromOffice({ channelId }) },
+      { label: "MCP y habilidades", icon: "plug", run: () => openTeamTools(channelId) },
       { label: "Editar el equipo", icon: "pencil", run: () => openChannelDialog(channelId, { fromOffice: true }) },
       "-",
       { label: "Eliminar el equipo", icon: "trash", danger: true, run: () => deleteChannel(channelId) },
@@ -5853,6 +5875,7 @@ const PAGE_TITLES = {
   instructions: "Instrucciones",
   memories: "Recuerdos",
   skills: "Habilidades",
+  mcp: "MCP",
   files: "Archivos",
   routines: "Rutinas",
   voice: "Chat de voz",
@@ -5936,6 +5959,7 @@ function showPage(page, { focus = true } = {}) {
   if (page === "instructions") details.instructions = null;
   if (page === "skills") details.skillEditing = null;
   if (page === "profile" && agent) fillProfileForm(agent);
+  if (page === "mcp" && agent) void loadMcp(agent.id);
   if (page === "brain" && agent) void fillBrainForm(agent);
   if (page === "memories") {
     details.memoryEditing = null;
@@ -5991,6 +6015,7 @@ function renderSettingsHome(agent) {
   $("#row-memories").textContent = memories === null ? "" : memories.length ? String(memories.length) : "Ninguno";
   const skills = details.skills?.agentId === agent.id ? details.skills.items : null;
   $("#row-skills").textContent = skills === null ? "" : skills.length ? String(skills.filter((skill) => skill.enabled).length) : "Ninguna";
+  $("#row-mcp").textContent = mcpRowValue(agent);
   const routines = state.routines.filter((routine) => routine.agentId === agent.id);
   const active = routines.filter((routine) => routine.enabled).length;
   $("#row-routines").textContent = routines.length ? (active === routines.length ? String(active) : `${active} de ${routines.length} activas`) : "Ninguna";
@@ -6017,6 +6042,9 @@ function renderPage(agent) {
       break;
     case "skills":
       renderSkills(agent);
+      break;
+    case "mcp":
+      renderMcpPage(agent);
       break;
     case "files":
       renderLibrary(agent);
@@ -6503,6 +6531,293 @@ async function removeSkill(agentId, skill) {
   } catch (error) {
     showToast(error.message, "error");
   }
+}
+
+// Hace → MCP: los servidores que tiene conectados, como los ve el agente. También por equipo, en la Oficina.
+
+/** Nombres más claros para los de ClosedBot; los demás van con el nombre que les diste. */
+const MCP_NAMES = { closedbot: "ClosedBot", playwright: "Navegador (Playwright)" };
+const MCP_STATES = {
+  connected: "Conectado",
+  included: "Incluido",
+  configured: "Configurado",
+  pending: "Conectándose…",
+  "needs-auth": "Falta iniciar sesión",
+  failed: "No conecta",
+  disabled: "Apagado",
+};
+const MCP_SOURCES = {
+  closedbot: "Herramientas del equipo",
+  user: "Tu Claude Code",
+  local: "Tu Claude Code, en su carpeta",
+  project: "Su carpeta (.mcp.json)",
+  plugin: "Un complemento de Claude Code",
+  managed: "Lo configuró tu organización",
+  enterprise: "Lo configuró tu organización",
+  dynamic: "Agregado en su sesión",
+  codex: "Tu Codex",
+};
+/** Los que puede usar: conectados o que ClosedBot le pasa. */
+const MCP_USABLE = new Set(["connected", "included", "configured"]);
+const mcpRequests = new Map(); // agentId -> revisión en curso
+const mcpViews = new Map(); // agentId -> última revisión que llegó
+
+/** Revisa sus MCP (el servidor guarda la última revisión unos minutos; refresh: de nuevo). */
+function loadMcp(agentId, { refresh = false } = {}) {
+  const running = mcpRequests.get(agentId);
+  if (running && !refresh) return running;
+  const request = api(`/api/agents/${encodeURIComponent(agentId)}/mcp${refresh ? "?refresh=1" : ""}`)
+    .then((data) => data.mcp)
+    .catch((problem) => ({ agentId, servers: [], hidden: false, checkedAt: new Date().toISOString(), error: problem.message }))
+    .then((view) => {
+      if (findAgent(agentId)) mcpViews.set(agentId, view);
+      return view;
+    })
+    .finally(() => {
+      if (mcpRequests.get(agentId) === request) mcpRequests.delete(agentId);
+      renderDetailsIfOpen();
+      renderTeamTools();
+    });
+  mcpRequests.set(agentId, request);
+  renderDetailsIfOpen();
+  renderTeamTools();
+  return request;
+}
+
+function mcpName(server) {
+  return MCP_NAMES[server.name] ?? server.name;
+}
+
+/** Su última revisión, si sigue con el mismo modelo y acceso (si cambió, sus MCP pueden ser otros). */
+function mcpView(agent) {
+  const view = mcpViews.get(agent.id);
+  const access = state.settings.fullAccess ? "total" : agent.access;
+  return view && view.provider === agent.provider && (!view.access || view.access === access) ? view : null;
+}
+
+function mcpRowValue(agent) {
+  const view = mcpView(agent);
+  if (mcpRequests.has(agent.id) && !view) return "…";
+  if (!view) return "";
+  const usable = view.servers.filter((server) => MCP_USABLE.has(server.status)).length;
+  return usable ? String(usable) : "Ninguno";
+}
+
+/** Lo que conviene saber de sus MCP según su programa. */
+function mcpNote(agent, view) {
+  if (view?.hidden) return `${providerLabel(agent.provider)} no le cuenta a ClosedBot los MCP que le configuraste por su cuenta: aquí solo se ve el de ClosedBot.`;
+  if (agent.provider === "claude" || agent.provider === "local") return "Los conectores de tu cuenta de claude.ai (como Sider4 o IBKR) quedan apagados en los agentes, por seguridad.";
+  if (agent.provider === "codex") return "Los de tu Codex los comparten todos tus agentes de Codex.";
+  return "";
+}
+
+function renderMcpPage(agent) {
+  const view = mcpView(agent);
+  const loading = mcpRequests.has(agent.id);
+  $("#mcp-list").replaceChildren(...(view?.servers ?? []).map(mcpItem));
+  $("#mcp-status").textContent = loading ? "Revisando sus MCP… (puede tardar unos segundos)" : view ? `Revisado ${formatAgo(Date.parse(view.checkedAt))}.` : "";
+  $("#mcp-error").textContent = !loading && view?.error ? view.error : "";
+  $("#mcp-note").textContent = mcpNote(agent, view);
+  $("#mcp-refresh").disabled = loading;
+}
+
+function mcpItem(server) {
+  const item = document.createElement("li");
+  item.className = "item mcp-item";
+  item.dataset.status = server.status;
+  const body = document.createElement("details");
+  body.className = "item-body mcp-body";
+  const summary = document.createElement("summary");
+  const name = document.createElement("p");
+  name.className = "item-name";
+  const dot = document.createElement("span");
+  dot.className = "mcp-dot";
+  dot.dataset.status = server.status;
+  name.append(dot, document.createTextNode(mcpName(server)));
+  const meta = document.createElement("p");
+  meta.className = "item-meta";
+  const tools = server.tools.length;
+  meta.textContent = [
+    MCP_STATES[server.status] ?? server.status,
+    server.name === "closedbot" ? MCP_SOURCES.closedbot : server.source === "closedbot" ? "Lo agrega ClosedBot" : (MCP_SOURCES[server.source] ?? ""),
+    tools ? `${tools} ${tools === 1 ? "herramienta" : "herramientas"}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  summary.append(name, meta);
+  body.append(summary);
+  if (server.error) {
+    const error = document.createElement("p");
+    error.className = "mcp-error";
+    error.textContent = server.error;
+    body.append(error);
+  }
+  if (tools) {
+    const list = document.createElement("p");
+    list.className = "mcp-tools";
+    list.textContent = server.tools.join(" · ");
+    body.append(list);
+  }
+  // Sin nada que desplegar, no se ofrece desplegarlo.
+  if (!tools && !server.error) body.open = true;
+  body.dataset.empty = String(!tools && !server.error);
+  item.append(body);
+  return item;
+}
+
+/** Desde la Oficina (menú del robot o «Por agente»): su ficha, en la página de sus MCP. */
+function openAgentMcp(agentId) {
+  closeDialog($("#team-tools-dialog"));
+  void loadMcp(agentId);
+  if (office?.visible) officeDetails(agentId, "mcp");
+  else openDetails(agentId, "mcp", { docked: false });
+}
+
+// MCP y habilidades de un equipo (menú de su tarjeta en la Oficina).
+
+const teamTools = { channelId: null, skills: new Map(), loading: new Set() }; // skills: agentId -> sus habilidades
+
+function openTeamTools(channelId) {
+  const channel = findChannel(channelId);
+  if (!channel) return;
+  teamTools.channelId = channel.id;
+  openDialog($("#team-tools-dialog"));
+  // Lo de cada uno: si se revisó hace poco, el servidor responde enseguida con eso.
+  for (const agent of channelMembers(channel)) {
+    void loadMcp(agent.id);
+    void loadTeamSkills(agent.id);
+  }
+  renderTeamTools();
+}
+
+/** Alguien entró al equipo con el cuadro abierto: se revisa lo suyo. */
+function loadMissingTeamTools() {
+  const channel = $("#team-tools-dialog").open ? findChannel(teamTools.channelId) : null;
+  for (const agent of channel ? channelMembers(channel) : []) {
+    if (!mcpView(agent) && !mcpRequests.has(agent.id)) void loadMcp(agent.id);
+    if (!teamTools.skills.has(agent.id)) void loadTeamSkills(agent.id);
+  }
+}
+
+async function loadTeamSkills(agentId) {
+  if (teamTools.loading.has(agentId)) return;
+  teamTools.loading.add(agentId);
+  try {
+    const data = await api(`/api/agents/${encodeURIComponent(agentId)}/skills`);
+    teamTools.skills.set(agentId, data.skills);
+  } catch {
+    teamTools.skills.set(agentId, []);
+  } finally {
+    teamTools.loading.delete(agentId);
+  }
+  renderTeamTools();
+}
+
+function refreshTeamTools() {
+  const channel = findChannel(teamTools.channelId);
+  if (!channel) return;
+  for (const agent of channelMembers(channel)) {
+    void loadMcp(agent.id, { refresh: true });
+    void loadTeamSkills(agent.id);
+  }
+}
+
+function renderTeamTools() {
+  const dialog = $("#team-tools-dialog");
+  if (!dialog.open) return;
+  const channel = findChannel(teamTools.channelId);
+  if (!channel) return void closeDialog(dialog);
+  const members = channelMembers(channel);
+  $("#team-tools-title").textContent = `MCP y habilidades de «${channel.name}»`;
+  const checking = members.filter((agent) => mcpRequests.has(agent.id)).length;
+  $("#team-tools-status").textContent = checking
+    ? `Revisando ${checking === 1 ? "a 1 agente" : `a ${checking} agentes`}… (puede tardar unos segundos)`
+    : members.length
+      ? `${members.length} ${members.length === 1 ? "agente" : "agentes"}. Toca uno para ver el detalle en su ficha.`
+      : "Este equipo todavía no tiene agentes.";
+  $("#team-tools-refresh").disabled = checking > 0 || !members.length;
+  // Del equipo: cada MCP (o habilidad) una vez, con cuántos lo tienen si no son todos.
+  const servers = new Map();
+  const skills = new Map();
+  for (const agent of members) {
+    for (const server of mcpView(agent)?.servers ?? []) {
+      const entry = servers.get(server.name) ?? { server, count: 0 };
+      if (MCP_USABLE.has(server.status)) entry.count += 1;
+      if (!MCP_USABLE.has(entry.server.status) && MCP_USABLE.has(server.status)) entry.server = server;
+      servers.set(server.name, entry);
+    }
+    for (const skill of (teamTools.skills.get(agent.id) ?? []).filter((item) => item.enabled)) {
+      const key = skill.name.toLowerCase();
+      skills.set(key, { name: skill.name, count: (skills.get(key)?.count ?? 0) + 1 });
+    }
+  }
+  const of = (count) => (members.length > 1 && count < members.length ? ` · ${count} de ${members.length}` : "");
+  $("#team-tools-mcp").replaceChildren(
+    ...[...servers.values()].map(({ server, count }) => toolChip(`${mcpName(server)}${count ? of(count) : ""}`, server.status, server.error ?? MCP_STATES[server.status])),
+  );
+  $("#team-tools-mcp").dataset.empty = checking && !servers.size ? "Revisando…" : "Ninguno";
+  $("#team-tools-skills").replaceChildren(...[...skills.values()].map(({ name, count }) => toolChip(`${name}${of(count)}`, null)));
+  $("#team-tools-skills").dataset.empty = "Ninguna";
+  $("#team-tools-members").replaceChildren(...members.map((agent) => teamToolsMember(agent, channel)));
+  const hidden = members.filter((agent) => mcpView(agent)?.hidden).map((agent) => providerLabel(agent.provider));
+  const unique = [...new Set(hidden)];
+  $("#team-tools-note").textContent = unique.length
+    ? `${unique.join(" y ")} no le cuenta${unique.length > 1 ? "n" : ""} a ClosedBot los MCP que le configuraste por su cuenta: de esos agentes solo se ve el de ClosedBot.`
+    : "";
+}
+
+function toolChip(label, status, title = "") {
+  const chip = document.createElement("span");
+  chip.className = "tool-chip";
+  if (status) {
+    const dot = document.createElement("span");
+    dot.className = "mcp-dot";
+    dot.dataset.status = status;
+    chip.append(dot);
+  }
+  chip.append(document.createTextNode(label));
+  if (title) chip.title = title;
+  return chip;
+}
+
+function teamToolsMember(agent, channel) {
+  const item = document.createElement("li");
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "team-tools-who";
+  head.title = `Ver la ficha de ${agent.name}`;
+  const name = document.createElement("span");
+  name.className = "team-tools-name";
+  name.textContent = agent.name;
+  const meta = document.createElement("span");
+  meta.className = "team-tools-meta";
+  meta.textContent = [channel.leadId === agent.id ? "Encargado" : "", providerLabel(agent.provider)].filter(Boolean).join(" · ");
+  head.append(blobAvatar(agent), name, meta);
+  head.addEventListener("click", () => openAgentMcp(agent.id));
+  const view = mcpView(agent);
+  const mcp = document.createElement("div");
+  mcp.className = "tool-chips";
+  if (mcpRequests.has(agent.id) && !view) mcp.dataset.empty = "Revisando…";
+  else if (view?.error && !view.servers.length) mcp.dataset.empty = view.error;
+  else mcp.dataset.empty = "Ninguno";
+  mcp.append(...(view?.servers ?? []).map((server) => toolChip(mcpName(server), server.status, server.error ?? MCP_STATES[server.status])));
+  const skills = document.createElement("div");
+  skills.className = "tool-chips";
+  const own = teamTools.skills.get(agent.id);
+  skills.dataset.empty = own ? "Ninguna" : "…";
+  skills.append(...(own ?? []).filter((skill) => skill.enabled).map((skill) => toolChip(skill.name, null, skill.description)));
+  item.append(head, teamToolsRow("MCP", mcp), teamToolsRow("Habilidades", skills));
+  return item;
+}
+
+function teamToolsRow(label, content) {
+  const row = document.createElement("div");
+  row.className = "team-tools-row";
+  const title = document.createElement("span");
+  title.className = "team-tools-label";
+  title.textContent = label;
+  row.append(title, content);
+  return row;
 }
 
 // Hace → Rutinas: con «Probar ahora» e historial.
@@ -7623,6 +7938,11 @@ function bindUi() {
 
   // Crear agente (figura, color y nombre) y cuadro de nombre.
   $("#create-form").addEventListener("submit", saveCreate);
+  $("#mcp-refresh").addEventListener("click", () => {
+    if (details.agentId) void loadMcp(details.agentId, { refresh: true });
+  });
+  $("#team-tools-refresh").addEventListener("click", refreshTeamTools);
+  $("#team-tools-done").addEventListener("click", () => closeDialog($("#team-tools-dialog")));
   $("#create-cancel").addEventListener("click", () => closeDialog($("#create-dialog")));
   $("#shape-grid").addEventListener("keydown", (event) => onPickerKeydown(event, "shape"));
   $("#color-row").addEventListener("keydown", (event) => onPickerKeydown(event, "color"));

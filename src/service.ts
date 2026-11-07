@@ -37,9 +37,11 @@ import {
 } from "./db.js";
 import { type SavedImage, saveGeneratedImage, withImages } from "./images.js";
 import { buildInstructions, composeDeliveryInput, composeGreeting, GREETING_MARKER } from "./instructions.js";
+import { type AgentMcpView, closedbotServer, fromCodexStatus, type McpListing, type McpServerView } from "./mcp.js";
 import { cleanMemory, describeMemories, MEMORY_LIMITS, searchMemories } from "./memories.js";
 import { APPEARANCE_MAX, type CharacterManifest, type CharacterState, OfficeStudio, type OfficeStudioOptions, PixelLabError, type PixelLabOptions } from "./office.js";
 import { type AccessLevel, type AgentClient, isProviderId, PROVIDER_IDS, type ProviderId } from "./providers/client.js";
+import { AppServerError } from "./providers/codex.js";
 import {
   type AppServerNotification,
   type AppServerRequest,
@@ -159,6 +161,10 @@ export const USAGE_META = "usage";
 const USAGE_PROVIDERS = ["claude", "codex", "grok", "gemini"] as const satisfies readonly ProviderId[];
 /** Al eliminar un agente que está trabajando: cuánto se espera a que su turno se detenga. */
 const STOP_WAIT_MS = 10_000;
+/** Los MCP de un agente: cuánto vale la última revisión, cuánto se espera y cuántas revisiones a la vez. */
+const MCP_CACHE_MS = 5 * 60_000;
+const MCP_TIMEOUT_MS = 60_000;
+const MCP_PARALLEL = 2;
 /** Ya se pasaron las instrucciones guardadas en la base a AGENTS.md (0.7.0). */
 export const INSTRUCTIONS_FILES_META = "instructions_files";
 /** Lo que se manda de las instrucciones en la lista de agentes (las completas se piden aparte). */
@@ -520,6 +526,12 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   readonly #studio: OfficeStudio;
   /** Agentes cuyo último turno falló (para el «!» de la Oficina). */
   readonly #failedTurns = new Set<string>();
+  /** Los MCP de cada agente, la última vez que se revisaron (key: proveedor y acceso con que se revisó). */
+  readonly #mcp = new Map<string, { key: string; at: number; view: AgentMcpView }>();
+  readonly #mcpChecks = new Map<string, Promise<AgentMcpView>>();
+  /** Revisar los MCP abre una sesión corta de Claude Code (o Codex): pocas a la vez. */
+  #mcpSlots = MCP_PARALLEL;
+  readonly #mcpQueue: Array<() => void> = [];
   #progress: Map<string, AgentProgress> | null = null;
 
   constructor(options: ServiceOptions) {
@@ -914,6 +926,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       this.#store.deleteAgent(id);
       this.#studio.forget(id);
       this.#failedTurns.delete(id);
+      this.#mcp.delete(id);
       this.#setProgress(id, null);
       this.#emitAgents();
       if (touchedChannels) this.#emitChannels();
@@ -2112,6 +2125,88 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     asServiceError(() => deleteSkill(agent.workspace, skillId));
     if (agent.skillsOff.includes(skillId)) this.#store.updateAgent(agent.id, { skillsOff: agent.skillsOff.filter((id) => id !== skillId) });
     this.#emitSkills(agent.id);
+  }
+
+  // ---------- MCP de cada agente ----------
+
+  /**
+   * Los MCP que tiene conectados un agente: el de ClosedBot (sus herramientas de equipo) y los que trae su
+   * programa (lo que configuraste en Claude Code o en Codex), tal como los ve él. Se guardan unos minutos.
+   */
+  async agentMcp(agentId: string, options: { refresh?: boolean } = {}): Promise<AgentMcpView> {
+    const agent = this.#requireAgent(agentId);
+    const key = `${agent.provider}:${this.#access(agent)}`;
+    const cached = this.#mcp.get(agent.id);
+    if (!options.refresh && cached?.key === key && Date.now() - cached.at < MCP_CACHE_MS) return cached.view;
+    const running = this.#mcpChecks.get(agent.id);
+    if (running) return running;
+    const check = this.#withMcpSlot(() => this.#readMcp(agent))
+      .then((view) => {
+        if (this.#store.getAgent(agent.id)) this.#mcp.set(agent.id, { key, at: Date.now(), view });
+        return view;
+      })
+      .finally(() => this.#mcpChecks.delete(agent.id));
+    this.#mcpChecks.set(agent.id, check);
+    return check;
+  }
+
+  async #readMcp(agent: AgentRecord): Promise<AgentMcpView> {
+    const base = { agentId: agent.id, provider: agent.provider, access: this.#access(agent), checkedAt: new Date().toISOString(), hidden: false, error: null };
+    const params = { ...this.#threadParams(agent, true), threadId: agent.threadId ?? null };
+    const own = closedbotServer(params, "included");
+    // Gemini y Grok (ACP) no cuentan los MCP que les configuraste: solo se sabe el de ClosedBot, sin abrirlos.
+    if (agent.provider === "gemini" || agent.provider === "grok") return { ...base, servers: [own], hidden: true };
+    const status = this.#providers.find((item) => item.id === agent.provider);
+    if (status && !status.available) return { ...base, servers: [own], error: `${providerLabel(agent.provider)} no está instalado en este equipo.` };
+    try {
+      // Codex recibe las herramientas de ClosedBot aparte (no como MCP): se suman a las suyas.
+      if (agent.provider === "codex") return { ...base, servers: [own, ...(await this.#readCodexMcp())] };
+      const client = await this.#getClient(agent.provider);
+      const listing = await client.request<McpListing>("closedbot/mcp", params, MCP_TIMEOUT_MS);
+      return { ...base, servers: Array.isArray(listing?.servers) ? listing.servers : [], hidden: listing?.hidden === true };
+    } catch (error) {
+      return { ...base, servers: [own], error: `No pude revisar sus MCP: ${errorText(error)}` };
+    }
+  }
+
+  /** Los MCP de Codex son los de su configuración (los mismos para todos sus agentes). */
+  async #readCodexMcp(): Promise<McpServerView[]> {
+    const opened = !this.#clientReady.has("codex");
+    if (opened) this.#usageOnly.add("codex");
+    try {
+      const client = await this.#getClient("codex", "usage");
+      const servers: McpServerView[] = [];
+      let cursor: string | null = null;
+      for (let page = 0; page < 5; page += 1) {
+        let response: unknown;
+        try {
+          response = await client.request<unknown>("mcpServerStatus/list", { cursor, limit: 100 }, MCP_TIMEOUT_MS);
+        } catch (error) {
+          // Los Codex más antiguos lo llamaban «mcpServers/list».
+          const code = error instanceof AppServerError ? error.code : null;
+          if (page > 0 || !(code === -32601 || code === -32600 || /unknown variant|method not found/i.test(errorText(error)))) throw error;
+          response = await client.request<unknown>("mcpServers/list", {}, MCP_TIMEOUT_MS);
+        }
+        servers.push(...fromCodexStatus(response));
+        cursor = getString(response, "nextCursor");
+        if (!cursor) break;
+      }
+      return servers;
+    } finally {
+      if (opened && this.#usageOnly.has("codex")) await this.#releaseClient("codex");
+      this.#usageOnly.delete("codex");
+    }
+  }
+
+  async #withMcpSlot<T>(work: () => Promise<T>): Promise<T> {
+    while (this.#mcpSlots === 0) await new Promise<void>((resolveSlot) => this.#mcpQueue.push(resolveSlot));
+    this.#mcpSlots -= 1;
+    try {
+      return await work();
+    } finally {
+      this.#mcpSlots += 1;
+      this.#mcpQueue.shift()?.();
+    }
   }
 
   /** Lo que lee el agente de AGENTS.md pasa a la base (para la lista y para Claude Bot). */

@@ -199,7 +199,7 @@
                 <li><span class="guide-key">Tocar</span><p>un robot abre su chat.</p></li>
                 <li><span class="guide-key">Arrastrar</span><p>un robot a otra plataforma lo cambia de equipo. En el teléfono, mantenlo presionado y arrástralo.</p></li>
                 <li><span class="guide-key guide-plus" aria-label="Más">+</span><p>junto a una tarjeta crea un agente en ese equipo.</p></li>
-                <li><span class="guide-key">Clic derecho</span><p>(o mantener presionado sin mover) en un robot o una tarjeta muestra más opciones: ficha, encargado, pausa, cambiar de equipo…</p></li>
+                <li><span class="guide-key">Clic derecho</span><p>(o mantener presionado sin mover) en un robot o una tarjeta muestra más opciones: ficha, encargado, pausa, cambiar de equipo, sus MCP y habilidades…</p></li>
               </ul>
             </div>
             <footer class="office-guide-foot">
@@ -464,6 +464,32 @@
       </div>
     </dialog>
 
+    <dialog class="dialog team-tools" id="team-tools-dialog" aria-labelledby="team-tools-title">
+      <div class="team-tools-panel">
+        <div class="dialog-body team-tools-body">
+          <h2 id="team-tools-title">MCP y habilidades</h2>
+          <p class="muted small" id="team-tools-status"></p>
+          <section class="team-tools-section">
+            <h3 class="list-title">MCP del equipo</h3>
+            <div class="tool-chips" id="team-tools-mcp"></div>
+          </section>
+          <section class="team-tools-section">
+            <h3 class="list-title">Habilidades del equipo</h3>
+            <div class="tool-chips" id="team-tools-skills"></div>
+          </section>
+          <section class="team-tools-section">
+            <h3 class="list-title">Por agente</h3>
+            <ul class="team-tools-members" id="team-tools-members"></ul>
+          </section>
+          <p class="muted small mcp-note" id="team-tools-note"></p>
+        </div>
+        <footer class="dialog-footer">
+          <button type="button" class="button ghost" id="team-tools-refresh">Revisar de nuevo</button>
+          <button type="button" class="button primary" id="team-tools-done">Listo</button>
+        </footer>
+      </div>
+    </dialog>
+
     <dialog class="dialog dialog-small" id="confirm-dialog" aria-labelledby="confirm-title">
       <form method="dialog">
         <div class="dialog-body">
@@ -562,6 +588,7 @@
             <div class="settings-group">
               <h3>Hace</h3>
               <div class="settings-list">
+                <button type="button" class="settings-row" data-page="mcp"><span class="row-icon" data-icon="plug"></span><span class="row-label">MCP</span><span class="row-value" id="row-mcp"></span></button>
                 <button type="button" class="settings-row" data-page="routines"><span class="row-icon" data-icon="clock"></span><span class="row-label">Rutinas</span><span class="row-value" id="row-routines"></span></button>
                 <button type="button" class="settings-row" data-page="voice"><span class="row-icon" data-icon="speaker"></span><span class="row-label">Chat de voz</span><span class="row-value" id="row-voice"></span></button>
               </div>
@@ -714,6 +741,16 @@
               <nav class="crumbs" id="library-crumbs" aria-label="Ruta"></nav>
               <ul class="library-list" id="library-list"></ul>
               <p class="muted small library-note" id="library-note" hidden></p>
+            </div>
+
+            <div class="page" data-page="mcp" hidden>
+              <p class="muted small mcp-status" id="mcp-status"></p>
+              <ul class="item-list mcp-list" id="mcp-list"></ul>
+              <p class="form-error" id="mcp-error" role="alert"></p>
+              <p class="muted small mcp-note" id="mcp-note"></p>
+              <div class="page-actions start">
+                <button type="button" class="button ghost small" id="mcp-refresh">Revisar de nuevo</button>
+              </div>
             </div>
 
             <div class="page" data-page="routines" hidden>

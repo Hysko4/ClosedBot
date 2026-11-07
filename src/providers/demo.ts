@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { crc32, deflateSync } from "node:zlib";
 import { GREETING_MARKER } from "../instructions.js";
+import { closedbotServer } from "../mcp.js";
 import { splitTeamNote } from "../team-state.js";
 import {
   TEAM_NAMESPACE,
@@ -92,6 +93,9 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
         return {} as T;
       case "model/list":
         return { data: [{ model: "demo", displayName: "Demo (sin IA)", isDefault: true }] } as T;
+      case "closedbot/mcp":
+        // La demo no tiene MCP propios: solo las herramientas de ClosedBot.
+        return { servers: [closedbotServer(params, "connected")] } as T;
       case "thread/start": {
         const id = randomUUID();
         this.#threads.add(id);

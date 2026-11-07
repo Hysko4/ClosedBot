@@ -10,6 +10,7 @@ import { resolve, sep } from "node:path";
 import {
   type CanUseTool,
   createSdkMcpServer,
+  type McpServerStatus,
   type Options,
   type PermissionResult,
   type Query,
@@ -72,6 +73,7 @@ import {
   MAX_DELETE_AGENTS,
   TOOL_DELETE_AGENTS,
 } from "../team.js";
+import { fromClaudeStatus, type McpListing } from "../mcp.js";
 import { MEMORY_LIMITS } from "../memories.js";
 import { VERSION } from "../version.js";
 import type { AccessLevel, AgentClient, ProviderId } from "./client.js";
@@ -149,6 +151,13 @@ export interface ClaudeClientOptions {
 
 /** Herramientas que ejecutan comandos; en Windows no hay sandbox que las encierre en la carpeta. */
 const SHELL_TOOLS = ["Bash", "PowerShell", "Monitor"];
+/**
+ * Cuánto se espera a que Claude Code cuente sus MCP y, recién abierto, a que termine de cargarlos: al principio
+ * todavía no tiene los que le pasa ClosedBot y los suyos siguen «pending».
+ */
+const MCP_TIMEOUT_MS = 30_000;
+const MCP_SETTLE_MS = 15_000;
+const MCP_POLL_MS = 250;
 
 const NO_SHELL_NOTE =
   "En este equipo (Windows) el modo «solo su carpeta» no tiene terminal: no puedes ejecutar comandos. Trabaja leyendo y escribiendo archivos en tus carpetas, con búsquedas web y con tus compañeros. Si una tarea exige comandos, explícale al usuario por qué.";
@@ -228,6 +237,8 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
       case "account/rateLimits/read":
         if (this.#options.local) return { rateLimits: { available: false, windows: [] } } as T;
         return { rateLimits: await this.#readRateLimits() } as T;
+      case "closedbot/mcp":
+        return (await this.#mcpStatus(params)) as T;
       case "thread/start": {
         const threadId = randomUUID();
         this.#startThread(threadId, readThreadConfig(params), false);
@@ -347,6 +358,30 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
         } catch {
           // Ya había terminado.
         }
+      }
+    }
+  }
+
+  /**
+   * Los MCP que tiene conectados un agente, tal como los ve Claude Code. Con su sesión abierta se le pregunta
+   * a ella; si no, se abre una sesión corta con su misma configuración, sin mensajes (no gasta plan), y se cierra.
+   */
+  async #mcpStatus(params: unknown): Promise<McpListing> {
+    const threadId = getString(params, "threadId");
+    const live = threadId ? this.#threads.get(threadId) : undefined;
+    // Los que le pasa ClosedBot: mientras no aparecen, Claude Code no terminó de cargar sus MCP.
+    const expected = [TEAM_NAMESPACE, ...(this.#options.playwright ? ["playwright"] : [])];
+    if (live && !live.closing) return { servers: fromClaudeStatus(await settledMcpStatus(live.query, expected)) };
+    const input = new AsyncMessageQueue();
+    const probe = this.#createQuery({ prompt: input, options: { ...this.buildOptions(randomUUID(), readThreadConfig(params), false), persistSession: false } });
+    try {
+      return { servers: fromClaudeStatus(await settledMcpStatus(probe, expected)) };
+    } finally {
+      input.close();
+      try {
+        probe.close();
+      } catch {
+        // Ya había terminado.
       }
     }
   }
@@ -880,6 +915,23 @@ function explainClaudeError(error: string): string {
     return `${error}\nEl modo «solo su carpeta» necesita el sandbox de Claude Code. En Linux: sudo apt install bubblewrap socat. Otra opción es dar acceso total a este agente, solo en una máquina dedicada.`;
   }
   return error;
+}
+
+/**
+ * Sus MCP cuando terminó de cargarlos: recién abierto, Claude Code responde primero sin los que le pasa ClosedBot
+ * (o sin ninguno) y con los suyos «pending». Si no termina a tiempo, se muestra lo que haya.
+ */
+async function settledMcpStatus(claudeQuery: Query, expected: readonly string[]): Promise<McpServerStatus[]> {
+  const ask = () => withTimeout(claudeQuery.mcpServerStatus(), MCP_TIMEOUT_MS, "Claude tardó demasiado en contar sus MCP.");
+  const settled = (servers: McpServerStatus[]) =>
+    expected.every((name) => servers.some((server) => server.name === name)) && !servers.some((server) => server.status === "pending");
+  let servers = await ask();
+  const deadline = Date.now() + MCP_SETTLE_MS;
+  while (!settled(servers) && Date.now() < deadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, MCP_POLL_MS));
+    servers = await ask();
+  }
+  return servers;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {

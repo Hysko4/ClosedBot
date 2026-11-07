@@ -353,6 +353,11 @@ export function createApp(options: AppOptions): App {
 
   route("GET", "/api/agents/:id/skills", (ctx) => ({ skills: service.listSkills(param(ctx, 0)) }));
 
+  // Sus MCP, como los ve el agente (?refresh=1 los vuelve a revisar; si no, sirve lo de hace unos minutos).
+  route("GET", "/api/agents/:id/mcp", async (ctx) => ({
+    mcp: await service.agentMcp(param(ctx, 0), { refresh: ctx.url.searchParams.get("refresh") === "1" }),
+  }));
+
   route("POST", "/api/agents/:id/skills", async (ctx) => {
     const body = await readJson(ctx.req);
     ctx.res.statusCode = 201;
