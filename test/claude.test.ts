@@ -277,10 +277,10 @@ test("Claude: solo Claude Bot recibe las herramientas para crear y ajustar agent
       "list_memories",
       "list_routines",
       "remember",
-      "report_progress",
       "search_memories",
       "send_message",
       "set_memory_inclusion",
+      "update_checklist",
     ];
     assert.deepEqual(
       await teamToolNames(mainOptions),

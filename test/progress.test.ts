@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { Store } from "../src/db.js";
 import { PROGRESS_META, TEAM_PROGRESS_META } from "../src/service.js";
-import { parseReportProgressArgs, TEAM_DYNAMIC_TOOLS } from "../src/team.js";
+import type { MessageRecord } from "../src/db.js";
+import { checklistPercent, checklistStep, parseChecklistArgs, parseReportProgressArgs, TEAM_DYNAMIC_TOOLS } from "../src/team.js";
 import { createHarness, type Harness, tempDir, waitFor } from "./helpers.js";
 
 async function talk(h: Harness, agentId: string, text: string): Promise<void> {
@@ -12,8 +13,8 @@ async function talk(h: Harness, agentId: string, text: string): Promise<void> {
   await waitFor(() => h.service.getAgent(agentId).state === "idle", 8_000, "libre");
 }
 
-test("report_progress: está entre las herramientas de todos y acota el porcentaje", () => {
-  assert.ok(TEAM_DYNAMIC_TOOLS.tools.some((tool) => tool.name === "report_progress"));
+test("report_progress (de antes de la 0.9.13): ya no se ofrece, pero un hilo viejo la puede pedir y acota el porcentaje", () => {
+  assert.ok(!TEAM_DYNAMIC_TOOLS.tools.some((tool) => (tool.name as string) === "report_progress"));
   assert.deepEqual(parseReportProgressArgs({ percent: 140, step: "  armando   el índice " }), { percent: 100, step: "armando el índice" });
   assert.deepEqual(parseReportProgressArgs({ percent: "45 %" }), { percent: 45, step: "" });
   assert.equal(parseReportProgressArgs({ percent: -3 }).percent, 0);
@@ -133,5 +134,116 @@ test("el avance de un equipo cuenta a todo el equipo y no retrocede: quien termi
   } finally {
     await h.close();
     temp.cleanup();
+  }
+});
+
+type ChecklistView = { agentId: string; name: string; title: string; steps: Array<{ text: string; status: string }> };
+const listsOf = (message: MessageRecord | undefined): ChecklistView[] => (message?.payload?.lists as ChecklistView[] | undefined) ?? [];
+
+test("update_checklist: está entre las herramientas de todos y acepta la lista como la piden o en texto", () => {
+  assert.ok(TEAM_DYNAMIC_TOOLS.tools.some((tool) => tool.name === "update_checklist"));
+  const parsed = parseChecklistArgs({
+    title: "  Informe  ",
+    steps: [
+      { text: " Buscar   datos ", status: "done" },
+      { text: "Escribir", status: "in_progress" },
+      { text: "Revisar", status: "pendiente" },
+    ],
+  });
+  assert.deepEqual(parsed, {
+    title: "Informe",
+    steps: [
+      { text: "Buscar datos", status: "done" },
+      { text: "Escribir", status: "in_progress" },
+      { text: "Revisar", status: "pending" },
+    ],
+    newTask: false,
+  });
+  const text = parseChecklistArgs({ steps: "✓ uno\n✱ dos\n○ tres\n- [x] cuatro", new_task: true });
+  assert.deepEqual(
+    text.steps.map((step) => `${step.status}:${step.text}`),
+    ["done:uno", "in_progress:dos", "pending:tres", "done:cuatro"],
+  );
+  assert.equal(text.newTask, true);
+  assert.equal(checklistPercent(parsed.steps), 33);
+  assert.equal(checklistStep(parsed.steps), "Escribir");
+  assert.throws(() => parseChecklistArgs({ steps: [] }), /lista de pasos/);
+  assert.throws(() => parseChecklistArgs({ steps: Array.from({ length: 21 }, (_, index) => ({ text: `p${index}`, status: "pending" })) }), /hasta 20/);
+  assert.throws(() => parseChecklistArgs({ steps: [{ text: "  ", status: "done" }] }), /no tiene texto/);
+});
+
+test("la lista de tareas de un agente: una tarjeta en su chat que se actualiza en su lugar y da su avance; una terminada deja paso a otra", async () => {
+  const h = await createHarness();
+  try {
+    const ana = h.service.createAgent({ name: "Ana", provider: "demo" });
+    const cards = () => h.service.listMessages(ana.id).filter((message) => message.role === "checklist");
+    await talk(h, ana.id, "/lista Informe | ✱ Buscar datos | ○ Escribir | ○ Revisar");
+    assert.equal(cards().length, 1);
+    assert.deepEqual(
+      listsOf(cards()[0])[0]?.steps.map((step) => step.status),
+      ["in_progress", "pending", "pending"],
+    );
+    assert.deepEqual(h.service.getAgent(ana.id).progress && { percent: h.service.getAgent(ana.id).progress?.percent, step: h.service.getAgent(ana.id).progress?.step }, {
+      percent: 0,
+      step: "Buscar datos",
+    });
+
+    await talk(h, ana.id, "/lista Informe | ✓ Buscar datos | ✱ Escribir | ○ Revisar");
+    assert.equal(cards().length, 1, "se actualiza la misma tarjeta");
+    assert.equal(cards()[0]?.text, "Informe\n✓ Buscar datos\n✱ Escribir\n○ Revisar");
+    assert.equal(h.service.getAgent(ana.id).progress?.percent, 33);
+    const id = cards()[0]?.id;
+    assert.ok(h.events.some((event) => event.type === "message" && event.message.id === id && listsOf(event.message)[0]?.steps[1]?.status === "in_progress"));
+
+    await talk(h, ana.id, "/lista Informe | ✓ Buscar datos | ✓ Escribir | ✓ Revisar");
+    assert.equal(cards().length, 1);
+    assert.equal(h.service.getAgent(ana.id).progress?.percent, 100);
+    // La misma lista terminada otra vez no abre otra tarjeta; la de otra tarea, sí.
+    await talk(h, ana.id, "/lista Informe | ✓ Buscar datos | ✓ Escribir | ✓ Revisar");
+    assert.equal(cards().length, 1);
+    await talk(h, ana.id, "/lista Correo | ✱ Redactar | ○ Enviar");
+    assert.equal(cards().length, 2);
+    // A mitad de una tarea, «new_task» deja la anterior como estaba.
+    await talk(h, ana.id, "/lista-nueva Llamada | ✱ Marcar");
+    assert.equal(cards().length, 3);
+    assert.equal(listsOf(cards()[1])[0]?.title, "Correo");
+    assert.equal(listsOf(cards()[2])[0]?.title, "Llamada");
+  } finally {
+    await h.close();
+  }
+});
+
+test("la lista de tareas de un equipo: en su canal, una sola tarjeta junta las de todos (en el orden del equipo)", async () => {
+  const h = await createHarness();
+  try {
+    const ana = h.service.createAgent({ name: "Ana", provider: "demo" });
+    const beto = h.service.createAgent({ name: "Beto", provider: "demo" });
+    const channel = h.service.createChannel({ name: "Equipo", memberIds: [ana.id, beto.id], leadId: ana.id });
+    const cards = () => h.service.listChannelMessages(channel.id).filter((message) => message.role === "checklist");
+    const idle = () => [ana.id, beto.id].every((id) => h.service.getAgent(id).state === "idle");
+    // Beto informa primero; en la tarjeta va después de Ana, que es la primera del equipo.
+    h.service.sendChannelMessage(channel.id, "/encargar Beto: /lista Datos | ✱ Buscar\n/lista Plan | ✓ Repartir | ✱ Juntar");
+    await waitFor(() => listsOf(cards()[0]).length === 2 && idle(), 8_000, "las dos listas en la tarjeta del equipo");
+    assert.equal(cards().length, 1);
+    assert.deepEqual(
+      listsOf(cards()[0]).map((list) => `${list.name}:${list.title}`),
+      ["Ana:Plan", "Beto:Datos"],
+    );
+    assert.match(cards()[0]?.text ?? "", /^Tareas del equipo «Equipo»\n\nAna · Plan\n✓ Repartir\n✱ Juntar\n\nBeto · Datos\n✱ Buscar$/);
+    assert.equal(h.service.listMessages(ana.id).filter((message) => message.role === "checklist").length, 0, "no va al chat privado");
+
+    // Terminan los dos: la tarjeta queda como estaba y el trabajo siguiente abre otra.
+    h.service.sendChannelMessage(channel.id, "/encargar Beto: /lista Datos | ✓ Buscar\n/lista Plan | ✓ Repartir | ✓ Juntar");
+    await waitFor(() => listsOf(cards()[0]).every((list) => list.steps.every((step) => step.status === "done")) && idle(), 8_000, "todo hecho");
+    assert.equal(cards().length, 1);
+    assert.equal(h.service.getChannel(channel.id).progress?.percent, 100);
+    h.service.sendChannelMessage(channel.id, "/lista Portada | ✱ Bocetos");
+    await waitFor(() => cards().length === 2 && idle(), 8_000, "otra tarjeta para el trabajo nuevo");
+    assert.deepEqual(
+      listsOf(cards()[1]).map((list) => list.title),
+      ["Portada"],
+    );
+  } finally {
+    await h.close();
   }
 });

@@ -54,6 +54,8 @@ export async function createHarness(options: {
   officeArt?: ServiceOptions["officeArt"];
   /** La lista de precios de «Uso»; por omisión, ninguna (las pruebas no bajan nada de internet). */
   fetchPrices?: ServiceOptions["fetchPrices"];
+  /** Dónde buscar ~/.codex y ~/.claude.json (los MCP de este PC); por omisión, una carpeta vacía. */
+  mcpHome?: string;
 } = {}): Promise<Harness> {
   const temp = options.dir ? { path: options.dir, cleanup: () => undefined } : tempDir();
   const store = new Store(join(temp.path, "closedbot.db"));
@@ -73,6 +75,7 @@ export async function createHarness(options: {
     ...(options.pixelLab ? { pixelLab: options.pixelLab, autoCharacters: true } : {}),
     ...(options.officeArt ? { officeArt: options.officeArt } : {}),
     fetchPrices: options.fetchPrices ?? null,
+    mcpHome: options.mcpHome ?? join(temp.path, "sin-mcp"),
   });
   service.on("event", (event) => events.push(event));
   await service.start();

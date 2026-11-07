@@ -97,7 +97,7 @@ export const AVATAR_CUSTOM_BASE = 10_000;
 export const AVATAR_MAX = 100_000;
 
 /** decision = pregunta de opción múltiple al usuario; routine = aviso de que corrió una rutina. */
-export type MessageRole = "user" | "assistant" | "teammate" | "activity" | "notice" | "decision" | "routine";
+export type MessageRole = "user" | "assistant" | "teammate" | "activity" | "notice" | "decision" | "routine" | "checklist";
 export type MessageStatus =
   | "queued"
   | "running"
@@ -636,6 +636,18 @@ export class Store {
         : this.#db.prepare(`${base} ORDER BY seq DESC LIMIT ?`).all(channelId, limit)
     ) as Row[];
     return rows.reverse().map((row) => ({ ...toMessage(row), seq: Number(row.seq) }));
+  }
+
+  /** La última lista de tareas de un agente en su chat (`agentId`) o la del equipo en su canal (`channelId`). */
+  lastChecklist(scope: { agentId: string } | { channelId: string }): MessageRecord | null {
+    const row = (
+      "channelId" in scope
+        ? this.#db.prepare("SELECT * FROM messages WHERE channel_id = ? AND role = 'checklist' ORDER BY seq DESC LIMIT 1").get(scope.channelId)
+        : this.#db
+            .prepare("SELECT * FROM messages WHERE agent_id = ? AND channel_id IS NULL AND role = 'checklist' ORDER BY seq DESC LIMIT 1")
+            .get(scope.agentId)
+    ) as Row | undefined;
+    return row ? toMessage(row) : null;
   }
 
   /** Para la Oficina: las últimas imágenes generadas (las que se clavan en el corcho de cada sala). */

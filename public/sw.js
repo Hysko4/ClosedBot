@@ -1,6 +1,6 @@
 // Service worker de ClosedBot: permite instalar la app y abrirla sin red.
 // Nunca guarda en caché la API (/api/): los mensajes siempre vienen del servidor.
-const CACHE = "closedbot-v29";
+const CACHE = "closedbot-v30";
 const SHELL = [
   "/",
   "/index.html",
@@ -11,6 +11,10 @@ const SHELL = [
   "/manifest.webmanifest",
   "/icons/icon.svg",
   "/icons/icon-192.png",
+  "/logos/claude.svg",
+  "/logos/codex.svg",
+  "/logos/gemini.svg",
+  "/logos/grok.svg",
   "/fonts/inter-latin-wght-normal.woff2",
   "/fonts/inter-latin-wght-italic.woff2",
 ];

@@ -2495,6 +2495,130 @@ body.solo-window .chat {
   margin-top: 12px;
 }
 
+/* ---------- lista de tareas (como la del progreso de los hilos) ---------- */
+
+.msg-checklist {
+  margin: 10px 0;
+}
+
+.checklist {
+  max-width: 560px;
+  padding: 11px 14px 12px;
+  border: 1px solid #333;
+  border-radius: 12px;
+  background: #151515;
+}
+
+.checklist-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.checklist-title {
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.checklist-count {
+  flex: none;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.checklist[data-done="true"] .checklist-count {
+  color: #3ec27a;
+}
+
+.checklist-who {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 10px 0 2px;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.checklist-avatar {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+}
+
+.checklist-avatar svg {
+  width: 18px;
+  height: 18px;
+}
+
+.checklist-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.checklist-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 4px 0;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.checklist-step[data-status="done"] {
+  color: var(--text-2);
+}
+
+.checklist-mark {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  margin-top: 1px;
+  border-radius: 50%;
+}
+
+.checklist-step[data-status="done"] .checklist-mark {
+  background: #9a9a9a;
+  color: #151515;
+}
+
+.checklist-step[data-status="done"] .checklist-mark svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.checklist-step[data-status="pending"] .checklist-mark {
+  border: 1.5px dashed #8e8e8e;
+}
+
+/* En curso: un arco que gira. */
+.checklist-step[data-status="in_progress"] .checklist-mark {
+  border: 2px solid rgba(255, 255, 255, 0.16);
+  border-top-color: #ececec;
+  animation: spin 0.9s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .checklist-step[data-status="in_progress"] .checklist-mark {
+    animation: none;
+    border-color: #ececec;
+    border-right-color: rgba(255, 255, 255, 0.16);
+  }
+}
+
 .decision {
   padding: 15px 12px 8px;
 }
@@ -4526,6 +4650,8 @@ body.solo-window .chat {
 }
 
 .office-scroll {
+  /* La pizarra se abre aquí dentro, junto al bot principal, y se desplaza con la escena. */
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow-x: hidden;
@@ -4575,32 +4701,161 @@ body.solo-window .chat {
   color: var(--muted);
 }
 
+/* Una pizarra blanca de verdad (pedido): marco de aluminio, cara blanca y la bandeja con plumones y borrador.
+   Su lugar (al lado del bot principal) lo pone office.js. */
 .office-board {
   position: absolute;
-  top: 60px;
-  right: 18px;
-  z-index: 25;
-  width: min(440px, calc(100% - 36px));
-  max-height: calc(100% - 84px);
-  overflow-y: auto;
-  padding: 12px 16px 16px;
-  border-radius: 14px;
-  background: #1c1c1c;
+  top: 0;
+  left: 0;
+  z-index: 15;
+  display: flex;
+  flex-direction: column;
+  width: 400px;
+  padding: 9px 9px 0;
+  border-radius: 7px;
+  background: linear-gradient(180deg, #eef0f4 0%, #c9ced8 55%, #aab0bc 100%);
   box-shadow:
-    0 0 0 1px #2e2e2e,
-    0 14px 40px rgba(0, 0, 0, 0.5);
+    0 0 0 1px rgba(10, 14, 40, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    0 18px 44px rgba(0, 0, 0, 0.55);
+  color: #1d2433;
+}
+
+.office-board-face {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 14px;
+  border-radius: 3px;
+  background: linear-gradient(140deg, #ffffff 0%, #fbfbf8 48%, #eef1f4 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(60, 70, 90, 0.18),
+    inset 0 2px 6px rgba(20, 30, 60, 0.12);
+  scrollbar-color: #b9c0cc transparent;
 }
 
 .office-board-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 4px;
+  gap: 10px;
+  margin-bottom: 6px;
 }
 
 .office-board-head h3 {
   margin: 0;
-  font-size: 15px;
+  color: #1f4fd1;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.office-board-close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(29, 36, 51, 0.07);
+  color: #4a5368;
+  cursor: pointer;
+}
+
+.office-board-close:hover {
+  background: rgba(29, 36, 51, 0.14);
+  color: #1d2433;
+}
+
+.office-board-close svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+/* Lo escrito: tinta de plumón sobre el blanco. */
+.office-board-text {
+  color: #1d2433;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.office-board-text strong,
+.office-board-text .heading {
+  color: #1f4fd1;
+}
+
+.office-board-text li::marker {
+  color: #d33a3a;
+}
+
+.office-board-text code {
+  background: rgba(31, 79, 209, 0.08);
+  color: #1d2433;
+}
+
+.office-board-text pre {
+  background: #f1f3f7;
+  border-color: #d9dee7;
+}
+
+.office-board-text blockquote {
+  border-left-color: #1f9d55;
+  color: #3c4558;
+}
+
+.office-board-text a {
+  color: #1f4fd1;
+}
+
+.office-board-tray {
+  position: relative;
+  flex: none;
+  height: 17px;
+  margin: 0 -9px;
+  border-radius: 0 0 7px 7px;
+  background: linear-gradient(180deg, #9aa1ae, #7d8492);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.board-marker,
+.board-eraser {
+  position: absolute;
+  bottom: 6px;
+  height: 7px;
+  border-radius: 3px;
+}
+
+.board-marker {
+  width: 44px;
+  background: linear-gradient(90deg, #f4f5f8 0 72%, var(--ink) 72% 100%);
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
+}
+
+.board-marker-blue {
+  --ink: #1f4fd1;
+  left: 22px;
+}
+
+.board-marker-red {
+  --ink: #d33a3a;
+  left: 74px;
+}
+
+.board-marker-green {
+  --ink: #1f9d55;
+  left: 126px;
+}
+
+.board-eraser {
+  right: 26px;
+  width: 54px;
+  height: 10px;
+  background: linear-gradient(180deg, #3a4153 0 62%, #d9d4c7 62% 100%);
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
 }
 
 #open-office[aria-current="page"] {
@@ -4994,8 +5249,7 @@ body.solo-window .chat {
     margin-right: var(--office-side);
   }
 
-  body.office-docked .office-guide,
-  body.office-docked .office-board {
+  body.office-docked .office-guide {
     right: calc(var(--office-side) + 18px);
   }
 
@@ -5057,12 +5311,6 @@ body.solo-window .chat {
 @media (max-width: 760px) {
   .office-header {
     padding: calc(8px + var(--safe-top)) 10px 6px;
-  }
-
-  .office-board {
-    top: 56px;
-    right: 10px;
-    width: calc(100% - 20px);
   }
 
   /* En el teléfono, la guía sube desde abajo. */
@@ -5392,4 +5640,44 @@ body.solo-window .chat {
     grid-template-columns: minmax(0, 1fr);
     gap: 4px;
   }
+}
+
+/* MCP de este PC que se le dan a todo un equipo (cuadro «MCP y habilidades»). */
+.team-share-list {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.team-share-list:empty::before {
+  content: attr(data-empty);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.team-share-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+
+.team-share-item:first-child {
+  border-top: 0;
+}
+
+.team-share-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.team-share-body .item-name,
+.team-share-body .item-meta {
+  margin: 0;
+}
+
+.mcp-what {
+  margin-top: 2px;
+  color: var(--text-2);
 }

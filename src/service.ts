@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import {
   cleanInstructions,
@@ -40,6 +41,7 @@ import { type SavedImage, saveGeneratedImage, withImages } from "./images.js";
 import { downloadPrices, type ModelPrice, normalizeModel } from "./prices.js";
 import { buildInstructions, composeDeliveryInput, composeGreeting, GREETING_MARKER } from "./instructions.js";
 import { type AgentMcpView, closedbotServer, fromCodexStatus, type McpListing, type McpServerView } from "./mcp.js";
+import { describeMcp, readPcMcpServers, type SharedMcpServer, type SharedMcpView, sharedView } from "./mcp-share.js";
 import { cleanMemory, describeMemories, MEMORY_LIMITS, searchMemories } from "./memories.js";
 import { APPEARANCE_MAX, type CharacterManifest, type CharacterState, OfficeStudio, type OfficeStudioOptions, PixelLabError, type PixelLabOptions } from "./office.js";
 import { type AccessLevel, type AgentClient, isProviderId, PROVIDER_IDS, type ProviderId } from "./providers/client.js";
@@ -99,7 +101,13 @@ import {
   TOOL_UPDATE_AGENT,
   TOOL_UPDATE_BOARD,
   TOOL_REPORT_PROGRESS,
+  TOOL_UPDATE_CHECKLIST,
   parseReportProgressArgs,
+  parseChecklistArgs,
+  checklistPercent,
+  checklistStep,
+  type ChecklistArgs,
+  type ChecklistStep,
   type UpdateAgentArgs,
 } from "./team.js";
 import { emptyReading, localDay, type ModelReading, rangeStart, type Reading, readingIncrement, spendReport, type SpendReport, tokensOf } from "./spend.js";
@@ -195,6 +203,8 @@ const USAGE_PROVIDERS = ["claude", "codex", "grok", "gemini"] as const satisfies
 const STOP_WAIT_MS = 10_000;
 /** Los MCP de un agente: cuánto vale la última revisión, cuánto se espera y cuántas revisiones a la vez. */
 const MCP_CACHE_MS = 5 * 60_000;
+/** Los MCP de este PC que le diste a cada equipo, como JSON { canal: [nombres] } (ver mcp-share.ts). */
+export const TEAM_MCP_META = "team_mcp";
 const MCP_TIMEOUT_MS = 60_000;
 const MCP_PARALLEL = 2;
 /** Ya se pasaron las instrucciones guardadas en la base a AGENTS.md (0.7.0). */
@@ -461,6 +471,8 @@ export interface ServiceOptions {
   officeArt?: OfficeStudioOptions["art"];
   /** Cómo bajar la lista de precios de las API (por omisión, la de LiteLLM); null: sin precios (pruebas). */
   fetchPrices?: (() => Promise<Record<string, ModelPrice>>) | null;
+  /** Carpeta personal donde están ~/.codex y ~/.claude.json (los MCP de este PC que se le pueden dar a un equipo). */
+  mcpHome?: string;
   log?: (level: "info" | "warn" | "error", message: string) => void;
 }
 
@@ -2462,7 +2474,31 @@ export class AgentService extends EventEmitter<ServiceEvents> {
    */
   async agentMcp(agentId: string, options: { refresh?: boolean } = {}): Promise<AgentMcpView> {
     const agent = this.#requireAgent(agentId);
-    const key = `${agent.provider}:${this.#access(agent)}`;
+    return this.#explainMcp(agent, await this.#checkMcp(agent, options));
+  }
+
+  /** Cada MCP con lo que es; los de sus equipos marcados así (y, si su programa no los cuenta, igual se nombran). */
+  #explainMcp(agent: AgentRecord, view: AgentMcpView): AgentMcpView {
+    const shared = new Set(this.#sharedMcpFor(agent).map((server) => server.name));
+    const servers = view.servers.map((server) => ({
+      ...server,
+      ...(shared.has(server.name) && server.source !== "codex" ? { source: "team" } : {}),
+      description: describeMcp(server.name, server.tools),
+    }));
+    if (agent.provider !== "codex") {
+      for (const name of shared) {
+        if (!servers.some((server) => server.name === name)) {
+          servers.push({ name, status: "included", source: "team", tools: [], error: null, description: describeMcp(name) });
+        }
+      }
+    }
+    return { ...view, servers };
+  }
+
+  async #checkMcp(agent: AgentRecord, options: { refresh?: boolean }): Promise<AgentMcpView> {
+    const key = `${agent.provider}:${this.#access(agent)}:${this.#sharedMcpFor(agent)
+      .map((server) => server.name)
+      .join(",")}`;
     const cached = this.#mcp.get(agent.id);
     if (!options.refresh && cached?.key === key && Date.now() - cached.at < MCP_CACHE_MS) return cached.view;
     const running = this.#mcpChecks.get(agent.id);
@@ -2494,6 +2530,71 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     } catch (error) {
       return { ...base, servers: [own], error: `No pude revisar sus MCP: ${errorText(error)}` };
     }
+  }
+
+  // ---------- MCP del equipo ----------
+
+  /** Los MCP de este PC que se le pueden dar a un equipo, y los que ya le diste (sin su configuración). */
+  teamMcp(channelId: string): { available: SharedMcpView[]; selected: string[] } {
+    const channel = this.#store.getChannel(channelId);
+    if (!channel) throw new ServiceError("Ese canal no existe.", 404);
+    const available = this.#pcMcp().map(sharedView);
+    const selected = this.#teamMcpMap().get(channel.id) ?? [];
+    // Uno que ya no está configurado en el PC sigue en la lista para poder quitarlo.
+    for (const name of selected) {
+      if (!available.some((server) => server.name === name)) {
+        available.push({ name, origin: "codex", transport: "stdio", description: "Ya no está configurado en este PC: tus agentes no lo reciben." });
+      }
+    }
+    return { available, selected };
+  }
+
+  /** Le da (o le quita) MCP de este PC a todo un equipo: los tienen todos sus agentes desde su próximo mensaje. */
+  setTeamMcp(channelId: string, names: unknown): { available: SharedMcpView[]; selected: string[] } {
+    const channel = this.#store.getChannel(channelId);
+    if (!channel || channel.deletedAt) throw new ServiceError("Ese canal no existe.", 404);
+    if (!Array.isArray(names) || !names.every((name) => typeof name === "string")) throw new ServiceError("Indica la lista de MCP.", 400);
+    const known = new Set(this.#pcMcp().map((server) => server.name));
+    const previous = this.#teamMcpMap().get(channel.id) ?? [];
+    const next = [...new Set(names as string[])].filter((name) => known.has(name) || previous.includes(name)).slice(0, 40);
+    const map = this.#teamMcpMap();
+    if (next.length) map.set(channel.id, next);
+    else map.delete(channel.id);
+    this.#store.setMeta(TEAM_MCP_META, JSON.stringify(Object.fromEntries(map)));
+    for (const id of channel.memberIds) this.#mcp.delete(id);
+    return this.teamMcp(channel.id);
+  }
+
+  #teamMcpMap(): Map<string, string[]> {
+    const map = new Map<string, string[]>();
+    try {
+      const saved: unknown = JSON.parse(this.#store.getMeta(TEAM_MCP_META) ?? "{}");
+      if (isRecord(saved)) {
+        for (const [id, value] of Object.entries(saved)) {
+          if (Array.isArray(value)) map.set(id, value.filter((name): name is string => typeof name === "string"));
+        }
+      }
+    } catch {
+      // Un valor dañado no impide arrancar: los equipos quedan sin MCP compartidos.
+    }
+    return map;
+  }
+
+  #pcMcp(): SharedMcpServer[] {
+    const home = this.#options.mcpHome;
+    return home ? readPcMcpServers(home, join(home, ".codex")) : readPcMcpServers(homedir());
+  }
+
+  /** Los MCP que recibe un agente por sus equipos (con su configuración: solo para pasárselos a su programa). */
+  #sharedMcpFor(agent: AgentRecord): SharedMcpServer[] {
+    const map = this.#teamMcpMap();
+    const names = new Set<string>();
+    for (const channel of this.#store.listChannels()) {
+      if (channel.deletedAt || !channel.memberIds.includes(agent.id)) continue;
+      for (const name of map.get(channel.id) ?? []) names.add(name);
+    }
+    if (!names.size) return [];
+    return this.#pcMcp().filter((server) => names.has(server.name));
   }
 
   /** Los MCP de Codex son los de su configuración (los mismos para todos sus agentes). */
@@ -2848,6 +2949,11 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (agent.effort && agent.provider !== "codex") params.effort = agent.effort;
     // Codex fija las herramientas al crear el hilo; Claude y la demo las reciben también al reanudarlo.
     if (starting || agent.provider !== "codex") params.dynamicTools = [teamDynamicTools(main)];
+    // Los MCP que le diste a sus equipos (Codex no: sus agentes ya usan los de su configuración).
+    if (agent.provider !== "codex") {
+      const shared = this.#sharedMcpFor(agent);
+      if (shared.length) params.sharedMcpServers = shared;
+    }
     return params;
   }
 
@@ -3488,6 +3594,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       this.#setProgress(senderId, { percent, step, at: Date.now() });
       return toolResult({ guardado: true, avance: `${percent} %` });
     }
+    if (params.tool === TOOL_UPDATE_CHECKLIST) return this.#updateChecklist(senderId, parseChecklistArgs(params.arguments));
     if (params.tool === TOOL_LIST_ROUTINES) {
       return toolResult({
         rutinas: this.listRoutines(senderId).map((routine) => ({
@@ -4282,6 +4389,48 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     if (teams) this.#emitChannels();
   }
 
+  // ---------- listas de tareas ----------
+  // Pedido del usuario («este mismo cuadrado… de progreso por tareas, tanto para agentes como grupo de agentes
+  // completos»): cada agente lleva su lista con update_checklist. En su chat se ve como una tarjeta que se actualiza en
+  // su lugar; si trabaja para un canal, su lista va a la tarjeta del equipo, que junta las de todos. Una lista terminada
+  // (o de hace más de 12 horas) queda como estaba y la siguiente abre otra tarjeta. El avance de la Oficina sale de ahí.
+
+  #updateChecklist(agentId: string, input: ChecklistArgs): DynamicToolResult {
+    const agent = this.#requireAgent(agentId);
+    const now = Date.now();
+    const state = this.#active.get(agentId);
+    const channel = state?.channelId ? this.#store.getChannel(state.channelId) : null;
+    const team = channel && !channel.deletedAt && channel.memberIds.includes(agentId) ? channel : null;
+    const entry: ChecklistEntry = { agentId, name: agent.name, title: input.title, steps: input.steps, at: now };
+    const card = this.#store.lastChecklist(team ? { channelId: team.id } : { agentId });
+    const lists = card ? checklistLists(card.payload) : [];
+    const mine = lists.find((list) => list.agentId === agentId) ?? null;
+    const fresh = card !== null && now - card.updatedAt <= PROGRESS_STALE_MS;
+    const finished = lists.length > 0 && lists.every(checklistDone);
+    const open = card !== null && fresh && !finished && (team !== null || !input.newTask);
+    let message: MessageRecord | null = null;
+    if (open) {
+      const next = mine ? lists.map((list) => (list.agentId === agentId ? entry : list)) : [...lists, entry];
+      if (team) next.sort((a, b) => memberOrder(team.memberIds, a.agentId) - memberOrder(team.memberIds, b.agentId));
+      message = this.#store.updateMessage(card.id, { text: checklistText(next, team?.name ?? null), payload: { lists: next } });
+    } else if (!(fresh && mine && sameChecklist(mine, entry))) {
+      // (La misma lista otra vez, ya terminada, no abre otra tarjeta.)
+      message = this.#store.insertMessage({
+        agentId,
+        role: "checklist",
+        text: checklistText([entry], team?.name ?? null),
+        status: "completed",
+        channelId: team?.id ?? null,
+        turnId: state?.turnId ?? null,
+        payload: { lists: [entry] },
+      });
+    }
+    if (message) this.#emit({ type: "message", agentId: message.agentId, message });
+    this.#setProgress(agentId, { percent: checklistPercent(entry.steps), step: checklistStep(entry.steps), at: now });
+    const done = entry.steps.filter((step) => step.status === "done").length;
+    return toolResult({ guardada: true, avance: `${done} de ${entry.steps.length}`, ...(team ? { equipo: team.name } : {}) });
+  }
+
   // ---------- avance de cada equipo ----------
   // Pedido del usuario («iba en 60 y ahora 30, que sea consistente»): el avance de un equipo cuenta a todos sus
   // integrantes desde el principio (quien todavía no informa, 0) y no retrocede. Quien terminó sigue contando 100
@@ -4656,6 +4805,44 @@ function channelColor(value: unknown): string {
 }
 
 /** Si un avance todavía se muestra: el terminado, media hora; el que va en camino, 12 horas sin novedades. */
+/** La lista de un agente en una tarjeta de tareas (en su chat va sola; en la del equipo, junto a las de los demás). */
+interface ChecklistEntry {
+  agentId: string;
+  /** Su nombre al escribirla, por si después lo eliminan. */
+  name: string;
+  title: string;
+  steps: ChecklistStep[];
+  at: number;
+}
+
+function checklistLists(payload: Record<string, unknown> | null): ChecklistEntry[] {
+  const lists = payload && Array.isArray(payload.lists) ? payload.lists : [];
+  return lists.filter(
+    (list): list is ChecklistEntry => isRecord(list) && typeof list.agentId === "string" && Array.isArray(list.steps) && typeof list.at === "number",
+  );
+}
+
+function checklistDone(list: ChecklistEntry): boolean {
+  return list.steps.length > 0 && list.steps.every((step) => step.status === "done");
+}
+
+function sameChecklist(a: ChecklistEntry, b: ChecklistEntry): boolean {
+  return a.title === b.title && JSON.stringify(a.steps) === JSON.stringify(b.steps);
+}
+
+function memberOrder(memberIds: string[], agentId: string): number {
+  const index = memberIds.indexOf(agentId);
+  return index < 0 ? memberIds.length : index;
+}
+
+/** La tarjeta en texto (para las vistas previas y para quien no la dibuja): ✓ hecho, ✱ en curso, ○ pendiente. */
+function checklistText(lists: ChecklistEntry[], team: string | null): string {
+  const mark = { done: "✓", in_progress: "✱", pending: "○" } as const;
+  const lines = (list: ChecklistEntry) => list.steps.map((step) => `${mark[step.status]} ${step.text}`);
+  if (team === null) return [lists[0]?.title || "Tareas", ...(lists[0] ? lines(lists[0]) : [])].join("\n");
+  return [`Tareas del equipo «${team}»`, ...lists.flatMap((list) => ["", list.title ? `${list.name} · ${list.title}` : list.name, ...lines(list)])].join("\n");
+}
+
 function progressShows(progress: { percent: number; at: number }, now: number): boolean {
   return now - progress.at <= (progress.percent >= 100 ? PROGRESS_DONE_MS : PROGRESS_STALE_MS);
 }

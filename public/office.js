@@ -319,6 +319,9 @@ export function createOffice(host) {
   const lists = document.createElement("div");
   lists.className = "visually-hidden";
   scroller.replaceChildren(canvas, lists);
+  // La pizarra se abre dentro de la escena, junto al bot principal, y se desplaza con ella (pedido: «una pizarra de
+  // verdad al lado de ese personaje»).
+  scroller.append(boardView);
   const mapCtx = canvas.getContext("2d");
   /** Contexto donde se dibuja: el del mapa o, un momento, el de un ejemplo de la guía. */
   let ctx = mapCtx;
@@ -483,6 +486,7 @@ export function createOffice(host) {
     canvas.width = Math.round(width * dpr);
     canvas.height = Math.round(view.height * dpr);
     view.dpr = dpr;
+    placeBoard();
   }
 
   /** Esquina de atrás de la plataforma (su celda 0, 0) en el mundo. */
@@ -769,6 +773,10 @@ export function createOffice(host) {
     ctx.stroke();
     ctx.restore();
 
+    // La pizarra de verdad, de pie en el borde de atrás del salón (detrás del bot principal).
+    if (hall) drawWhiteboard(platform);
+    else platform.boardBox = null;
+
     // Escritorios y robots, de atrás hacia adelante.
     const seats = [...platform.seats].sort((a, b) => a.i + a.j - (b.i + b.j));
     for (const seat of seats) {
@@ -779,6 +787,94 @@ export function createOffice(host) {
       const here = robot && robot.platform === platform && !away && !gone ? robot : null;
       drawSeat(platform, point, here, t, hall, now);
     }
+  }
+
+  /**
+   * Una pizarra blanca con marco de aluminio, sobre patas, a la derecha del bot principal. Con un plan anotado se ven
+   * renglones de plumón; tocarla abre la pizarra grande a su lado.
+   */
+  function drawWhiteboard(platform) {
+    const o = origin(platform);
+    const a = iso(0.92, 0.12);
+    const b = iso(1.9, 0.12);
+    const legs = 16;
+    const tall = 62;
+    const at = (u, v) => ({ x: o.x + a.x + (b.x - a.x) * u, y: o.y + a.y + (b.y - a.y) * u - legs - tall * v });
+    const panel = (u0, v0, u1, v1) => {
+      const p = [at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)];
+      ctx.beginPath();
+      ctx.moveTo(p[0].x, p[0].y);
+      for (const point of p.slice(1)) ctx.lineTo(point.x, point.y);
+      ctx.closePath();
+    };
+    const hot = hovered?.kind === "board" && hovered.platform === platform;
+    const written = live.board.trim() !== "";
+    ctx.save();
+    // Patas.
+    ctx.strokeStyle = "#8d94a6";
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    for (const u of [0.1, 0.9]) {
+      const top = at(u, 0);
+      ctx.beginPath();
+      ctx.moveTo(top.x, top.y);
+      ctx.lineTo(top.x, top.y + legs);
+      ctx.stroke();
+    }
+    // Sombra en el piso.
+    ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+    ctx.beginPath();
+    const foot = at(0.5, 0);
+    ctx.ellipse(foot.x, foot.y + legs + 2, Math.abs(b.x - a.x) * 0.55, 6, Math.atan2(b.y - a.y, b.x - a.x), 0, Math.PI * 2);
+    ctx.fill();
+    // Marco de aluminio y la cara blanca.
+    ctx.shadowColor = hot ? platform.color : "rgba(180, 200, 255, 0.5)";
+    ctx.shadowBlur = hot ? 18 : 8;
+    ctx.fillStyle = "#c3c9d4";
+    panel(0, 0, 1, 1);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = hot ? platform.color : "#eef1f6";
+    ctx.lineWidth = hot ? 2 : 1;
+    ctx.stroke();
+    const face = ctx.createLinearGradient(at(0, 1).x, at(0, 1).y, at(1, 0).x, at(1, 0).y);
+    face.addColorStop(0, "#ffffff");
+    face.addColorStop(1, "#e3e8ef");
+    ctx.fillStyle = face;
+    panel(0.045, 0.08, 0.955, 0.93);
+    ctx.fill();
+    // Renglones de plumón (azul, rojo, verde) cuando hay un plan.
+    if (written) {
+      ctx.lineWidth = 2;
+      const lines = [
+        [0.14, 0.8, 0.78, "#1f4fd1"],
+        [0.14, 0.64, 0.66, "#1d2433"],
+        [0.18, 0.5, 0.58, "#d33a3a"],
+        [0.18, 0.36, 0.72, "#1d2433"],
+        [0.14, 0.22, 0.46, "#1f9d55"],
+      ];
+      for (const [u0, v, u1, ink] of lines) {
+        const from = at(u0, v);
+        const to = at(u1, v);
+        ctx.strokeStyle = ink;
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(to.x, to.y);
+        ctx.stroke();
+      }
+    }
+    // La bandeja con un plumón.
+    ctx.fillStyle = "#9aa1b0";
+    panel(0.06, -0.02, 0.94, 0.05);
+    ctx.fill();
+    const pen = at(0.7, 0.05);
+    ctx.fillStyle = "#1f4fd1";
+    ctx.fillRect(pen.x - 7, pen.y - 3, 12, 3);
+    ctx.restore();
+    const ends = [at(0, 0), at(1, 0), at(0, 1), at(1, 1)];
+    const xs = ends.map((point) => point.x);
+    const ys = ends.map((point) => point.y);
+    platform.boardBox = { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) + legs - Math.min(...ys) };
   }
 
   function drawSeat(platform, point, robot, t, hall, now) {
@@ -1397,6 +1493,7 @@ export function createOffice(host) {
       const add = platform.add;
       if (add && Math.hypot(point.x - add.x, point.y - add.y) <= add.r + 9) return { kind: "add", platform };
     }
+    for (const platform of platforms) if (inside(point, platform.boardBox, 4)) return { kind: "board", platform };
     for (const platform of platforms) {
       if (!inside(point, platform.card)) continue;
       if (platform.kind === "hall") return { kind: "board", platform };
@@ -1598,10 +1695,18 @@ export function createOffice(host) {
     const target = hit(toWorld(event));
     if (!target) return;
     setHover(null);
-    if (target.kind === "agent") host.openAgent(target.robot.agent.id);
-    else if (target.kind === "add") host.createAgent({ channelId: target.platform.channelId ?? null });
+    // El bot principal (su robot, su tarjeta o su pizarra): en pantallas anchas se abren su chat abajo y la pizarra a
+    // su lado (pedido). En el teléfono su robot abre el chat completo, y la tarjeta o la pizarra, solo la pizarra.
+    const wide = host.wide?.() ?? true;
+    if (target.kind === "agent") {
+      host.openAgent(target.robot.agent.id);
+      if (target.robot.agent.main && wide) showBoard();
+    } else if (target.kind === "add") host.createAgent({ channelId: target.platform.channelId ?? null });
     else if (target.kind === "channel") host.openChannel(target.platform.channelId);
-    else if (target.kind === "board") showBoard();
+    else if (target.kind === "board") {
+      if (wide) host.openMain();
+      showBoard();
+    }
   }
 
   function onContextMenu(event) {
@@ -1632,7 +1737,7 @@ export function createOffice(host) {
         platform: target.platform,
         title: `La pizarra de ${mainName()}`,
         text: live.board.trim() ? "El plan del trabajo que está repartiendo." : `Vacía: ${mainName()} anota aquí el plan cuando reparte un trabajo.`,
-        hint: "Clic: verla",
+        hint: host.wide?.() ? "Clic: su chat y la pizarra a su lado" : "Toca: ver la pizarra",
       });
     } else if (target.kind === "channel") {
       const team = teamOf(target.platform);
@@ -1678,7 +1783,8 @@ export function createOffice(host) {
       line("office-tip-role", info.agent.role);
       line("office-tip-state", describe(info.agent));
       line("office-tip-why", explain(info.agent));
-      const open = host.wide?.() ? "Clic: su chat y su ficha aquí" : "Clic: abrir su chat";
+      const wide = host.wide?.();
+      const open = wide ? (info.agent.main ? "Clic: su chat y su pizarra" : "Clic: su chat y su ficha aquí") : "Clic: abrir su chat";
       line("office-tip-hint", info.agent.main ? `${open} · Clic derecho: más opciones` : `${open} · Arrastra: cambiar de equipo · Clic derecho: opciones`);
     } else if (info.title) {
       line("strong", info.title);
@@ -1736,19 +1842,79 @@ export function createOffice(host) {
 
   function showBoard() {
     closeGuide();
+    fillBoard();
+    boardView.hidden = false;
+    placeBoard();
+    revealBoard();
+    boardView.querySelector("button")?.focus({ preventScroll: true });
+  }
+
+  function fillBoard() {
     const body = boardView.querySelector(".office-board-text");
+    const title = boardView.querySelector(".office-board-head h3");
+    if (title) title.textContent = `Pizarra de ${mainName()}`;
     body.replaceChildren();
     if (live.board.trim()) host.renderMarkdown(live.board, body);
-    else body.textContent = `La pizarra está vacía. ${mainName()} anota aquí el plan cuando reparte un trabajo: quién hace qué y en qué orden.`;
-    boardView.hidden = false;
-    boardView.querySelector("button")?.focus();
+    else body.textContent = `Está vacía. ${mainName()} anota aquí el plan cuando reparte un trabajo: quién hace qué y en qué orden.`;
+  }
+
+  function closeBoard() {
+    boardView.hidden = true;
+  }
+
+  /**
+   * La pizarra grande va al lado del bot principal: a la derecha de su plataforma (donde está la de verdad), o a la
+   * izquierda; si no cabe al costado (el teléfono), debajo.
+   */
+  function placeBoard() {
+    if (boardView.hidden) return;
+    const room = scroller.clientWidth;
+    const width = Math.min(400, room - 24);
+    const height = Math.max(180, Math.min(560, scroller.clientHeight - 24));
+    boardView.style.width = `${Math.round(width)}px`;
+    boardView.style.maxHeight = `${Math.round(height)}px`;
+    const hall = platforms.find((platform) => platform.kind === "hall");
+    const s = view.scale;
+    let x = (room - width) / 2;
+    let y = 12;
+    let beside = false;
+    if (hall) {
+      const half = (footprint(hall).w / 2) * s;
+      const cx = view.ox + hall.cx * s;
+      const top = view.oy + (origin(hall).y - CARD_H - 115) * s;
+      if (cx + half + 14 + width <= room - 10) {
+        x = cx + half + 14;
+        y = top;
+        beside = true;
+      } else if (cx - half - 14 - width >= 10) {
+        x = cx - half - 14 - width;
+        y = top;
+        beside = true;
+      } else {
+        x = Math.min(room - width - 12, Math.max(12, cx - width / 2));
+        y = view.oy + (hall.cy + footprint(hall).h / 2 + 22) * s;
+      }
+    }
+    // Al costado, dentro de lo que se ve de la escena; debajo, la escena se alarga si hace falta.
+    if (beside) y = Math.max(8, Math.min(y, view.height - boardView.offsetHeight - 8));
+    boardView.style.left = `${Math.round(x)}px`;
+    boardView.style.top = `${Math.round(y)}px`;
+  }
+
+  /** Desplaza la Oficina si la pizarra quedó fuera de la vista (dejando a la vista lo de arriba, el personaje). */
+  function revealBoard() {
+    const top = boardView.offsetTop;
+    const bottom = top + boardView.offsetHeight;
+    if (top >= scroller.scrollTop + 4 && bottom <= scroller.scrollTop + scroller.clientHeight - 4) return;
+    const target = Math.max(0, Math.min(top - 8, bottom - scroller.clientHeight + 12));
+    scroller.scrollTo({ top: target, behavior: reducedMotion ? "auto" : "smooth" });
   }
 
   // ---------- la guía ----------
 
   function openGuide() {
     if (!guide) return;
-    boardView.hidden = true;
+    closeBoard();
     guide.hidden = false;
     // La guía trae los mismos botones que el cartel de la oficina vacía: no se muestran los dos a la vez.
     root.classList.add("guide-open");
@@ -1887,7 +2053,13 @@ export function createOffice(host) {
     if (!message) return;
     if (message.role === "activity") {
       const payload = message.payload ?? null;
-      if (payload?.kind === "board-updated") live.board = typeof payload.board === "string" ? payload.board : "";
+      if (payload?.kind === "board-updated") {
+        live.board = typeof payload.board === "string" ? payload.board : "";
+        if (!boardView.hidden) {
+          fillBoard();
+          placeBoard();
+        }
+      }
       live.activity.set(agentId, { text: message.text, icon: activityIcon(message.text, payload), at: Date.now() });
       return;
     }
@@ -2006,12 +2178,13 @@ export function createOffice(host) {
     endDrag();
     clearPress();
     setHover(null);
-    boardView.hidden = true;
+    closeBoard();
     closeGuide();
   }
 
-  boardView.querySelector("button")?.addEventListener("click", () => {
-    boardView.hidden = true;
+  boardView.querySelector("button")?.addEventListener("click", closeBoard);
+  boardView.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeBoard();
   });
   scroller.addEventListener(
     "scroll",
@@ -2067,6 +2240,7 @@ export function createOffice(host) {
     select(agentId) {
       const changed = agentId !== selectedId;
       selectedId = agentId;
+      if (agentId && !host.agents().find((agent) => agent.id === agentId)?.main) closeBoard();
       if (!changed || !agentId || !visible) return;
       // Al abrirse el chat abajo, la Oficina se achica: espera a que se acomode y muéstralo.
       requestAnimationFrame(() =>
@@ -2081,6 +2255,7 @@ export function createOffice(host) {
     selectTeam(channelId) {
       const changed = channelId !== selectedTeam;
       selectedTeam = channelId;
+      if (channelId) closeBoard();
       if (!changed || !channelId || !visible) return;
       requestAnimationFrame(() =>
         requestAnimationFrame(() => {
@@ -2119,6 +2294,7 @@ export function createOffice(host) {
           center: screen({ x: platform.cx, y: platform.cy }),
           card: platform.card ? screen({ x: platform.card.x + platform.card.w / 2, y: platform.card.y + platform.card.h / 2 }) : null,
           add: platform.add ? screen(platform.add) : null,
+          board: platform.boardBox ? screen({ x: platform.boardBox.x + platform.boardBox.w / 2, y: platform.boardBox.y + platform.boardBox.h / 2 }) : null,
         })),
         scale: view.scale,
         fill: view.fill,

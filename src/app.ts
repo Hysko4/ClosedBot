@@ -519,6 +519,13 @@ export function createApp(options: AppOptions): App {
   // Eliminar lo mueve a «Canales eliminados»; desde allí se restaura o se borra para siempre.
   route("DELETE", "/api/channels/:id", (ctx) => ({ channel: service.deleteChannel(param(ctx, 0)) }));
 
+  // MCP del equipo: los de este PC que tienen todos sus agentes (nunca se manda su configuración).
+  route("GET", "/api/channels/:id/mcp", (ctx) => ({ mcp: service.teamMcp(param(ctx, 0)) }));
+  route("PUT", "/api/channels/:id/mcp", async (ctx) => {
+    const body = (await readJson(ctx.req)) as { names?: unknown } | null;
+    return { mcp: service.setTeamMcp(param(ctx, 0), body?.names) };
+  });
+
   route("POST", "/api/channels/:id/restore", (ctx) => ({ channel: service.restoreChannel(param(ctx, 0)) }));
 
   route("DELETE", "/api/channels/:id/permanent", (ctx) => {

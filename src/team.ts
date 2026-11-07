@@ -30,7 +30,9 @@ export const TOOL_FORGET_MEMORY = "forget_memory";
 export const TOOL_SEARCH_MEMORIES = "search_memories";
 export const TOOL_LIST_MEMORIES = "list_memories";
 export const TOOL_SET_MEMORY_INCLUSION = "set_memory_inclusion";
+/** De antes de la 0.9.13: un hilo de Codex de entonces todavía puede pedirla (ahora el avance sale de la lista). */
 export const TOOL_REPORT_PROGRESS = "report_progress";
+export const TOOL_UPDATE_CHECKLIST = "update_checklist";
 
 /** Herramientas de recuerdos (todos los agentes). */
 export const MEMORY_TOOLS = [TOOL_REMEMBER, TOOL_FORGET_MEMORY, TOOL_SEARCH_MEMORIES, TOOL_LIST_MEMORIES, TOOL_SET_MEMORY_INCLUSION] as const;
@@ -43,7 +45,7 @@ export const TEAM_TOOLS = [
   TOOL_CREATE_ROUTINE,
   TOOL_LIST_ROUTINES,
   TOOL_DELETE_ROUTINE,
-  TOOL_REPORT_PROGRESS,
+  TOOL_UPDATE_CHECKLIST,
   ...MEMORY_TOOLS,
 ] as const;
 
@@ -85,6 +87,16 @@ export const SET_MEMORY_INCLUSION_DESCRIPTION =
 export const REPORT_PROGRESS_DESCRIPTION =
   "Informa cuánto llevas de la tarea que te encargaron (0 a 100) y en qué paso vas, en pocas palabras. El usuario lo ve como una barra sobre tu personaje en la Oficina. Úsala al empezar una tarea de varios pasos, después de cada paso importante y con 100 al entregar. Es solo un aviso: sigue trabajando.";
 export const PROGRESS_LIMITS = { step: 120 } as const;
+
+export const UPDATE_CHECKLIST_DESCRIPTION =
+  "Muestra al usuario tu lista de pasos de la tarea que te encargaron, con el estado de cada uno: done (hecho), in_progress (en curso) o pending (pendiente). La ve como una tarjeta en la conversación donde te lo pidieron (en el canal de un equipo, junto a las de tus compañeros) y como tu avance en la Oficina. Cada llamada reemplaza tu lista completa: créala al empezar una tarea de varios pasos, actualízala al terminar cada paso y al final márcalos todos done. Pasa new_task true solo si empiezas otra tarea y la lista anterior quedó sin terminar. Es solo un aviso: sigue trabajando.";
+export const CHECKLIST_LIMITS = { title: 80, step: 120, steps: 20 } as const;
+export const CHECKLIST_STATUSES = ["done", "in_progress", "pending"] as const;
+export type ChecklistStatus = (typeof CHECKLIST_STATUSES)[number];
+export interface ChecklistStep {
+  text: string;
+  status: ChecklistStatus;
+}
 
 export const CREATE_CHANNEL_DESCRIPTION =
   "Crea un canal: una conversación del usuario con varios agentes a la vez. El encargado responde lo que no nombra a nadie y reparte el trabajo; con @Nombre el usuario le habla a uno en particular. Al armar un equipo, crea su canal (uno por equipo, con el nombre del proyecto y el líder como encargado); créalo también cuando el usuario lo pida. Antes revisa con list_agents los canales que ya existen.";
@@ -232,15 +244,30 @@ const BASE_DYNAMIC_TOOLS = [
   },
   {
     type: "function",
-    name: TOOL_REPORT_PROGRESS,
-    description: REPORT_PROGRESS_DESCRIPTION,
+    name: TOOL_UPDATE_CHECKLIST,
+    description: UPDATE_CHECKLIST_DESCRIPTION,
     inputSchema: {
       type: "object",
       properties: {
-        percent: { type: "integer", minimum: 0, maximum: 100, description: "Cuánto llevas, de 0 a 100." },
-        step: { type: "string", maxLength: PROGRESS_LIMITS.step, description: "En qué paso vas, en pocas palabras." },
+        title: { type: "string", maxLength: CHECKLIST_LIMITS.title, description: "Título corto de la tarea (opcional)." },
+        steps: {
+          type: "array",
+          minItems: 1,
+          maxItems: CHECKLIST_LIMITS.steps,
+          description: "Todos los pasos de la tarea, en orden, cada uno con su estado.",
+          items: {
+            type: "object",
+            properties: {
+              text: { type: "string", minLength: 1, maxLength: CHECKLIST_LIMITS.step, description: "El paso, en pocas palabras." },
+              status: { type: "string", enum: [...CHECKLIST_STATUSES], description: "done (hecho), in_progress (en curso) o pending (pendiente)." },
+            },
+            required: ["text", "status"],
+            additionalProperties: false,
+          },
+        },
+        new_task: { type: "boolean", description: "true solo para una tarea nueva cuando la lista anterior quedó sin terminar." },
       },
-      required: ["percent"],
+      required: ["steps"],
       additionalProperties: false,
     },
   },
@@ -642,6 +669,55 @@ export function parseReportProgressArgs(value: unknown): { percent: number; step
   const percent = Math.max(0, Math.min(100, Math.round(raw)));
   const step = typeof args.step === "string" ? args.step.replace(/\s+/g, " ").trim().slice(0, PROGRESS_LIMITS.step) : "";
   return { percent, step };
+}
+
+export interface ChecklistArgs {
+  title: string;
+  steps: ChecklistStep[];
+  newTask: boolean;
+}
+
+/** Acepta la lista como la piden las herramientas o, si llega como texto, una línea por paso con ✓, ✱ u ○ adelante. */
+export function parseChecklistArgs(value: unknown): ChecklistArgs {
+  const args = argsRecord(value);
+  const title = typeof args.title === "string" ? args.title.replace(/\s+/g, " ").trim().slice(0, CHECKLIST_LIMITS.title) : "";
+  const raw = typeof args.steps === "string" ? args.steps.split(/\r?\n/).filter((line) => line.trim()) : args.steps;
+  if (!Array.isArray(raw) || !raw.length) throw new Error("`steps` debe ser la lista de pasos, cada uno con text y status (done, in_progress o pending).");
+  if (raw.length > CHECKLIST_LIMITS.steps) throw new Error(`La lista admite hasta ${CHECKLIST_LIMITS.steps} pasos: junta algunos.`);
+  const steps = raw.map((item: unknown, index: number): ChecklistStep => {
+    const step = typeof item === "string" ? checklistLine(item) : item;
+    if (typeof step !== "object" || step === null || Array.isArray(step)) throw new Error(`El paso ${index + 1} debe tener text y status.`);
+    const record = step as Record<string, unknown>;
+    const text = typeof record.text === "string" ? record.text.replace(/\s+/g, " ").trim().slice(0, CHECKLIST_LIMITS.step) : "";
+    if (!text) throw new Error(`El paso ${index + 1} no tiene texto.`);
+    return { text, status: checklistStatus(record.status) };
+  });
+  return { title, steps, newTask: args.new_task === true || args.newTask === true };
+}
+
+function checklistStatus(value: unknown): ChecklistStatus {
+  const key = typeof value === "string" ? value.trim().toLowerCase().replace(/[\s-]+/g, "_") : "";
+  if (["done", "completed", "complete", "finished", "hecho", "listo", "terminado"].includes(key)) return "done";
+  if (["in_progress", "inprogress", "doing", "active", "running", "working", "en_curso", "haciendo"].includes(key)) return "in_progress";
+  return "pending";
+}
+
+function checklistLine(line: string): { text: string; status: ChecklistStatus } {
+  const match = /^\s*(?:[-*•]\s*)?(✓|✔|☑|\[x\]|✱|\*|\[~\]|○|◯|☐|\[ \])?\s*(.*)$/i.exec(line);
+  const mark = (match?.[1] ?? "").toLowerCase();
+  const status: ChecklistStatus = ["✓", "✔", "☑", "[x]"].includes(mark) ? "done" : ["✱", "*", "[~]"].includes(mark) ? "in_progress" : "pending";
+  return { text: match?.[2] ?? line, status };
+}
+
+/** Cuánto lleva una lista: los pasos hechos sobre el total (100 solo con todos hechos). */
+export function checklistPercent(steps: readonly ChecklistStep[]): number {
+  if (!steps.length) return 0;
+  return Math.round((steps.filter((step) => step.status === "done").length / steps.length) * 100);
+}
+
+/** El paso que se nombra en la Oficina: el que está en curso, si no el siguiente pendiente, si no el último. */
+export function checklistStep(steps: readonly ChecklistStep[]): string {
+  return (steps.find((step) => step.status === "in_progress") ?? steps.find((step) => step.status === "pending") ?? steps.at(-1))?.text ?? "";
 }
 
 export function parseMemoryIdArgs(value: unknown): { id: string } {

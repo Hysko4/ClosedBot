@@ -54,6 +54,10 @@ import {
   TOOL_DELETE_ROUTINE,
   TOOL_REPORT_PROGRESS,
   REPORT_PROGRESS_DESCRIPTION,
+  TOOL_UPDATE_CHECKLIST,
+  UPDATE_CHECKLIST_DESCRIPTION,
+  CHECKLIST_LIMITS,
+  CHECKLIST_STATUSES,
   TOOL_FORGET_MEMORY,
   TOOL_LIST_AGENTS,
   TOOL_LIST_MEMORIES,
@@ -74,6 +78,7 @@ import {
   TOOL_DELETE_AGENTS,
 } from "../team.js";
 import { fromClaudeStatus, type McpListing } from "../mcp.js";
+import { type SharedMcpServer, sharedFromParams, sharedKey } from "../mcp-share.js";
 import { MEMORY_LIMITS } from "../memories.js";
 import { VERSION } from "../version.js";
 import type { AccessLevel, AgentClient, ProviderId } from "./client.js";
@@ -102,6 +107,8 @@ interface ThreadConfig {
   access: AccessLevel;
   /** Herramientas de ClosedBot que ve el agente (el bot principal tiene además las de equipos). Por defecto, las de todos. */
   teamTools?: string[];
+  /** Los MCP de este PC que le diste a su equipo (ver mcp-share.ts). */
+  shared?: SharedMcpServer[];
 }
 
 interface ActiveTurn {
@@ -423,6 +430,14 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
     }
 
     const mcpServers: NonNullable<Options["mcpServers"]> = { [TEAM_NAMESPACE]: this.#createTeamServer(threadId, config.teamTools ?? [...TEAM_TOOLS]) };
+    // Los MCP que le diste a su equipo (los mismos que usa tu Codex o tu Claude Code en este PC).
+    for (const server of config.shared ?? []) {
+      if (mcpServers[server.name]) continue;
+      mcpServers[server.name] =
+        server.transport === "http"
+          ? { type: "http", url: server.url ?? "", headers: server.headers }
+          : { type: "stdio", command: server.command ?? "", args: server.args, env: server.env };
+    }
     if (this.#options.playwright) {
       mcpServers.playwright = {
         type: "stdio",
@@ -444,7 +459,11 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
       },
       includePartialMessages: true,
       additionalDirectories: allowedDirs.filter((dir) => dir !== resolve(config.cwd)),
-      canUseTool: createPermissionPolicy(config.access, allowedDirs),
+      canUseTool: createPermissionPolicy(
+        config.access,
+        allowedDirs,
+        (config.shared ?? []).map((server) => server.name),
+      ),
       mcpServers,
       // Segunda barrera para lo mismo: ninguna fuente de ajustes puede volver a activar los conectores.
       settings: { disableClaudeAiConnectors: true, ...(local ? { env: { ANTHROPIC_BASE_URL: local.baseUrl, ANTHROPIC_API_KEY: "local" } } : {}) },
@@ -790,6 +809,25 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
         (args) => call(TOOL_REPORT_PROGRESS, args),
       ),
       tool(
+        TOOL_UPDATE_CHECKLIST,
+        UPDATE_CHECKLIST_DESCRIPTION,
+        {
+          title: z.string().max(CHECKLIST_LIMITS.title).optional().describe("Título corto de la tarea (opcional)."),
+          steps: z
+            .array(
+              z.object({
+                text: z.string().min(1).max(CHECKLIST_LIMITS.step).describe("El paso, en pocas palabras."),
+                status: z.enum(CHECKLIST_STATUSES).describe("done (hecho), in_progress (en curso) o pending (pendiente)."),
+              }),
+            )
+            .min(1)
+            .max(CHECKLIST_LIMITS.steps)
+            .describe("Todos los pasos de la tarea, en orden, cada uno con su estado."),
+          new_task: z.boolean().optional().describe("true solo para una tarea nueva cuando la lista anterior quedó sin terminar."),
+        },
+        (args) => call(TOOL_UPDATE_CHECKLIST, args),
+      ),
+      tool(
         TOOL_REMEMBER,
         REMEMBER_DESCRIPTION,
         {
@@ -911,13 +949,15 @@ const HARMLESS_TOOLS = new Set(["WebSearch", "WebFetch", "TodoWrite", "Task", "A
  * del sandbox (aprobado automáticamente) y las ediciones dentro de las carpetas permitidas se
  * aceptan solas; esta función decide el resto sin preguntar a nadie.
  */
-export function createPermissionPolicy(access: AccessLevel, allowedDirs: string[]): CanUseTool {
+export function createPermissionPolicy(access: AccessLevel, allowedDirs: string[], teamMcp: readonly string[] = []): CanUseTool {
   return async (toolName, input): Promise<PermissionResult> => {
     if (toolName === "AskUserQuestion") return { behavior: "deny", message: NO_USER_MESSAGE };
     if (access === "total") return { behavior: "allow", updatedInput: input };
     if (toolName.startsWith(`mcp__${TEAM_NAMESPACE}__`) || toolName.startsWith("mcp__playwright__")) {
       return { behavior: "allow", updatedInput: input };
     }
+    // Los MCP que le diste a su equipo: dárselos ya es el permiso.
+    if (teamMcp.some((name) => toolName.startsWith(`mcp__${name}__`))) return { behavior: "allow", updatedInput: input };
     if (HARMLESS_TOOLS.has(toolName)) return { behavior: "allow", updatedInput: input };
     if (READ_TOOLS.has(toolName) || WRITE_TOOLS.has(toolName)) {
       const target = toolPath(input);
@@ -1032,6 +1072,7 @@ function readThreadConfig(params: unknown): ThreadConfig {
     additionalDirectories: [...new Set([cwd, ...roots])],
     access: sandbox === "danger-full-access" ? "total" : "carpeta",
     teamTools: readTeamTools(params),
+    shared: sharedFromParams(params),
   };
 }
 
@@ -1053,7 +1094,8 @@ function sameRuntimeConfig(a: ThreadConfig, b: ThreadConfig): boolean {
     a.effort === b.effort &&
     a.developerInstructions === b.developerInstructions &&
     a.additionalDirectories.join("\n") === b.additionalDirectories.join("\n") &&
-    teamToolsKey(a) === teamToolsKey(b)
+    teamToolsKey(a) === teamToolsKey(b) &&
+    sharedKey(a.shared ?? []) === sharedKey(b.shared ?? [])
   );
 }
 

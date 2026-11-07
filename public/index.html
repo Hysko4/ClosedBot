@@ -179,13 +179,21 @@
             </div>
           </aside>
           <div class="office-board" role="dialog" aria-label="Pizarra" hidden>
-            <header class="office-board-head">
-              <h3>Pizarra</h3>
-              <button type="button" class="round-button small-round" aria-label="Cerrar la pizarra">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>
-              </button>
-            </header>
-            <div class="office-board-text md"></div>
+            <div class="office-board-face">
+              <header class="office-board-head">
+                <h3>Pizarra</h3>
+                <button type="button" class="office-board-close" aria-label="Cerrar la pizarra">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>
+                </button>
+              </header>
+              <div class="office-board-text md"></div>
+            </div>
+            <div class="office-board-tray" aria-hidden="true">
+              <span class="board-marker board-marker-blue"></span>
+              <span class="board-marker board-marker-red"></span>
+              <span class="board-marker board-marker-green"></span>
+              <span class="board-eraser"></span>
+            </div>
           </div>
         </section>
 
@@ -498,6 +506,11 @@
           <section class="team-tools-section">
             <h3 class="list-title">MCP del equipo</h3>
             <div class="tool-chips" id="team-tools-mcp"></div>
+          </section>
+          <section class="team-tools-section">
+            <h3 class="list-title">Darle MCP al equipo</h3>
+            <p class="muted small">Los que configuraste en tu Codex o tu Claude Code. El que actives lo tienen todos sus agentes, con cualquier IA.</p>
+            <ul class="team-share-list" id="team-share-list"></ul>
           </section>
           <section class="team-tools-section">
             <h3 class="list-title">Habilidades del equipo</h3>

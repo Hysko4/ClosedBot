@@ -8,6 +8,7 @@ import {
   TEAM_NAMESPACE,
   TOOL_ASK_USER,
   TOOL_REPORT_PROGRESS,
+  TOOL_UPDATE_CHECKLIST,
   TOOL_CREATE_AGENT,
   TOOL_CREATE_CHANNEL,
   TOOL_CREATE_ROUTINE,
@@ -51,7 +52,9 @@ export interface DemoClientOptions {
  *   - `/equipo` lista a los compañeros; `/lento` transmite la respuesta despacio;
  *   - `/pregunta [¿Texto? | Opción A | Opción B]` hace una pregunta con opciones al usuario;
  *   - `/rutina HH:MM Nombre` o `/rutina cada N Nombre` crea una rutina; `/rutinas` las lista;
- *   - `/avance N paso` informa que lleva N % de su tarea (report_progress);
+ *   - `/avance N paso` informa que lleva N % de su tarea (report_progress, de antes de la 0.9.13);
+ *   - `/lista Título | ✓ hecho | ✱ en curso | ○ pendiente` lleva su lista de tareas (update_checklist);
+ *     `/lista-nueva …` igual, pero como una tarea nueva;
  *   - `/imagen descripción` «genera» una imagen (como el generador de imágenes de Codex);
  *   - solo para el bot principal: `/crear Nombre | Rol | Proyecto | Aspecto` crea un agente (el
  *     aspecto es opcional), `/ajustar Nombre | Rol nuevo | Aspecto nuevo` le cambia el rol o el aspecto,
@@ -171,6 +174,16 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
           notes.push(`Llevo ${progress[1]} %.`);
         } catch (error) {
           notes.push(`No pude informar el avance: ${errorMessage(error)}`);
+        }
+      }
+      const checklist = /^\/lista(-nueva)?\s+(.*)$/m.exec(body);
+      if (checklist) {
+        const [title = "", ...steps] = (checklist[2] ?? "").split("|").map((part) => part.trim());
+        try {
+          await this.#callTool(threadId, state.turnId, TOOL_UPDATE_CHECKLIST, { title, steps: steps.filter(Boolean).join("\n"), new_task: Boolean(checklist[1]) });
+          notes.push("Actualicé mi lista de tareas.");
+        } catch (error) {
+          notes.push(`No pude actualizar la lista: ${errorMessage(error)}`);
         }
       }
       const question = /^\/pregunta\b(.*)$/m.exec(body);

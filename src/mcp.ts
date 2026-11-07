@@ -22,6 +22,8 @@ export interface McpServerView {
   /** Nombres de sus herramientas (las que informó al conectarse). */
   tools: string[];
   error: string | null;
+  /** Qué es, en una frase (ver mcp-share.ts). */
+  description?: string;
 }
 
 /** Lo que responden los clientes de ClosedBot a «closedbot/mcp». */

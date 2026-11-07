@@ -41,6 +41,7 @@ import {
 } from "./protocol.js";
 import { spawnTarget, stopProcessTree } from "./spawn.js";
 import { antigravityUsage, grokUsage } from "./usage.js";
+import { type SharedMcpServer, sharedFromParams } from "../mcp-share.js";
 
 interface ClientEvents {
   notification: [notification: AppServerNotification];
@@ -145,6 +146,8 @@ interface ThreadConfig {
   model: string | null;
   effort: string | null;
   tools: McpToolSpec[];
+  /** Los MCP de este PC que le diste a su equipo (ver mcp-share.ts). */
+  shared: SharedMcpServer[];
 }
 
 interface McpToolSpec {
@@ -427,7 +430,7 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
   async #startThread(params: unknown): Promise<unknown> {
     const config = threadConfig(params);
     const key = randomBytes(12).toString("hex");
-    const servers = await this.#mcpServers(key, config.tools);
+    const servers = await this.#mcpServers(key, config.tools, config.shared);
     let response: unknown;
     try {
       response = await this.#withAuth(() => this.#call("session/new", { cwd: config.cwd, mcpServers: servers }, SESSION_TIMEOUT_MS));
@@ -471,7 +474,7 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
       throw new AppServerError(`${this.#options.label} no puede retomar conversaciones anteriores.`, -32601);
     }
     const key = randomBytes(12).toString("hex");
-    const servers = await this.#mcpServers(key, config.tools);
+    const servers = await this.#mcpServers(key, config.tools, config.shared);
     const thread: AcpThread = {
       id: threadId,
       ...withoutTools(config),
@@ -939,13 +942,22 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
 
   // ---------- puente MCP de las herramientas del equipo ----------
 
-  async #mcpServers(key: string, tools: McpToolSpec[]): Promise<unknown[]> {
+  async #mcpServers(key: string, tools: McpToolSpec[], shared: SharedMcpServer[] = []): Promise<unknown[]> {
     this.#bridgeTools.set(key, tools);
-    if (!tools.length) return [];
+    // Los de su equipo, como los pide ACP (los remotos solo si el programa dice que los acepta).
+    const http = getRecord(getRecord(this.#capabilities, "mcpCapabilities"), "http") !== null || getRecord(this.#capabilities, "mcpCapabilities")?.http === true;
+    const team = shared.flatMap((server): Array<Record<string, unknown>> =>
+      server.transport === "stdio"
+        ? [{ name: server.name, command: server.command, args: server.args, env: Object.entries(server.env).map(([name, value]) => ({ name, value })) }]
+        : http
+          ? [{ type: "http", name: server.name, url: server.url, headers: Object.entries(server.headers).map(([name, value]) => ({ name, value })) }]
+          : [],
+    );
+    if (!tools.length) return team;
     const bridge = await this.#ensureBridge();
     const env = BRIDGE_ENV.filter((name) => process.env[name] !== undefined).map((name) => ({ name, value: String(process.env[name]) }));
     env.push({ name: "CLOSEDBOT_BRIDGE", value: bridge.path }, { name: "CLOSEDBOT_BRIDGE_TOKEN", value: bridge.token }, { name: "CLOSEDBOT_BRIDGE_KEY", value: key });
-    return [{ name: TEAM_NAMESPACE, command: this.#options.nodePath ?? process.execPath, args: [this.#options.bridgeScript ?? DEFAULT_BRIDGE], env }];
+    return [{ name: TEAM_NAMESPACE, command: this.#options.nodePath ?? process.execPath, args: [this.#options.bridgeScript ?? DEFAULT_BRIDGE], env }, ...team];
   }
 
   #ensureBridge(): Promise<{ path: string; token: string }> {
@@ -1164,6 +1176,7 @@ function threadConfig(params: unknown): ThreadConfig {
     model: getString(params, "model"),
     effort: getString(params, "effort"),
     tools: teamTools(params),
+    shared: sharedFromParams(params),
   };
 }
 

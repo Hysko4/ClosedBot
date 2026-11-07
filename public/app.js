@@ -1054,7 +1054,7 @@ function renderBotCard() {
   if (main.state === "working") {
     status.textContent = "Trabajando…";
     status.dataset.tone = "working";
-  } else if (hasPendingDecision(main.id) || main.preview?.startsWith("Pregunta:")) {
+  } else if (hasPendingDecision(main.id) || (main.preview?.startsWith("Pregunta:") && !state.messages.has(main.id))) {
     status.textContent = "Te hizo una pregunta";
     status.dataset.tone = "question";
   } else if (main.state === "paused") {
@@ -1409,8 +1409,20 @@ function renderChannelHeader(channel) {
   updatePlaceholder();
 }
 
+/**
+ * Espera tu respuesta solo si su última pregunta sigue sin contestar y no le escribiste después (como en el servidor):
+ * una tarjeta vieja que dejaste sin tocar porque le respondiste escribiendo ya no cuenta.
+ */
 function hasPendingDecision(agentId) {
-  return (state.messages.get(agentId) ?? []).some((message) => message.role === "decision" && !Number.isInteger(message.payload?.answer));
+  const messages = state.messages.get(agentId) ?? [];
+  let last = -1;
+  messages.forEach((message, index) => {
+    if (message.role === "decision") last = index;
+  });
+  if (last < 0) return false;
+  const decision = messages[last];
+  if (Number.isInteger(decision.payload?.answer) || decision.payload?.answer != null) return false;
+  return !messages.slice(last + 1).some((message) => message.role === "user");
 }
 
 function updatePlaceholder() {
@@ -1524,7 +1536,7 @@ async function loadOlder() {
 function orderForDisplay(messages) {
   const lastStep = new Map();
   messages.forEach((message, index) => {
-    if (message.role === "activity" && message.turnId) lastStep.set(message.turnId, index);
+    if (isStep(message) && message.turnId) lastStep.set(message.turnId, index);
   });
   const ordered = [];
   const waiting = new Map();
@@ -1535,12 +1547,17 @@ function orderForDisplay(messages) {
       return;
     }
     ordered.push(message);
-    if (message.role === "activity" && lastStep.get(message.turnId) === index && waiting.has(message.turnId)) {
+    if (isStep(message) && lastStep.get(message.turnId) === index && waiting.has(message.turnId)) {
       ordered.push(...waiting.get(message.turnId));
       waiting.delete(message.turnId);
     }
   });
   return ordered;
+}
+
+/** Lo que se ve como paso de un turno (antes de su respuesta): la actividad y la lista de tareas. */
+function isStep(message) {
+  return message.role === "activity" || message.role === "checklist";
 }
 
 function renderAllMessages() {
@@ -1581,7 +1598,7 @@ function upsertMessage(target, message) {
   if (existing) existing.replaceWith(node);
   else {
     // Un paso nuevo va antes de la respuesta de su turno, para que esta quede al final.
-    const answer = merged.role === "activity" && merged.turnId
+    const answer = isStep(merged) && merged.turnId
       ? list.find((item) => item.role === "assistant" && item.turnId === merged.turnId)
       : null;
     const answerNode = answer ? elements.get(answer.id) : null;
@@ -1642,6 +1659,7 @@ function flushDirty() {
 
 function buildMessage(message) {
   if (message.role === "decision") return buildDecision(message);
+  if (message.role === "checklist") return buildChecklist(message);
   const node = document.createElement("div");
   node.dataset.id = message.id;
   node.dataset.status = message.status;
@@ -1843,6 +1861,74 @@ function buildMessage(message) {
   }
   node.append(bubble, meta);
   if (message.role === "assistant" && message.status === "completed" && canReadAloud() && message.text.trim()) node.append(messageTools(message));
+  return node;
+}
+
+const CHECKLIST_STATUS = { done: "Hecho", in_progress: "En curso", pending: "Pendiente" };
+
+/**
+ * La lista de tareas (pedido: «este mismo cuadrado… de progreso por tareas»): ✓ hecho, girando en curso, ○ pendiente.
+ * En el chat de un agente es la suya; en el canal de un equipo junta las de todos, cada una con su nombre.
+ */
+function buildChecklist(message) {
+  const node = document.createElement("div");
+  node.className = "msg msg-checklist";
+  node.dataset.id = message.id;
+  node.title = formatTime(message.updatedAt ?? message.createdAt);
+  const lists = (Array.isArray(message.payload?.lists) ? message.payload.lists : []).filter((list) => Array.isArray(list?.steps));
+  const team = Boolean(message.channelId);
+  const steps = lists.flatMap((list) => list.steps);
+  const done = steps.filter((step) => step.status === "done").length;
+  const card = document.createElement("section");
+  card.className = "checklist";
+  card.dataset.done = String(steps.length > 0 && done === steps.length);
+  const head = document.createElement("header");
+  head.className = "checklist-head";
+  const title = document.createElement("span");
+  title.className = "checklist-title";
+  title.textContent = team ? "Tareas del equipo" : lists[0]?.title || "Tareas";
+  const count = document.createElement("span");
+  count.className = "checklist-count";
+  count.textContent = `${done} de ${steps.length}`;
+  head.append(title, count);
+  card.append(head);
+  for (const list of lists) {
+    if (team) {
+      const agent = findAgent(list.agentId);
+      const who = document.createElement("div");
+      who.className = "checklist-who";
+      const avatar = document.createElement("span");
+      avatar.className = "checklist-avatar";
+      avatar.setAttribute("aria-hidden", "true");
+      if (agent) avatar.append(blobAvatar(agent));
+      const name = document.createElement("span");
+      name.textContent = [agent?.name ?? list.name ?? "", list.title].filter(Boolean).join(" · ");
+      who.append(avatar, name);
+      card.append(who);
+    }
+    const items = document.createElement("ul");
+    items.className = "checklist-steps";
+    for (const step of list.steps) {
+      const status = CHECKLIST_STATUS[step.status] ? step.status : "pending";
+      const item = document.createElement("li");
+      item.className = "checklist-step";
+      item.dataset.status = status;
+      const mark = document.createElement("span");
+      mark.className = "checklist-mark";
+      mark.setAttribute("aria-hidden", "true");
+      if (status === "done") mark.append(icon("check"));
+      const label = document.createElement("span");
+      label.className = "visually-hidden";
+      label.textContent = `${CHECKLIST_STATUS[status]}: `;
+      const text = document.createElement("span");
+      text.className = "checklist-text";
+      text.textContent = String(step.text ?? "");
+      item.append(mark, label, text);
+      items.append(item);
+    }
+    card.append(items);
+  }
+  node.append(card);
   return node;
 }
 
@@ -6816,6 +6902,7 @@ const MCP_SOURCES = {
   enterprise: "Lo configuró tu organización",
   dynamic: "Agregado en su sesión",
   codex: "Tu Codex",
+  team: "Lo recibe por su equipo",
 };
 /** Los que puede usar: conectados o que ClosedBot le pasa. */
 const MCP_USABLE = new Set(["connected", "included", "configured"]);
@@ -6905,6 +6992,12 @@ function mcpItem(server) {
     .filter(Boolean)
     .join(" · ");
   summary.append(name, meta);
+  if (server.description) {
+    const what = document.createElement("p");
+    what.className = "item-meta mcp-what";
+    what.textContent = server.description;
+    summary.append(what);
+  }
   body.append(summary);
   if (server.error) {
     const error = document.createElement("p");
@@ -6935,13 +7028,76 @@ function openAgentMcp(agentId) {
 
 // MCP y habilidades de un equipo (menú de su tarjeta en la Oficina).
 
-const teamTools = { channelId: null, skills: new Map(), loading: new Set() }; // skills: agentId -> sus habilidades
+const teamTools = { channelId: null, skills: new Map(), loading: new Set(), shared: null }; // skills: agentId -> sus habilidades
+
+/** Los MCP de este PC que se le pueden dar al equipo (y los que ya tiene). */
+async function loadTeamShared(channelId) {
+  try {
+    const data = await api(`/api/channels/${encodeURIComponent(channelId)}/mcp`);
+    if (teamTools.channelId === channelId) teamTools.shared = data.mcp;
+  } catch (error) {
+    if (teamTools.channelId === channelId) teamTools.shared = { available: [], selected: [], error: error.message };
+  }
+  renderTeamTools();
+}
+
+async function toggleTeamShared(channelId, name, on) {
+  const current = teamTools.shared?.selected ?? [];
+  const names = on ? [...new Set([...current, name])] : current.filter((item) => item !== name);
+  try {
+    const data = await api(`/api/channels/${encodeURIComponent(channelId)}/mcp`, { method: "PUT", body: { names } });
+    if (teamTools.channelId === channelId) teamTools.shared = data.mcp;
+    const channel = findChannel(channelId);
+    for (const agent of channel ? channelMembers(channel) : []) void loadMcp(agent.id, { refresh: true });
+    showToast(on ? `Sus agentes tendrán «${name}» desde su próximo mensaje.` : `«${name}» ya no se les da.`);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+  renderTeamTools();
+}
+
+function renderTeamShared(channel) {
+  const list = $("#team-share-list");
+  const shared = teamTools.shared;
+  if (!shared) {
+    list.dataset.empty = "Buscando los MCP de este PC…";
+    return void list.replaceChildren();
+  }
+  list.dataset.empty = shared.error ?? "No encontré MCP configurados en tu Codex ni en tu Claude Code.";
+  list.replaceChildren(
+    ...shared.available.map((server) => {
+      const on = shared.selected.includes(server.name);
+      const item = document.createElement("li");
+      item.className = "team-share-item";
+      const body = document.createElement("div");
+      body.className = "team-share-body";
+      const name = document.createElement("p");
+      name.className = "item-name";
+      name.textContent = server.name;
+      const what = document.createElement("p");
+      what.className = "item-meta";
+      what.textContent = `${server.description} · ${server.origin === "claude" ? "De tu Claude Code" : "De tu Codex"}`;
+      body.append(name, what);
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "switch";
+      toggle.setAttribute("role", "switch");
+      toggle.setAttribute("aria-checked", String(on));
+      toggle.setAttribute("aria-label", on ? `Quitarle «${server.name}» al equipo` : `Darle «${server.name}» al equipo`);
+      toggle.addEventListener("click", () => void toggleTeamShared(channel.id, server.name, !on));
+      item.append(body, toggle);
+      return item;
+    }),
+  );
+}
 
 function openTeamTools(channelId) {
   const channel = findChannel(channelId);
   if (!channel) return;
   teamTools.channelId = channel.id;
+  teamTools.shared = null;
   openDialog($("#team-tools-dialog"));
+  void loadTeamShared(channel.id);
   // Lo de cada uno: si se revisó hace poco, el servidor responde enseguida con eso.
   for (const agent of channelMembers(channel)) {
     void loadMcp(agent.id);
@@ -7013,9 +7169,12 @@ function renderTeamTools() {
   }
   const of = (count) => (members.length > 1 && count < members.length ? ` · ${count} de ${members.length}` : "");
   $("#team-tools-mcp").replaceChildren(
-    ...[...servers.values()].map(({ server, count }) => toolChip(`${mcpName(server)}${count ? of(count) : ""}`, server.status, server.error ?? MCP_STATES[server.status])),
+    ...[...servers.values()].map(({ server, count }) =>
+      toolChip(`${mcpName(server)}${count ? of(count) : ""}`, server.status, server.error ?? server.description ?? MCP_STATES[server.status]),
+    ),
   );
   $("#team-tools-mcp").dataset.empty = checking && !servers.size ? "Revisando…" : "Ninguno";
+  renderTeamShared(channel);
   $("#team-tools-skills").replaceChildren(...[...skills.values()].map(({ name, count }) => toolChip(`${name}${of(count)}`, null)));
   $("#team-tools-skills").dataset.empty = "Ninguna";
   $("#team-tools-members").replaceChildren(...members.map((agent) => teamToolsMember(agent, channel)));
@@ -7060,7 +7219,7 @@ function teamToolsMember(agent, channel) {
   if (mcpRequests.has(agent.id) && !view) mcp.dataset.empty = "Revisando…";
   else if (view?.error && !view.servers.length) mcp.dataset.empty = view.error;
   else mcp.dataset.empty = "Ninguno";
-  mcp.append(...(view?.servers ?? []).map((server) => toolChip(mcpName(server), server.status, server.error ?? MCP_STATES[server.status])));
+  mcp.append(...(view?.servers ?? []).map((server) => toolChip(mcpName(server), server.status, server.error ?? server.description ?? MCP_STATES[server.status])));
   const skills = document.createElement("div");
   skills.className = "tool-chips";
   const own = teamTools.skills.get(agent.id);
