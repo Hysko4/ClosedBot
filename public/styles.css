@@ -4412,13 +4412,6 @@ svg {
   --mark: #ff4fa3;
 }
 
-.guide-mark[data-tone="ghost"] {
-  --mark: #b4c2ff;
-  border-style: dashed;
-  background: transparent;
-  box-shadow: none;
-}
-
 .guide-legend canvas {
   flex: none;
   width: 56px;
@@ -4428,7 +4421,7 @@ svg {
 
 .guide-key {
   flex: none;
-  min-width: 92px;
+  min-width: 108px;
   padding: 3px 8px;
   border-radius: 8px;
   background: #222a5c;

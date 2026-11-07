@@ -4891,12 +4891,12 @@ function openOffice() {
   location.hash = "#/oficina";
 }
 
-/** «+ Nuevo agente», el «+» de un equipo o la plataforma punteada: se crea sin salir de la Oficina. */
+/** «+ Nuevo agente», el «+» de un equipo o el menú del fondo: se crea sin salir de la Oficina. */
 function createFromOffice({ channelId = null } = {}) {
   openCreateDialog({ channelId, fromOffice: true });
 }
 
-/** La plataforma punteada: el diálogo de canal, como «Nuevo equipo». */
+/** «Nuevo equipo» (menú del fondo de la Oficina): el diálogo de canal, con ese título. */
 function createTeamFromOffice() {
   openChannelDialog(null, { fromOffice: true });
 }
@@ -5021,8 +5021,8 @@ function officeAgentMenu(agentId, { x = 0, y = 0, channelId = null, touch = fals
   openContextMenu(items, { x, y, touch });
 }
 
-/** Clic derecho (o mantener presionado) sobre una tarjeta o la plataforma punteada. */
-function officeTeamMenu({ kind, channelId = null, empty = false }, { x = 0, y = 0, touch = false } = {}) {
+/** Clic derecho (o mantener presionado) sobre una tarjeta o el fondo de la Oficina. */
+function officeTeamMenu({ kind, channelId = null, empty = false, teamsFull = false }, { x = 0, y = 0, touch = false } = {}) {
   const main = mainAgent();
   const items = [];
   if (kind === "board") {
@@ -5037,9 +5037,13 @@ function officeTeamMenu({ kind, channelId = null, empty = false }, { x = 0, y = 
       "-",
       { label: "Eliminar el equipo", icon: "trash", danger: true, run: () => deleteChannel(channelId) },
     );
-  } else if (kind === "loose" || kind === "ghost") {
-    items.push({ label: kind === "loose" ? "Crear un agente sin equipo" : "Crear un agente", icon: "plus", run: () => createFromOffice({}) });
-    if (!empty) items.push({ label: "Armar un equipo nuevo", icon: "team", run: createTeamFromOffice });
+  } else if (kind === "loose") {
+    items.push({ label: "Crear un agente sin equipo", icon: "plus", run: () => createFromOffice({}) });
+    if (!teamsFull) items.push({ label: "Armar un equipo nuevo", icon: "team", run: createTeamFromOffice });
+  } else if (kind === "background") {
+    // El equipo nuevo se arma aquí (ya no hay una plataforma punteada fija); sin agentes, primero uno.
+    if (!empty && !teamsFull) items.push({ label: "Nuevo equipo", icon: "team", run: createTeamFromOffice });
+    items.push({ label: "Nuevo agente", icon: "plus", run: () => createFromOffice({}) });
   }
   items.push("-", { label: "Cómo funciona la Oficina", icon: "help", run: () => office?.openGuide() });
   openContextMenu(items, { x, y, touch });

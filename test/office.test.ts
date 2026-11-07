@@ -463,6 +463,78 @@ test("Oficina HTTP: la foto del momento, el arte con caché, PixelLab y los cuad
   }
 });
 
+test("Oficina (interfaz): la escena llena el espacio que hay, también en un monitor vertical, y con muchos equipos se desplaza", async () => {
+  type Arrangement = {
+    fill: boolean;
+    cols: number;
+    rows: number;
+    scale: number;
+    worldW: number;
+    worldH: number;
+    ox: number;
+    oy: number;
+    slots: Array<{ x: number; y: number }>;
+  };
+  const office = (await import(new URL("../../public/office.js", import.meta.url).href)) as {
+    arrangeOffice: (input: { count: number; slotW: number; slotH: number; width: number; height: number }) => Arrangement;
+  };
+  // El lugar de una plataforma de 2×2 (hasta 4 agentes) con su tarjeta: como lo calcula la Oficina.
+  const slot = { slotW: 416, slotH: 419 };
+  const arrange = (count: number, width: number, height: number) => office.arrangeOffice({ count, ...slot, width, height });
+  const fits = (a: Arrangement, width: number, height: number) =>
+    a.worldW * a.scale <= width + 0.5 && a.worldH * a.scale <= height + 0.5 && a.ox >= -0.5 && a.oy >= 0;
+
+  // Como en la captura: Claude Bot y un equipo en 800×861. Antes quedaban arriba a escala 0,58 y el resto vacío.
+  const yours = arrange(2, 799, 861);
+  assert.equal(yours.fill, true);
+  assert.ok(yours.scale > 0.95, `más grandes: ${yours.scale}`);
+  assert.ok(fits(yours, 799, 861));
+  assert.ok(yours.worldH * yours.scale >= 861 * 0.99, "usa todo el alto");
+  assert.ok(Math.abs(yours.slots[1]!.x - yours.slots[0]!.x) > 300 && yours.slots[1]!.y > yours.slots[0]!.y, "en diagonal: usa también el ancho");
+
+  // Monitor vertical (1080×1920): una columna en zigzag que llena el alto.
+  const tall = arrange(4, 812, 1866);
+  assert.deepEqual([tall.fill, tall.cols, tall.rows], [true, 1, 4]);
+  assert.ok(tall.scale > 1, `${tall.scale}`);
+  assert.ok(tall.worldH * tall.scale >= 1866 * 0.99 && fits(tall, 812, 1866));
+
+  // Pantalla ancha: una fila, alternando arriba y abajo.
+  const wide = arrange(3, 1652, 1026);
+  assert.deepEqual([wide.fill, wide.cols, wide.rows], [true, 3, 1]);
+  assert.ok(wide.slots[1]!.y > wide.slots[0]!.y, "la del medio va más abajo");
+  assert.ok(fits(wide, 1652, 1026));
+
+  // Una sola plataforma: centrada y más grande, hasta un tope.
+  const alone = arrange(1, 1012, 528);
+  assert.ok(alone.fill && Math.abs(alone.ox - (1012 - alone.worldW * alone.scale) / 2) < 0.5);
+  assert.equal(arrange(1, 3000, 3000).scale, 1.8);
+
+  // Muchos equipos: llenan el ancho como antes (hasta 3 columnas) y la Oficina se desplaza.
+  const many = arrange(10, 1012, 766);
+  assert.deepEqual([many.fill, many.cols, many.oy], [false, 3, 0]);
+  assert.ok(Math.abs(many.scale - 1012 / (416 * 3 + 416 * 0.32)) < 1e-9);
+  const phone = arrange(3, 390, 612);
+  assert.deepEqual([phone.fill, phone.cols], [false, 1], "en el teléfono, una columna que se desplaza");
+
+  // En cualquier tamaño: si cabe, todo queda dentro de la pantalla y ningún lugar pisa a otro.
+  for (const width of [320, 480, 800, 1012, 1400, 1900]) {
+    for (const height of [360, 600, 861, 1200, 1866]) {
+      for (let count = 1; count <= 9; count += 1) {
+        const a = arrange(count, width, height);
+        assert.equal(a.slots.length, count);
+        if (a.fill) assert.ok(fits(a, width, height), `${count} en ${width}×${height}`);
+        for (let i = 0; i < count; i += 1) {
+          for (let j = i + 1; j < count; j += 1) {
+            const p = a.slots[i]!;
+            const q = a.slots[j]!;
+            assert.ok(Math.abs(p.x - q.x) >= slot.slotW - 1e-6 || Math.abs(p.y - q.y) >= slot.slotH - 1e-6, `${count} en ${width}×${height}: ${i} y ${j} se pisan`);
+          }
+        }
+      }
+    }
+  }
+});
+
 test("Oficina (interfaz): una plataforma por grupo con un escritorio por integrante, y el resto en «Sin grupo»", async () => {
   const office = (await import(new URL("../../public/office.js", import.meta.url).href)) as {
     planOffice: (input: unknown) => { panels: Array<Record<string, any>>; home: Map<string, string> };

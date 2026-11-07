@@ -1,12 +1,16 @@
 // La Oficina: cada equipo es una plataforma isométrica de neón con un escritorio por integrante, y cada
 // agente es un robot que trabaja, pregunta, duerme o espera. Todo se dibuja aquí, en un solo canvas.
 // Desde la 0.9.5 también se usa: los robots se arrastran de un equipo a otro, el «+» de cada tarjeta crea un
-// agente en ese equipo, la plataforma punteada arma un equipo nuevo y la guía explica qué es cada cosa.
+// agente en ese equipo y la guía explica qué es cada cosa. Desde la 0.9.9 la escena llena el espacio que tenga
+// (también un monitor vertical) y el equipo nuevo se arma con clic derecho en el fondo o soltando un robot en
+// «Equipo nuevo», que aparece abajo solo mientras lo arrastras.
 
 /** Colores de neón de las plataformas, en orden. */
 const NEON = ["#2de2c8", "#3fb6ff", "#ff4fa3", "#f5d63d", "#9b7bff", "#ff8a3d", "#5cf27e", "#ff5d5d"];
 const HALL_COLOR = "#8fa8ff";
 const GHOST_COLOR = "#b4c2ff";
+/** Dónde cae un robot que sueltas en «Equipo nuevo» (no es una plataforma: va abajo, en la pantalla). */
+const NEW_TEAM = { id: "new", kind: "new", title: "Equipo nuevo", channelId: null, members: 0, color: GHOST_COLOR };
 /** «Sin grupo» con varios agentes: no es un equipo, así que va en un color neutro. */
 const LOOSE_COLOR = "#b9bfd4";
 /** Mitad del ancho y del alto de una celda isométrica, en píxeles de mundo. */
@@ -20,6 +24,17 @@ const ADD_R = 14;
 /** Lo mismo que en el servidor: agentes por canal y canales activos. */
 const MAX_MEMBERS = 12;
 const MAX_TEAMS = 50;
+/** Con pocos equipos en una pantalla grande, la Oficina se agranda hasta esto. */
+const MAX_SCALE = 1.8;
+/** Si para que quepa todo en la pantalla habría que achicarla más que esto, llena el ancho y se desplaza. */
+const MIN_FIT = 0.65;
+/** Columnas como máximo cuando cabe todo en la pantalla. */
+const MAX_COLS = 6;
+/** Lo más que se separan las plataformas para llenar lo que sobra (veces el lugar de cada una). */
+const MAX_SPREAD = 1.6;
+/** «Equipo nuevo»: aparece abajo mientras arrastras un robot, para armar un equipo con él. */
+const NEW_TEAM_W = 300;
+const NEW_TEAM_H = 58;
 /** En el teléfono, mantener presionado un robot lo levanta para arrastrarlo. */
 const LONG_PRESS_MS = 380;
 const DRAG_SLOP = 6;
@@ -110,6 +125,69 @@ export function platformColor(spec, agentColor) {
   }
   if (spec.channelId) return NEON[hashText(spec.channelId) % NEON.length];
   return LOOSE_COLOR;
+}
+
+/**
+ * Cómo se reparten `count` plataformas, cada una en un lugar de `slotW` × `slotH` del mundo, en un área de
+ * `width` × `height` píxeles. Si caben todas sin achicarlas de más, se elige el número de columnas que las dibuja
+ * más grandes, se separan para llenar lo que sobra (en una sola columna o una sola fila, en zigzag) y quedan
+ * centradas: así se usa todo el espacio, también en un monitor vertical. Si son demasiadas, llenan el ancho y la
+ * Oficina se desplaza hacia abajo. Devuelve la escala, dónde empieza el mundo en pantalla (`ox`, `oy`) y, por
+ * plataforma, el centro horizontal y el borde de arriba de su lugar (en el mundo).
+ */
+export function arrangeOffice({ count, slotW, slotH, width, height }) {
+  const n = Math.max(1, count);
+  const grid = (cols) => {
+    const rows = Math.ceil(n / cols);
+    const shift = cols > 1 && rows > 1 ? slotW * 0.32 : 0;
+    return { cols, rows, shift, w: slotW * cols + shift, h: slotH * rows + 30 };
+  };
+  let best = null;
+  for (let cols = 1; cols <= Math.min(MAX_COLS, n); cols += 1) {
+    const option = grid(cols);
+    option.scale = Math.min(MAX_SCALE, width / option.w, height / option.h);
+    if (!best || option.scale > best.scale + 1e-6) best = option;
+  }
+  const fill = best.scale >= MIN_FIT;
+  const plan = fill ? best : grid(Math.max(1, Math.min(3, Math.floor(width / (slotW * 0.62)), n)));
+  const scale = fill ? best.scale : Math.min(1.15, width / plan.w);
+  let gapX = slotW;
+  let gapY = slotH;
+  let shift = plan.shift;
+  let zigX = 0;
+  let zigY = 0;
+  if (fill) {
+    const roomW = width / scale;
+    const roomH = height / scale;
+    if (plan.cols > 1) {
+      const k = plan.rows > 1 ? 0.32 : 0;
+      gapX = Math.min(slotW * MAX_SPREAD, Math.max(slotW, (roomW - slotW) / (plan.cols - 1 + k)));
+      shift = k * gapX;
+    } else if (plan.rows > 1) {
+      zigX = Math.min(slotW * 0.9, Math.max(0, roomW - slotW));
+    }
+    if (plan.rows > 1) gapY = Math.min(slotH * MAX_SPREAD, Math.max(slotH, (roomH - slotH - 30) / (plan.rows - 1)));
+    else if (plan.cols > 1) zigY = Math.min(slotH * 0.5, Math.max(0, roomH - plan.h));
+  }
+  const worldW = gapX * (plan.cols - 1) + slotW + shift + zigX;
+  const worldH = gapY * (plan.rows - 1) + slotH + 30 + zigY;
+  const slots = [];
+  for (let index = 0; index < n; index += 1) {
+    const row = Math.floor(index / plan.cols);
+    const col = index % plan.cols;
+    slots.push({ x: gapX * col + slotW / 2 + (row % 2 ? shift + zigX : 0), y: gapY * row + (col % 2 ? zigY : 0) });
+  }
+  return {
+    fill,
+    cols: plan.cols,
+    rows: plan.rows,
+    scale,
+    worldW,
+    worldH,
+    slots,
+    ox: (width - worldW * scale) / 2,
+    oy: fill ? Math.max(0, (height - worldH * scale) / 2) : 0,
+  };
 }
 
 /** Punto relativo a la esquina de atrás de una plataforma → celda isométrica (i, j), con decimales. */
@@ -231,7 +309,7 @@ export function createOffice(host) {
   /** Dónde está cada agente: { agent, platform, seat }. */
   const robots = new Map();
   const pulses = [];
-  const view = { width: 0, height: 0, client: 0, scale: 1, worldW: 0, worldH: 0, ox: 0, oy: 0, dpr: 1 };
+  const view = { width: 0, height: 0, client: 0, scale: 1, worldW: 0, worldH: 0, ox: 0, oy: 0, dpr: 1, fill: false };
   let visible = false;
   let raf = 0;
   let lastFrame = 0;
@@ -240,6 +318,8 @@ export function createOffice(host) {
   let hovered = null;
   let seenMessages = new Set();
   let empty = false;
+  /** Si caben más equipos (para ofrecer «Equipo nuevo» al arrastrar). */
+  let teamsFull = false;
 
   // Lo que se toca y se arrastra.
   /** Un toque o clic que todavía no es arrastre: { pointerId, type, x, y, target, timer, menu }. */
@@ -309,10 +389,7 @@ export function createOffice(host) {
       return { ...spec, color, side: hall ? 2 : platformSide(spec.seats.length), x: 0, y: 0 };
     });
     empty = !agents.some((agent) => !agent.main);
-    // La plataforma punteada: arma un equipo nuevo (o, sin agentes, crea el primero).
-    if (empty || channels.length < MAX_TEAMS) {
-      platforms.push({ id: "new", kind: "new", title: empty ? "Tu primer agente" : "Nuevo equipo", channelId: null, members: 0, seats: [], color: GHOST_COLOR, side: 2, x: 0, y: 0 });
-    }
+    teamsFull = channels.length >= MAX_TEAMS;
     // Cada agente en un solo puesto: el del canal para el que trabaja ahora o el de su plataforma de siempre.
     const workingIn = new Map();
     for (const channel of channels) for (const id of channel.working ?? []) if (!workingIn.has(id)) workingIn.set(id, `c:${channel.id}`);
@@ -351,7 +428,7 @@ export function createOffice(host) {
     return { w, h };
   }
 
-  /** Ubica las plataformas en filas (con un desfase en zigzag) según el ancho disponible. */
+  /** Reparte las plataformas para llenar el espacio que hay (ver `arrangeOffice`). */
   function layout() {
     const width = Math.max(280, scroller.clientWidth);
     let slotW = 0;
@@ -361,24 +438,24 @@ export function createOffice(host) {
       slotW = Math.max(slotW, w + 120, CARD_W + 2 * (ADD_R + 34));
       slotH = Math.max(slotH, h + CARD_H + 195);
     }
-    const cols = Math.max(1, Math.min(3, Math.floor(width / (slotW * 0.62)), platforms.length));
-    const shift = cols > 1 ? slotW * 0.32 : 0;
-    const rows = Math.ceil(platforms.length / cols);
-    platforms.forEach((platform, index) => {
-      const row = Math.floor(index / cols);
-      const col = index % cols;
-      platform.cx = slotW * (col + 0.5) + (row % 2 ? shift : 0);
-      platform.cy = slotH * row + CARD_H + 135 + footprint(platform).h / 2;
-    });
-    view.worldW = slotW * cols + shift;
-    view.worldH = slotH * rows + 30;
-    view.scale = Math.min(1.15, width / view.worldW);
-    view.width = width;
     // Con la oficina vacía, la explicación ocupa el pie: el mapa deja lugar para que no la tape.
     const reserve = empty && emptyView ? Math.min(280, emptyView.offsetHeight + 48) : 0;
     view.client = scroller.clientHeight;
-    view.height = Math.max(Math.ceil(view.worldH * view.scale) + reserve, view.client);
-    view.ox = (width - view.worldW * view.scale) / 2;
+    const room = Math.max(160, view.client - reserve);
+    const plan = arrangeOffice({ count: platforms.length, slotW, slotH, width, height: room });
+    platforms.forEach((platform, index) => {
+      const slot = plan.slots[index];
+      platform.cx = slot.x;
+      platform.cy = slot.y + CARD_H + 135 + footprint(platform).h / 2;
+    });
+    view.worldW = plan.worldW;
+    view.worldH = plan.worldH;
+    view.scale = plan.scale;
+    view.fill = plan.fill;
+    view.width = width;
+    view.height = plan.fill ? view.client : Math.max(Math.ceil(view.worldH * view.scale) + reserve, view.client);
+    view.ox = plan.ox;
+    view.oy = plan.oy;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     canvas.style.width = `${width}px`;
     canvas.style.height = `${view.height}px`;
@@ -494,22 +571,24 @@ export function createOffice(host) {
     ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
     drawBackground(t);
     ctx.save();
-    ctx.translate(view.ox, 0);
+    ctx.translate(view.ox, view.oy);
     ctx.scale(view.scale, view.scale);
     drawLinks(t);
-    for (const platform of platforms) {
-      if (platform.kind === "new") drawGhost(platform, t);
-      else drawPlatform(platform, t, now);
-    }
+    for (const platform of platforms) drawPlatform(platform, t, now);
     drawPulses(now);
-    for (const platform of platforms) {
-      if (platform.kind === "new") drawGhostCard(platform, t);
-      else drawCard(platform, t);
-    }
+    for (const platform of platforms) drawCard(platform, t);
     if (returning) drawReturning(now, t);
     if (pending) drawFloating(pending.agentId, pending.point, pending.color, t, pending.lift, true);
-    if (drag?.lifted) drawFloating(drag.agentId, drag.pointer, drag.verdict?.ok ? drag.target.color : null, t, liftOf(drag), false);
     ctx.restore();
+    // «Equipo nuevo» va en la pantalla (abajo de lo que se ve), debajo del robot que llevas.
+    drawNewTeam(now);
+    if (drag?.lifted) {
+      ctx.save();
+      ctx.translate(view.ox, view.oy);
+      ctx.scale(view.scale, view.scale);
+      drawFloating(drag.agentId, drag.pointer, drag.verdict?.ok ? drag.target.color : null, t, liftOf(drag), false);
+      ctx.restore();
+    }
   }
 
   function drawBackground(t) {
@@ -540,7 +619,7 @@ export function createOffice(host) {
     const hall = platforms.find((platform) => platform.kind === "hall");
     if (!hall) return;
     for (const platform of platforms) {
-      if (platform === hall || platform.kind === "new") continue;
+      if (platform === hall) continue;
       const active = teamOf(platform).some(busy);
       const path = linkPath(hall, platform);
       ctx.save();
@@ -1163,86 +1242,66 @@ export function createOffice(host) {
     void t;
   }
 
-  /** La plataforma punteada: se toca para armar un equipo (o crear el primer agente) y recibe robots. */
-  function drawGhost(platform, t) {
-    const shape = corners(platform);
-    const mode = dropMode(platform);
-    const hot = mode === "target" || (hovered?.platform === platform && hovered.kind === "ghost");
-    const color = platform.color;
+  /** Dónde va «Equipo nuevo» (en píxeles del canvas): abajo y al centro de lo que se ve, solo mientras arrastras. */
+  function newTeamZone() {
+    if (!drag?.lifted || teamsFull) return null;
+    const w = Math.min(NEW_TEAM_W, view.width - 32);
+    const bottom = Math.min(view.height, scroller.scrollTop + scroller.clientHeight);
+    return { x: (view.width - w) / 2, y: bottom - NEW_TEAM_H - 22, w, h: NEW_TEAM_H };
+  }
+
+  /** «Equipo nuevo»: sube al levantar un robot y se ilumina cuando lo tienes encima. */
+  function drawNewTeam(now) {
+    const zone = newTeamZone();
+    if (!zone) return;
+    const hot = drag.target?.kind === "new";
+    const k = reducedMotion ? 1 : easeOut(Math.min(1, (now - drag.at) / 220));
+    const t = reducedMotion ? 0 : now;
+    const color = GHOST_COLOR;
     ctx.save();
-    ctx.fillStyle = rgba(color, mode === "target" ? 0.2 : hot ? 0.1 : mode === "candidate" ? 0.07 + 0.04 * Math.sin(t / 260) : 0.04);
-    diamond(shape);
+    ctx.globalAlpha = k;
+    ctx.translate(0, (1 - k) * 18);
+    ctx.setLineDash([7, 6]);
+    ctx.lineDashOffset = -t / 50;
+    ctx.fillStyle = hot ? "rgba(36, 48, 120, 0.94)" : "rgba(9, 13, 42, 0.86)";
+    roundRect(ctx, zone.x, zone.y, zone.w, zone.h, 14);
     ctx.fill();
-    ctx.setLineDash([9, 8]);
-    ctx.lineDashOffset = drag?.lifted || hot ? -t / 50 : 0;
-    ctx.strokeStyle = rgba(color, mode === "target" ? 0.95 : hot || mode === "candidate" ? 0.75 : 0.42);
-    ctx.lineWidth = mode === "target" ? 3 : 2;
-    if (mode === "target") {
+    if (hot) {
       ctx.shadowColor = color;
-      ctx.shadowBlur = 24;
+      ctx.shadowBlur = 22;
     }
-    diamond(shape);
+    ctx.strokeStyle = rgba(color, hot ? 0.95 : 0.6);
+    ctx.lineWidth = hot ? 2.4 : 1.6;
     ctx.stroke();
-    ctx.restore();
-    // Un «+» grande en el medio.
-    const cx = platform.cx;
-    const cy = shape.left.y;
-    const breathe = drag?.lifted || reducedMotion ? 1 : 1 + 0.04 * Math.sin(t / 500);
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.scale(breathe, breathe);
-    ctx.fillStyle = rgba(color, hot ? 0.3 : 0.14);
-    ctx.strokeStyle = rgba(color, hot ? 1 : 0.7);
-    ctx.lineWidth = 2;
+    ctx.shadowBlur = 0;
+    ctx.setLineDash([]);
+    // Un «+» en un círculo y lo que pasa al soltarlo.
+    const cx = zone.x + 31;
+    const cy = zone.y + zone.h / 2;
+    ctx.fillStyle = rgba(color, hot ? 0.35 : 0.16);
+    ctx.strokeStyle = rgba(color, hot ? 1 : 0.75);
+    ctx.lineWidth = 1.6;
     ctx.beginPath();
-    ctx.ellipse(0, 0, 30, 15, 0, 0, Math.PI * 2);
+    ctx.arc(cx, cy, 14, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
     ctx.lineCap = "round";
-    ctx.lineWidth = 3;
+    ctx.lineWidth = 2.4;
     ctx.beginPath();
-    ctx.moveTo(-9, 0);
-    ctx.lineTo(9, 0);
-    ctx.moveTo(0, -7);
-    ctx.lineTo(0, 7);
+    ctx.moveTo(cx - 6, cy);
+    ctx.lineTo(cx + 6, cy);
+    ctx.moveTo(cx, cy - 6);
+    ctx.lineTo(cx, cy + 6);
     ctx.stroke();
-    ctx.restore();
-  }
-
-  function drawGhostCard(platform, t) {
-    const o = origin(platform);
-    const x = platform.cx - CARD_W / 2;
-    const y = o.y - CARD_H - 115;
-    const color = platform.color;
-    const mode = dropMode(platform);
-    const hot = mode === "target" || (hovered?.platform === platform && hovered.kind === "ghost");
-    platform.card = { x, y, w: CARD_W, h: CARD_H };
-    ctx.save();
-    ctx.setLineDash([2, 4]);
-    ctx.strokeStyle = rgba(color, 0.35);
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    ctx.moveTo(platform.cx, y + CARD_H);
-    ctx.lineTo(platform.cx, o.y - 8);
-    ctx.stroke();
-    ctx.setLineDash([6, 5]);
-    ctx.lineDashOffset = hot ? -t / 50 : 0;
-    ctx.fillStyle = hot ? "rgba(16, 22, 64, 0.9)" : "rgba(9, 13, 42, 0.6)";
-    roundRect(ctx, x, y, CARD_W, CARD_H, 10);
-    ctx.fill();
-    ctx.strokeStyle = rgba(color, hot ? 0.95 : 0.55);
-    ctx.lineWidth = 1.4;
-    ctx.stroke();
-    ctx.restore();
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
     ctx.fillStyle = "#ffffff";
     ctx.font = `700 15px ${FONT}`;
-    ctx.fillText(`+ ${platform.title}`, x + 16, y + 25);
+    ctx.fillText("Equipo nuevo", zone.x + 56, zone.y + 25);
     ctx.fillStyle = rgba(color, 0.95);
     ctx.font = `500 12px ${FONT}`;
-    const hint = empty ? "Toca para crearlo" : drag?.lifted ? "Suelta aquí para armarlo" : "Toca o arrastra un agente aquí";
-    ctx.fillText(clipText(ctx, hint, CARD_W - 30), x + 16, y + 44);
+    ctx.fillText(clipText(ctx, hot ? `Suéltalo para armarlo con ${drag.name}` : "Suelta aquí un robot para armar uno", zone.w - 70), zone.x + 56, zone.y + 44);
+    ctx.restore();
   }
 
   /** Con el dedo, el robot va un poco más arriba para que se vea; con el mouse, el puntero lo toma del pecho. */
@@ -1327,14 +1386,20 @@ export function createOffice(host) {
 
   function toWorld(point) {
     const rect = canvas.getBoundingClientRect();
-    return { x: (point.clientX - rect.left - view.ox) / view.scale, y: (point.clientY - rect.top) / view.scale };
+    return { x: (point.clientX - rect.left - view.ox) / view.scale, y: (point.clientY - rect.top - view.oy) / view.scale };
+  }
+
+  /** El puntero en píxeles del canvas (sin la escala de la Oficina): para «Equipo nuevo». */
+  function toCanvas(point) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: point.clientX - rect.left, y: point.clientY - rect.top };
   }
 
   function inside(point, box, pad = 0) {
     return box && point.x >= box.x - pad && point.x <= box.x + box.w + pad && point.y >= box.y - pad && point.y <= box.y + box.h + pad;
   }
 
-  /** Qué hay bajo el puntero: un robot, un «+», una tarjeta o la plataforma punteada. */
+  /** Qué hay bajo el puntero: un robot, un «+» o una tarjeta (o nada: el fondo). */
   function hit(point) {
     let found = null;
     for (const robot of robots.values()) {
@@ -1351,13 +1416,10 @@ export function createOffice(host) {
     }
     for (const platform of platforms) {
       if (!inside(point, platform.card)) continue;
-      if (platform.kind === "new") return { kind: "ghost", platform };
       if (platform.kind === "hall") return { kind: "board", platform };
       if (platform.channelId) return { kind: "channel", platform };
       return { kind: "loose", platform };
     }
-    const ghost = platforms.find((platform) => platform.kind === "new");
-    if (ghost && onPlatform(point, ghost)) return { kind: "ghost", platform: ghost };
     return null;
   }
 
@@ -1386,7 +1448,7 @@ export function createOffice(host) {
     const target = hit(toWorld(event));
     clearPress();
     press = { pointerId: event.pointerId, type: event.pointerType, x: event.clientX, y: event.clientY, target, timer: null, menu: false };
-    if (event.pointerType !== "mouse" && target) {
+    if (event.pointerType !== "mouse") {
       // Mantener presionado: levanta al robot (y, si no lo mueves, muestra sus opciones).
       press.timer = setTimeout(() => {
         if (!press) return;
@@ -1397,7 +1459,7 @@ export function createOffice(host) {
         } else {
           press.menu = true;
           navigator.vibrate?.(8);
-          openMenu(press.target, press.x, press.y, true);
+          openMenu(press.target ?? { kind: "background" }, press.x, press.y, true);
         }
       }, LONG_PRESS_MS);
     }
@@ -1476,6 +1538,7 @@ export function createOffice(host) {
       touch,
       moved: false,
       lifted: true,
+      at: performance.now(),
     };
     if (press) {
       clearTimeout(press.timer);
@@ -1496,8 +1559,11 @@ export function createOffice(host) {
   /** Dónde caería el robot y qué pasaría: se muestra al lado del puntero. */
   function retarget() {
     if (!drag) return;
-    drag.target = platformAt(drag.pointer);
+    const zone = newTeamZone();
+    drag.target = zone && inside(toCanvas(drag.client), zone, 6) ? NEW_TEAM : platformAt(drag.pointer);
     drag.verdict = dropVerdict(drag.name, drag.from, drag.target);
+    // Sobre «Equipo nuevo» no hace falta el aviso: lo dice el propio recuadro.
+    if (drag.target === NEW_TEAM) return void setHover(null);
     const text = drag.moved || !drag.touch ? drag.verdict.text : "Arrástralo a otro equipo o suéltalo para ver sus opciones";
     const own = drag.target?.id === drag.from?.id;
     const tone = drag.verdict.ok ? "ok" : drag.target && !own ? "no" : null;
@@ -1540,10 +1606,6 @@ export function createOffice(host) {
     setHover(null);
     if (target.kind === "agent") host.openAgent(target.robot.agent.id);
     else if (target.kind === "add") host.createAgent({ channelId: target.platform.channelId ?? null });
-    else if (target.kind === "ghost") {
-      if (empty) host.createAgent({});
-      else host.createTeam();
-    }
     else if (target.kind === "channel") host.openChannel(target.platform.channelId);
     else if (target.kind === "board") showBoard();
   }
@@ -1552,8 +1614,7 @@ export function createOffice(host) {
     event.preventDefault();
     // Android avisa «contextmenu» al mantener presionado: ya lo atendió el toque largo.
     if (drag || press?.menu || press?.type === "touch") return;
-    const target = hit(toWorld(event));
-    if (target) openMenu(target, event.clientX, event.clientY, false);
+    openMenu(hit(toWorld(event)) ?? { kind: "background" }, event.clientX, event.clientY, false);
   }
 
   /** «touch»: se abrió con el dedo (la app lo pone donde el dedo no lo toque al soltar). */
@@ -1561,7 +1622,7 @@ export function createOffice(host) {
     setHover(null);
     if (!target || (target.kind === "agent" && !target.robot)) return;
     if (target.kind === "agent") host.agentMenu(target.robot.agent.id, { x, y, touch, channelId: target.robot.platform.channelId ?? null });
-    else if (target.kind !== "add") host.teamMenu({ kind: target.kind, channelId: target.platform.channelId ?? null, empty }, { x, y, touch });
+    else if (target.kind !== "add") host.teamMenu({ kind: target.kind, channelId: target.platform?.channelId ?? null, empty, teamsFull }, { x, y, touch });
   }
 
   /** La ayuda que aparece al pasar el mouse: qué es y qué pasa si lo tocas. */
@@ -1598,14 +1659,6 @@ export function createOffice(host) {
         kind: "add",
         platform: target.platform,
         title: target.platform.channelId ? `Crear un agente en «${target.platform.title}»` : "Crear un agente sin equipo",
-      });
-    } else if (target.kind === "ghost") {
-      setHover({
-        ...at,
-        kind: "ghost",
-        platform: target.platform,
-        title: empty ? "Crea tu primer agente" : "Nuevo equipo",
-        text: empty ? "Después puedes sumarlo a un equipo o pedirle a Claude Bot que arme uno." : "Clic: armar un equipo con los agentes que elijas. También puedes arrastrar un agente aquí.",
       });
     }
     if (previous?.platform !== hovered?.platform || previous?.kind !== hovered?.kind) lastFrame = 0;
@@ -1760,41 +1813,46 @@ export function createOffice(host) {
 
   /** Lo mismo en texto, para lectores de pantalla: una lista por plataforma. */
   function renderLists() {
-    const groups = platforms
-      .filter((platform) => platform.kind !== "new")
-      .map((platform) => {
-        const group = document.createElement("section");
-        group.className = "office-panel";
-        group.dataset.panel = platform.id;
-        const title = document.createElement("h3");
-        title.textContent = platform.kind === "hall" ? "Claude Bot" : platform.channelId ? `Equipo ${platform.title}` : platform.title;
-        const list = document.createElement("ul");
-        for (const agent of teamOf(platform)) {
-          const item = document.createElement("li");
-          const button = document.createElement("button");
-          button.type = "button";
-          button.textContent = `${agent.name}: ${describe(agent)}`;
-          button.addEventListener("click", () => host.openAgent(agent.id));
-          const more = document.createElement("button");
-          more.type = "button";
-          more.textContent = `Opciones de ${agent.name}`;
-          more.addEventListener("click", () => {
-            const rect = more.getBoundingClientRect();
-            host.agentMenu(agent.id, { x: rect.left, y: rect.bottom, channelId: platform.channelId ?? null });
-          });
-          item.append(button, more);
-          list.append(item);
-        }
-        group.append(title, list);
-        if (platform.kind !== "hall") {
-          const add = document.createElement("button");
-          add.type = "button";
-          add.textContent = platform.channelId ? `Crear un agente en ${platform.title}` : "Crear un agente sin equipo";
-          add.addEventListener("click", () => host.createAgent({ channelId: platform.channelId ?? null }));
-          group.append(add);
-        }
-        return group;
-      });
+    const groups = platforms.map((platform) => {
+      const group = document.createElement("section");
+      group.className = "office-panel";
+      group.dataset.panel = platform.id;
+      const title = document.createElement("h3");
+      title.textContent = platform.kind === "hall" ? "Claude Bot" : platform.channelId ? `Equipo ${platform.title}` : platform.title;
+      const list = document.createElement("ul");
+      for (const agent of teamOf(platform)) {
+        const item = document.createElement("li");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = `${agent.name}: ${describe(agent)}`;
+        button.addEventListener("click", () => host.openAgent(agent.id));
+        const more = document.createElement("button");
+        more.type = "button";
+        more.textContent = `Opciones de ${agent.name}`;
+        more.addEventListener("click", () => {
+          const rect = more.getBoundingClientRect();
+          host.agentMenu(agent.id, { x: rect.left, y: rect.bottom, channelId: platform.channelId ?? null });
+        });
+        item.append(button, more);
+        list.append(item);
+      }
+      group.append(title, list);
+      if (platform.kind !== "hall") {
+        const add = document.createElement("button");
+        add.type = "button";
+        add.textContent = platform.channelId ? `Crear un agente en ${platform.title}` : "Crear un agente sin equipo";
+        add.addEventListener("click", () => host.createAgent({ channelId: platform.channelId ?? null }));
+        group.append(add);
+      }
+      return group;
+    });
+    if (!empty && !teamsFull) {
+      const team = document.createElement("button");
+      team.type = "button";
+      team.textContent = "Nuevo equipo";
+      team.addEventListener("click", () => host.createTeam());
+      groups.push(team);
+    }
     lists.replaceChildren(...groups);
   }
 
@@ -1861,7 +1919,7 @@ export function createOffice(host) {
 
   /** Mientras arrastras cerca del borde, la oficina se desplaza sola. */
   function autoScroll() {
-    if (!drag?.lifted) return;
+    if (!drag?.lifted || drag.target?.kind === "new") return;
     const rect = scroller.getBoundingClientRect();
     const edge = 56;
     const y = drag.client.clientY;
@@ -1989,7 +2047,7 @@ export function createOffice(host) {
   function reveal(agentId) {
     const robot = robots.get(agentId);
     if (!robot) return;
-    const y = (seatPoint(robot.platform, robot.seat).y - 40) * view.scale;
+    const y = view.oy + (seatPoint(robot.platform, robot.seat).y - 40) * view.scale;
     if (y < scroller.scrollTop + 40 || y > scroller.scrollTop + scroller.clientHeight - 40) {
       scroller.scrollTo({ top: Math.max(0, y - scroller.clientHeight / 2), behavior: reducedMotion ? "auto" : "smooth" });
     }
@@ -2036,7 +2094,7 @@ export function createOffice(host) {
     /** Para las pruebas: dónde está cada agente y dónde está cada plataforma, en pantalla. */
     debug() {
       const rect = canvas.getBoundingClientRect();
-      const screen = (point) => ({ x: Math.round(rect.left + view.ox + point.x * view.scale), y: Math.round(rect.top + point.y * view.scale) });
+      const screen = (point) => ({ x: Math.round(rect.left + view.ox + point.x * view.scale), y: Math.round(rect.top + view.oy + point.y * view.scale) });
       return {
         robots: [...robots.entries()].map(([id, robot]) => ({ id, panel: robot.platform.id, ...screen(robot.head ?? { x: 0, y: 0 }), seat: screen(seatPoint(robot.platform, robot.seat)) })),
         panels: platforms.map((platform) => ({
@@ -2048,6 +2106,13 @@ export function createOffice(host) {
           card: platform.card ? screen({ x: platform.card.x + platform.card.w / 2, y: platform.card.y + platform.card.h / 2 }) : null,
           add: platform.add ? screen(platform.add) : null,
         })),
+        scale: view.scale,
+        fill: view.fill,
+        world: { x: Math.round(rect.left + view.ox), y: Math.round(rect.top + view.oy), w: Math.round(view.worldW * view.scale), h: Math.round(view.worldH * view.scale) },
+        newTeam: (() => {
+          const zone = newTeamZone();
+          return zone ? { x: Math.round(rect.left + zone.x + zone.w / 2), y: Math.round(rect.top + zone.y + zone.h / 2) } : null;
+        })(),
       };
     },
     get snapshotLoaded() {
