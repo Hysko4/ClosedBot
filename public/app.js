@@ -1,6 +1,6 @@
 // ClosedBot — interfaz web (sin dependencias ni paso de compilación).
 
-import { createOffice, visibleProgress } from "./office.js";
+import { createOffice, platformColor, TEAM_COLORS, visibleProgress } from "./office.js";
 
 const $ = (selector) => document.querySelector(selector);
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -443,11 +443,13 @@ function handleEvent(event) {
 
 // ---------- navegación ----------
 
-/** Qué está abierto según la dirección: #/a/<agente> o #/c/<canal>. */
+/** Qué está abierto según la dirección: #/a/<agente> o #/c/<canal> (en la Oficina, #/oficina/a/… o #/oficina/c/…). */
 function currentRoute() {
-  if (/^#\/oficina\/?$/.test(location.hash)) return { kind: "office", agentId: null };
+  if (/^#\/oficina\/?$/.test(location.hash)) return { kind: "office", agentId: null, channelId: null };
   const docked = location.hash.match(/^#\/oficina\/a\/([^/?#]+)/);
-  if (docked) return { kind: "office", agentId: decodeURIComponent(docked[1]) };
+  if (docked) return { kind: "office", agentId: decodeURIComponent(docked[1]), channelId: null };
+  const dockedChannel = location.hash.match(/^#\/oficina\/c\/([^/?#]+)/);
+  if (dockedChannel) return { kind: "office", agentId: null, channelId: decodeURIComponent(dockedChannel[1]) };
   const agent = location.hash.match(/^#\/a\/([^/?#]+)/);
   if (agent) return { kind: "agent", id: decodeURIComponent(agent[1]) };
   const channel = location.hash.match(/^#\/c\/([^/?#]+)/);
@@ -476,14 +478,20 @@ async function route() {
   closeContextMenu();
   hideMentionMenu();
   const inOffice = target?.kind === "office";
-  // En la Oficina (en pantallas anchas), el agente elegido muestra su chat abajo y su ficha a la derecha.
+  // En la Oficina (en pantallas anchas), el agente elegido muestra su chat abajo (y su ficha, si la pides);
+  // el equipo elegido, su canal abajo.
   const docked = inOffice && target.agentId && wideLayout() ? findAgent(target.agentId) : null;
+  const dockedChannel = inOffice && target.channelId && wideLayout() ? findChannel(target.channelId) : null;
   document.body.classList.toggle("in-office", inOffice);
-  document.body.classList.toggle("office-docked", Boolean(docked));
+  document.body.classList.toggle("office-docked", Boolean(docked || dockedChannel));
   if (!docked) closeDockedDetails();
   $("#open-office").setAttribute("aria-current", inOffice ? "page" : "false");
   if (docked) {
     await openDocked(docked);
+    return;
+  }
+  if (dockedChannel) {
+    await openDockedChannel(dockedChannel);
     return;
   }
   if (inOffice) {
@@ -502,6 +510,7 @@ async function route() {
     renderSidebar();
     office.show();
     office.select(null);
+    office.selectTeam(null);
     void refreshPixelLab();
     return;
   }
@@ -570,6 +579,14 @@ function selectInOffice(agentId) {
   location.replace(target);
 }
 
+/** Un equipo en la Oficina: su canal se abre abajo, sin salir de ahí (en el teléfono, el canal completo). */
+function openChannelInOffice(channelId) {
+  if (!wideLayout()) return void navigateChannel(channelId);
+  const target = `#/oficina/c/${encodeURIComponent(channelId)}`;
+  if (location.hash === target) return void route();
+  location.replace(target);
+}
+
 function closeOfficeDock() {
   if (location.hash.startsWith("#/oficina")) location.replace("#/oficina");
 }
@@ -600,6 +617,7 @@ async function openDocked(agent) {
   renderHeader();
   office.show();
   office.select(agent.id);
+  office.selectTeam(null);
   if (changed) {
     restoreDraft();
     renderAttachments();
@@ -614,6 +632,38 @@ async function openDocked(agent) {
   if (!coarsePointer) $("#composer-input").focus({ preventScroll: true });
   scheduleMarkRead(key, 0);
   void refreshPixelLab();
+}
+
+/** La Oficina con un equipo elegido: su canal abajo (el mismo de siempre), con la tarjeta del equipo resaltada. */
+async function openDockedChannel(channel) {
+  const key = `c:${channel.id}`;
+  const changed = convKey() !== key;
+  if (changed) {
+    stopDictation({ cancel: true });
+    stopSpeaking();
+    state.keepUnread.delete(key);
+  }
+  state.currentId = null;
+  state.currentChannelId = channel.id;
+  document.body.classList.add("show-chat");
+  document.body.classList.add("in-channel");
+  // En un canal no se adjuntan archivos ni hay cola propia: cada agente tiene la suya.
+  $("#attach").hidden = true;
+  $("#chat-empty").hidden = true;
+  $("#conversation").hidden = false;
+  renderSidebar();
+  renderHeader();
+  office.show();
+  office.select(null);
+  office.selectTeam(channel.id);
+  if (changed) {
+    restoreDraft();
+    renderAttachments();
+    renderQueue();
+    await loadConversation(key);
+  }
+  if (!coarsePointer) $("#composer-input").focus({ preventScroll: true });
+  scheduleMarkRead(key, 0);
 }
 
 /** La ficha abierta al costado de la Oficina (no la ventana de siempre): se cierra al salir de ahí. */
@@ -933,6 +983,10 @@ const ICONS = {
   play: ["M8.5 6.2l9 5.8-9 5.8z"],
   star: ["M12 4.6l2.2 4.6 5 .7-3.6 3.5.9 5-4.5-2.4-4.5 2.4.9-5-3.6-3.5 5-.7z"],
   help: ["M9.3 9.2a2.8 2.8 0 1 1 3.9 2.6c-.8.3-1.2 1-1.2 1.8v.6", "M12 17.2h.01", "M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 1 0 0-17"],
+  palette: [
+    "M12 4a8 8 0 0 0 0 16c1.3 0 1.8-.9 1.4-1.8-.5-1.1.2-2.2 1.4-2.2H17a3 3 0 0 0 3-3c0-5-3.6-9-8-9z",
+    "M8 10.5h.01M11 7.5h.01M15 8.5h.01",
+  ],
 };
 
 function icon(name, className = "") {
@@ -4350,12 +4404,26 @@ function fillMenu(menu, items, isSub) {
     const checkable = item.checked !== undefined;
     button.setAttribute("role", checkable ? "menuitemradio" : "menuitem");
     if (checkable) button.setAttribute("aria-checked", String(item.checked));
-    const lead = checkable ? (item.checked ? icon("check") : document.createElement("span")) : item.icon ? icon(item.icon) : document.createElement("span");
+    // Un color (el de un equipo): su muestra adelante y la marca al final si es el elegido.
+    const lead = item.swatch
+      ? document.createElement("span")
+      : checkable
+        ? item.checked
+          ? icon("check")
+          : document.createElement("span")
+        : item.icon
+          ? icon(item.icon)
+          : document.createElement("span");
     lead.classList.add("menu-icon");
+    if (item.swatch) {
+      lead.classList.add("menu-swatch");
+      lead.style.setProperty("--swatch", item.swatch);
+    }
     const label = document.createElement("span");
     label.className = "menu-label";
     label.textContent = item.label;
     button.append(lead, label);
+    if (item.swatch && item.checked) button.append(icon("check", "menu-trail"));
     if (item.submenu) {
       button.setAttribute("aria-haspopup", "menu");
       button.setAttribute("aria-expanded", "false");
@@ -4972,6 +5040,32 @@ function officeTeamItems(agentId, fromId) {
   return items;
 }
 
+/** «Cambiar color» de un equipo: los colores de neón y «Automático» (el de su agente si está solo, o uno fijo). */
+function teamColorItems(channelId) {
+  const channel = findChannel(channelId);
+  if (!channel) return [];
+  const main = mainAgent();
+  const members = channel.memberIds.filter((id) => id !== main?.id && findAgent(id));
+  const auto = platformColor({ kind: "room", channelId, seats: members.map((agentId) => ({ agentId })) }, (id) => {
+    const agent = findAgent(id);
+    return agent ? avatarParts(agent)[1] : null;
+  });
+  const current = channel.color ?? "";
+  return [
+    { label: "Automático", swatch: auto, checked: !current, run: () => setTeamColor(channelId, "") },
+    ...TEAM_COLORS.map(({ color, name }) => ({ label: name, swatch: color, checked: current === color, run: () => setTeamColor(channelId, color) })),
+  ];
+}
+
+async function setTeamColor(channelId, color) {
+  try {
+    const result = await api(`/api/channels/${encodeURIComponent(channelId)}`, { method: "PATCH", body: { color } });
+    replaceChannel(result.channel);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
 async function makeLead(channelId, agentId) {
   try {
     const result = await api(`/api/channels/${encodeURIComponent(channelId)}`, { method: "PATCH", body: { leadId: agentId } });
@@ -5031,9 +5125,10 @@ function officeTeamMenu({ kind, channelId = null, empty = false, teamsFull = fal
     items.push({ label: "Ver la pizarra", icon: "book", run: () => office?.showBoard() });
   } else if (kind === "channel" && findChannel(channelId)) {
     items.push(
-      { label: "Abrir el chat del equipo", icon: "chat", run: () => navigateChannel(channelId) },
+      { label: "Abrir el chat del equipo", icon: "chat", run: () => openChannelInOffice(channelId) },
       { label: "Crear un agente aquí", icon: "plus", run: () => createFromOffice({ channelId }) },
       { label: "MCP y habilidades", icon: "plug", run: () => openTeamTools(channelId) },
+      { label: "Cambiar color", icon: "palette", submenu: () => teamColorItems(channelId) },
       { label: "Editar el equipo", icon: "pencil", run: () => openChannelDialog(channelId, { fromOffice: true }) },
       "-",
       { label: "Eliminar el equipo", icon: "trash", danger: true, run: () => deleteChannel(channelId) },
@@ -7862,7 +7957,7 @@ function bindUi() {
     channels: () => state.channels,
     colorOf: (agent) => (agent.main ? "#d97757" : avatarParts(agent)[1]),
     openAgent: selectInOffice,
-    openChannel: (id) => void navigateChannel(id),
+    openChannel: openChannelInOffice,
     openMain: () => {
       const main = mainAgent();
       if (main) selectInOffice(main.id);

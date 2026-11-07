@@ -1747,6 +1747,16 @@ svg {
   color: #bdbdbd;
 }
 
+/* La muestra de un color en un menú (el de un equipo). */
+.menu-swatch {
+  width: 14px;
+  height: 14px;
+  margin: 2px;
+  border-radius: 50%;
+  background: var(--swatch);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25), 0 0 8px var(--swatch);
+}
+
 .menu-label {
   flex: 1;
   min-width: 0;
@@ -4571,7 +4581,18 @@ svg {
   }
 
   body.office-docked .messages {
-    padding-top: 52px;
+    padding: 52px 28px 12px;
+  }
+
+  /* Abajo, el chat usa todo el ancho (pedido): la Oficina le deja poco alto, así que se aprovechan los costados. */
+  body.office-docked .thread,
+  body.office-docked .queue-bar,
+  body.office-docked .composer {
+    max-width: none;
+  }
+
+  body.office-docked .composer-area {
+    padding-inline: 28px;
   }
 
   body.office-docked .dock-close {

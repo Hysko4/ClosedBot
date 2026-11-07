@@ -504,7 +504,7 @@ export function createApp(options: AppOptions): App {
   route("PATCH", "/api/channels/:id", async (ctx) => {
     const body = await readJson(ctx.req);
     const patch: Record<string, unknown> = {};
-    for (const key of ["name", "topic", "memberIds", "leadId"]) if (key in body) patch[key] = body[key];
+    for (const key of ["name", "topic", "memberIds", "leadId", "color"]) if (key in body) patch[key] = body[key];
     return { channel: service.updateChannel(param(ctx, 0), patch) };
   });
 

@@ -129,6 +129,17 @@ export const MAIN_KNOWN_META = "main_known";
 export const BOARD_META = "main_board";
 /** Avance que informó cada agente de su tarea (report_progress), como JSON { id: AgentProgress }. */
 export const PROGRESS_META = "agent_progress";
+/** Avance de cada equipo (canal) en su trabajo actual, como JSON { channelId: TeamProgressRecord }. */
+export const TEAM_PROGRESS_META = "team_progress";
+/** Cuánto se sigue mostrando un avance: el terminado, media hora; el que va en camino, 12 horas sin novedades. */
+const PROGRESS_DONE_MS = 30 * 60_000;
+const PROGRESS_STALE_MS = 12 * 3_600_000;
+/**
+ * Un equipo cuyos integrantes que informaron ya terminaron, y en el que nadie trabaja hace este rato, da su trabajo
+ * por listo (los que no informaron no tenían parte). Antes de eso puede llegar la etapa siguiente del mismo trabajo.
+ * La Oficina usa el mismo plazo (TEAM_SETTLE_MS en public/office.js).
+ */
+const TEAM_SETTLE_MS = 10 * 60_000;
 /** Topes para los agentes que crea el bot principal: en total y en un mismo turno. */
 export const MAX_AGENTS = 60;
 export const MAX_AGENTS_PER_TURN = 8;
@@ -238,6 +249,13 @@ export interface AgentProgress {
   at: number;
 }
 
+/** El trabajo actual de un equipo: lo último de cada integrante que informó, y el avance que se muestra. */
+interface TeamProgressRecord {
+  percent: number;
+  at: number;
+  parts: Record<string, number>;
+}
+
 /** Un recuerdo tal como lo ve la interfaz. */
 export type MemoryView = MemoryRecord;
 
@@ -306,6 +324,11 @@ export interface ChannelView extends ChannelRecord {
   unread: boolean;
   /** Miembros que están trabajando ahora en algo de este canal. */
   working: string[];
+  /**
+   * Avance del equipo en su trabajo actual (la tarjeta de la Oficina), o null. `done`: los que informaron ya
+   * terminaron; la Oficina lo muestra listo cuando además nadie del equipo sigue trabajando.
+   */
+  progress: { percent: number; at: number; done: boolean } | null;
 }
 
 export interface ChannelInput {
@@ -313,6 +336,8 @@ export interface ChannelInput {
   topic?: unknown;
   memberIds?: unknown;
   leadId?: unknown;
+  /** Color del equipo en la Oficina («#rrggbb»); vacío o null vuelve al automático. */
+  color?: unknown;
 }
 
 /** La Oficina: a qué equipo pasa un agente que el usuario arrastró. */
@@ -533,6 +558,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   #mcpSlots = MCP_PARALLEL;
   readonly #mcpQueue: Array<() => void> = [];
   #progress: Map<string, AgentProgress> | null = null;
+  #teamProgress: Map<string, TeamProgressRecord> | null = null;
 
   constructor(options: ServiceOptions) {
     super();
@@ -1485,7 +1511,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 
   updateChannel(id: string, patch: ChannelInput): ChannelView {
     const channel = this.#requireChannel(id);
-    const next: Partial<Pick<ChannelRecord, "name" | "topic" | "leadId" | "memberIds">> = {};
+    const next: Partial<Pick<ChannelRecord, "name" | "topic" | "leadId" | "memberIds" | "color">> = {};
+    if (patch.color !== undefined) next.color = channelColor(patch.color);
     if (patch.name !== undefined) {
       const name = channelName(patch.name);
       const other = this.#store.findChannelByName(name);
@@ -1720,7 +1747,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 
   #channelView(channel: ChannelRecord): ChannelView {
     const working = [...this.#active.values()].filter((state) => state.channelId === channel.id).map((state) => state.agentId);
-    return { ...channel, unread: channel.lastAt > channel.readAt, working: [...new Set(working)] };
+    return { ...channel, unread: channel.lastAt > channel.readAt, working: [...new Set(working)], progress: this.#channelProgress(channel) };
   }
 
   #emitChannels(): void {
@@ -2627,6 +2654,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       // Un encargo nuevo (del usuario o de Claude Bot) después de terminar el anterior: la barra vuelve a cero.
       if (!delivery.replyTo && (!sender || this.#isMain(sender)) && (this.#progressMap().get(agent.id)?.percent ?? 0) >= 100) {
         this.#setProgress(agent.id, null);
+        // Si es el encargado del canal donde llegó, el equipo también empieza un trabajo nuevo.
+        if (channel && channel.leadId === agent.id) this.#restartTeamProgress(channel);
       }
       // Lo que le escribe Claude Bot a un agente lleva la pizarra del trabajo.
       const board = sender && this.#isMain(sender) && !this.#isMain(fresh) ? boardSection(this.#board(), sender.name) : null;
@@ -3914,10 +3943,120 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   #setProgress(agentId: string, progress: AgentProgress | null): void {
     const map = this.#progressMap();
     if (!progress && !map.has(agentId)) return;
+    // El equipo se calcula con lo de antes de este informe (la primera vez se parte de lo que se veía).
+    const teams = progress ? this.#updateTeamProgress(agentId, progress.percent, progress.at) : false;
     if (progress) map.set(agentId, progress);
     else map.delete(agentId);
     this.#store.setMeta(PROGRESS_META, JSON.stringify(Object.fromEntries(map)));
     this.#emitAgents();
+    if (teams) this.#emitChannels();
+  }
+
+  // ---------- avance de cada equipo ----------
+  // Pedido del usuario («iba en 60 y ahora 30, que sea consistente»): el avance de un equipo cuenta a todos sus
+  // integrantes desde el principio (quien todavía no informa, 0) y no retrocede. Quien terminó sigue contando 100
+  // aunque pase la media hora de su barra o reciba otro encargo. Así, sumarse con poco ya no lo baja: se contaba desde
+  // antes. Está listo cuando todos informaron 100, o cuando los que informaron terminaron y nadie del equipo trabaja
+  // hace 10 minutos. El trabajo siguiente empieza con el primer informe después de eso, tras 12 horas sin novedades o
+  // cuando el encargado, que ya había terminado, recibe un encargo nuevo del usuario en su canal.
+
+  #teamProgressMap(): Map<string, TeamProgressRecord> {
+    if (this.#teamProgress) return this.#teamProgress;
+    const map = new Map<string, TeamProgressRecord>();
+    try {
+      const saved: unknown = JSON.parse(this.#store.getMeta(TEAM_PROGRESS_META) ?? "{}");
+      if (isRecord(saved)) {
+        for (const [id, value] of Object.entries(saved)) {
+          if (!isRecord(value) || typeof value.percent !== "number" || typeof value.at !== "number" || !isRecord(value.parts)) continue;
+          const parts: Record<string, number> = {};
+          for (const [agentId, percent] of Object.entries(value.parts)) if (typeof percent === "number") parts[agentId] = percent;
+          map.set(id, { percent: value.percent, at: value.at, parts });
+        }
+      }
+    } catch {
+      // Un valor dañado no impide arrancar: los equipos empiezan sin avance.
+    }
+    this.#teamProgress = map;
+    return map;
+  }
+
+  #saveTeamProgress(): void {
+    const map = this.#teamProgressMap();
+    const known = new Set([...this.#store.listChannels(), ...this.#store.listChannels({ deleted: true })].map((channel) => channel.id));
+    for (const id of [...map.keys()]) if (!known.has(id)) map.delete(id);
+    this.#store.setMeta(TEAM_PROGRESS_META, JSON.stringify(Object.fromEntries(map)));
+  }
+
+  /** Lo que informaron sus integrantes y todavía se ve (antes de la 0.9.12 la tarjeta promediaba solo eso). */
+  #visibleParts(channel: ChannelRecord, now: number): Record<string, { percent: number; at: number }> {
+    const parts: Record<string, { percent: number; at: number }> = {};
+    const progress = this.#progressMap();
+    for (const id of channel.memberIds) {
+      const entry = progress.get(id);
+      if (entry && progressShows(entry, now)) parts[id] = { percent: entry.percent, at: entry.at };
+    }
+    return parts;
+  }
+
+  /** Nadie del equipo (salvo `except`) está trabajando ni tiene mensajes esperando turno. */
+  #teamIdle(channel: ChannelRecord, except: string | null = null): boolean {
+    return channel.memberIds.every((id) => id === except || (!this.#active.has(id) && this.#store.countQueued(id) === 0));
+  }
+
+  /** Suma el informe de un integrante al trabajo de cada equipo suyo. Dice si cambió alguno. */
+  #updateTeamProgress(agentId: string, percent: number, now: number): boolean {
+    const map = this.#teamProgressMap();
+    let changed = false;
+    for (const channel of this.#store.listChannels()) {
+      if (!channel.memberIds.includes(agentId)) continue;
+      const record = map.get(channel.id);
+      let parts: Record<string, number>;
+      let floor = 0;
+      if (!record) {
+        // Primera vez (datos de antes de la 0.9.12): se parte de lo que se veía de cada uno.
+        parts = Object.fromEntries(Object.entries(this.#visibleParts(channel, now)).map(([id, part]) => [id, part.percent]));
+        floor = teamAverage(parts, channel.memberIds) ?? 0;
+      } else if (!progressShows(record, now) || (percent < 100 && this.#teamFinished(channel, record, agentId, now))) {
+        parts = {};
+      } else {
+        parts = { ...record.parts };
+        floor = record.percent;
+      }
+      parts[agentId] = percent;
+      for (const id of Object.keys(parts)) if (!channel.memberIds.includes(id)) delete parts[id];
+      map.set(channel.id, { percent: Math.max(floor, teamAverage(parts, channel.memberIds) ?? 0), at: now, parts });
+      changed = true;
+    }
+    if (changed) this.#saveTeamProgress();
+    return changed;
+  }
+
+  /** El trabajo del equipo terminó: todos informaron 100, o los que informaron terminaron y el equipo quedó quieto. */
+  #teamFinished(channel: ChannelRecord, record: TeamProgressRecord, reporter: string, now: number): boolean {
+    if (record.percent >= 100) return true;
+    return partsDone(record.parts, channel.memberIds) && now - record.at >= TEAM_SETTLE_MS && this.#teamIdle(channel, reporter);
+  }
+
+  /** El encargado ya había terminado y le llega un encargo nuevo del usuario en su canal: el equipo empieza otro trabajo. */
+  #restartTeamProgress(channel: ChannelRecord): void {
+    this.#teamProgressMap().set(channel.id, { percent: 0, at: Date.now(), parts: {} });
+    this.#saveTeamProgress();
+    this.#emitChannels();
+  }
+
+  #channelProgress(channel: ChannelRecord): ChannelView["progress"] {
+    const record = this.#teamProgressMap().get(channel.id);
+    if (record) {
+      const parts = Object.fromEntries(Object.entries(record.parts).filter(([id]) => channel.memberIds.includes(id)));
+      if (!Object.keys(parts).length) return null;
+      return { percent: record.percent, at: record.at, done: partsDone(parts, channel.memberIds) };
+    }
+    // Sin registro todavía (de antes de la 0.9.12): lo que se ve de cada uno, contando a todo el equipo.
+    const visible = this.#visibleParts(channel, Date.now());
+    const parts = Object.fromEntries(Object.entries(visible).map(([id, part]) => [id, part.percent]));
+    const percent = teamAverage(parts, channel.memberIds);
+    if (percent === null) return null;
+    return { percent, at: Math.max(...Object.values(visible).map((part) => part.at)), done: partsDone(parts, channel.memberIds) };
   }
 
   #emitAgents(): void {
@@ -4142,6 +4281,31 @@ function readOptions(payload: Record<string, unknown>): QuestionOption[] {
 /** Huella de lo que recibe un hilo al abrirse (instrucciones, modelo, herramientas…). */
 function paramsPrint(params: Record<string, unknown>): string {
   return createHash("sha256").update(JSON.stringify(params)).digest("hex").slice(0, 24);
+}
+
+/** El color que elegiste para un equipo: «#rrggbb» (en minúsculas) o vacío para el automático. */
+function channelColor(value: unknown): string {
+  if (value === null || value === "") return "";
+  if (typeof value !== "string" || !/^#[0-9a-f]{6}$/i.test(value.trim())) throw new ServiceError("El color no es válido.");
+  return value.trim().toLowerCase();
+}
+
+/** Si un avance todavía se muestra: el terminado, media hora; el que va en camino, 12 horas sin novedades. */
+function progressShows(progress: { percent: number; at: number }, now: number): boolean {
+  return now - progress.at <= (progress.percent >= 100 ? PROGRESS_DONE_MS : PROGRESS_STALE_MS);
+}
+
+/** El avance de un equipo: el promedio de todos sus integrantes (quien no informó, 0); null si nadie informó. */
+function teamAverage(parts: Record<string, number>, memberIds: string[]): number | null {
+  const reported = memberIds.filter((id) => typeof parts[id] === "number");
+  if (!reported.length) return null;
+  return Math.round(memberIds.reduce((sum, id) => sum + (parts[id] ?? 0), 0) / memberIds.length);
+}
+
+/** Los que informaron (al menos uno) ya terminaron. */
+function partsDone(parts: Record<string, number>, memberIds: string[]): boolean {
+  const reported = memberIds.filter((id) => typeof parts[id] === "number");
+  return reported.length > 0 && reported.every((id) => (parts[id] ?? 0) >= 100);
 }
 
 function clip(text: string, max: number): string {

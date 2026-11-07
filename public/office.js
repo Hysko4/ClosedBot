@@ -7,8 +7,22 @@
 
 /** Colores de neón de las plataformas, en orden. */
 const NEON = ["#2de2c8", "#3fb6ff", "#ff4fa3", "#f5d63d", "#9b7bff", "#ff8a3d", "#5cf27e", "#ff5d5d"];
+/** Los colores que puedes elegir para un equipo (clic derecho en su tarjeta → «Cambiar color»). */
+export const TEAM_COLORS = [
+  { color: "#2de2c8", name: "Turquesa" },
+  { color: "#3fb6ff", name: "Celeste" },
+  { color: "#9b7bff", name: "Morado" },
+  { color: "#ff4fa3", name: "Rosado" },
+  { color: "#ff5d5d", name: "Rojo" },
+  { color: "#ff8a3d", name: "Naranja" },
+  { color: "#f5d63d", name: "Amarillo" },
+  { color: "#5cf27e", name: "Verde" },
+  { color: "#e9edff", name: "Blanco" },
+];
 const HALL_COLOR = "#8fa8ff";
 const GHOST_COLOR = "#b4c2ff";
+/** Un equipo cuyos integrantes que informaron terminaron, y quieto este rato, se ve listo (como TEAM_SETTLE_MS en service.ts). */
+const TEAM_SETTLE_MS = 10 * 60_000;
 /** Dónde cae un robot que sueltas en «Equipo nuevo» (no es una plataforma: va abajo, en la pantalla). */
 const NEW_TEAM = { id: "new", kind: "new", title: "Equipo nuevo", channelId: null, members: 0, color: GHOST_COLOR };
 /** «Sin grupo» con varios agentes: no es un equipo, así que va en un color neutro. */
@@ -78,6 +92,10 @@ export function planOffice({ agents, channels, mainId, prefer = null }) {
       leadId: channel.leadId,
       members: channel.memberIds.length,
       seats: platformSeats(members),
+      // El color que elegiste para el equipo (vacío: el automático).
+      chosenColor: channel.color ?? "",
+      // El avance del equipo lo lleva el servidor (no retrocede): ver «avance de cada equipo» en service.ts.
+      progress: channel.progress ?? null,
     });
   }
   const loose = agents.filter((agent) => agent.id !== mainId && !home.has(agent.id)).map((agent) => agent.id);
@@ -119,6 +137,7 @@ export function dropVerdict(name, from, target) {
  */
 export function platformColor(spec, agentColor) {
   if (spec.kind === "hall") return HALL_COLOR;
+  if (spec.chosenColor) return spec.chosenColor;
   if (spec.seats?.length === 1) {
     const color = agentColor(spec.seats[0].agentId);
     if (color) return color;
@@ -338,6 +357,8 @@ export function createOffice(host) {
   let spotlight = null;
   /** El agente elegido: su chat y su ficha están abiertos junto a la Oficina. */
   let selectedId = null;
+  /** El equipo cuyo canal está abierto abajo: su tarjeta queda resaltada. */
+  let selectedTeam = null;
 
   /** El equipo donde dejaste a cada agente (para los que están en varios canales). */
   const prefer = new Map();
@@ -384,7 +405,9 @@ export function createOffice(host) {
     platforms = plan.panels.map((spec) => {
       const hall = spec.kind === "hall";
       const color = platformColor(spec, agentColor);
-      return { ...spec, color, side: hall ? 2 : platformSide(spec.seats.length), x: 0, y: 0 };
+      // Alguien del equipo trabaja o tiene mensajes esperando: el equipo todavía no está listo.
+      const teamBusy = spec.seats.some((seat) => ["working", "queued"].includes(byId.get(seat.agentId)?.state));
+      return { ...spec, color, side: hall ? 2 : platformSide(spec.seats.length), x: 0, y: 0, teamBusy };
     });
     empty = !agents.some((agent) => !agent.main);
     teamsFull = channels.length >= MAX_TEAMS;
@@ -488,8 +511,22 @@ export function createOffice(host) {
     return platform.seats.map((seat) => robots.get(seat.agentId)).filter((robot) => robot && robot.platform === platform).map((robot) => robot.agent);
   }
 
-  /** Avance del equipo: el promedio de lo que informaron sus agentes (o el de Claude Bot en su plataforma). */
+  /**
+   * Avance del equipo: el de su canal, que lleva el servidor, cuenta a todo el equipo y no retrocede (pedido: «que sea
+   * consistente»); listo cuando los que informaron terminaron y nadie sigue trabajando. En la plataforma de Claude Bot,
+   * el suyo, y en «Sin grupo», el promedio de lo que informaron sus agentes.
+   */
   function teamProgress(platform) {
+    if (platform.channelId) {
+      const progress = platform.progress;
+      if (!progress) return null;
+      const now = Date.now();
+      // Los que informaron terminaron y nadie trabaja hace un rato: listo (los demás no tenían parte).
+      if (progress.percent < 100 && progress.done && !platform.teamBusy && now - progress.at >= TEAM_SETTLE_MS) {
+        return visibleProgress({ progress: { percent: 100, at: progress.at + TEAM_SETTLE_MS } }, now)?.percent ?? null;
+      }
+      return visibleProgress({ progress }, now)?.percent ?? null;
+    }
     const values = teamOf(platform)
       .map((agent) => visibleProgress(agent))
       .filter(Boolean)
@@ -1097,7 +1134,9 @@ export function createOffice(host) {
     ctx.stroke();
     ctx.restore();
 
-    const hot = hovered?.platform === platform && (hovered.kind === "channel" || hovered.kind === "board" || hovered.kind === "loose");
+    const hot =
+      (hovered?.platform === platform && (hovered.kind === "channel" || hovered.kind === "board" || hovered.kind === "loose")) ||
+      (selectedTeam !== null && platform.channelId === selectedTeam);
     ctx.save();
     ctx.shadowColor = rgba(color, hot ? 0.9 : 0.6);
     ctx.shadowBlur = hot ? 24 : 16;
@@ -2000,6 +2039,17 @@ export function createOffice(host) {
     }
   }
 
+  /** Trae a la vista la tarjeta de un equipo (cuando su canal se abre abajo y la Oficina se achica). */
+  function revealTeam(channelId) {
+    const platform = platforms.find((item) => item.channelId === channelId);
+    if (!platform?.card) return;
+    const top = view.oy + platform.card.y * view.scale;
+    const bottom = view.oy + (platform.cy + 40) * view.scale;
+    if (top < scroller.scrollTop + 20 || bottom > scroller.scrollTop + scroller.clientHeight) {
+      scroller.scrollTo({ top: Math.max(0, top - 30), behavior: reducedMotion ? "auto" : "smooth" });
+    }
+  }
+
   const api = {
     show,
     hide,
@@ -2018,6 +2068,17 @@ export function createOffice(host) {
           if (selectedId !== agentId || !visible) return;
           if (!robots.has(agentId)) sync();
           reveal(agentId);
+        }),
+      );
+    },
+    /** El equipo elegido (su canal está abierto abajo), o null. */
+    selectTeam(channelId) {
+      const changed = channelId !== selectedTeam;
+      selectedTeam = channelId;
+      if (!changed || !channelId || !visible) return;
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          if (selectedTeam === channelId && visible) revealTeam(channelId);
         }),
       );
     },

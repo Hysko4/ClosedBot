@@ -93,6 +93,15 @@ test("canal: crear, editar, eliminar, restaurar y borrar para siempre", async ()
     assert.equal(lead.leadId, beto.id);
     assert.equal(h.service.updateChannel(channel.id, { name: "VENTAS" }).name, "VENTAS", "el mismo canal puede cambiar mayúsculas");
 
+    // El color del equipo en la Oficina (pedido): se elige, se guarda en minúsculas y vacío vuelve al automático.
+    assert.equal(channel.color, "", "sin elegir, el automático");
+    assert.equal(h.service.updateChannel(channel.id, { color: " #FF4FA3 " }).color, "#ff4fa3");
+    assert.equal(h.service.getChannel(channel.id).color, "#ff4fa3");
+    assert.throws(() => h.service.updateChannel(channel.id, { color: "rojo" }), /color no es válido/);
+    assert.throws(() => h.service.updateChannel(channel.id, { color: "#12345" }), /color no es válido/);
+    assert.equal(h.service.updateChannel(channel.id, { color: "" }).color, "");
+    assert.equal(h.service.updateChannel(channel.id, { color: null }).color, "");
+
     h.service.deleteChannel(channel.id);
     assert.deepEqual(h.service.listChannels(), []);
     assert.equal(h.service.listDeletedChannels()[0]?.id, channel.id);

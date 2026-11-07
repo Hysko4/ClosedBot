@@ -546,6 +546,18 @@ test("Oficina (interfaz): el encabezado dice solo «Oficina», sin el resumen ni
   assert.doesNotMatch(script, /office-status|preguntas? para ti|todos libres/);
 });
 
+test("Oficina (interfaz): el canal de un equipo se abre abajo y el chat de abajo usa todo el ancho", () => {
+  const script = readFileSync(join(publicDir, "app.js"), "utf8");
+  // La ruta del canal abajo existe y la usan la tarjeta, la plataforma y «Abrir el chat del equipo».
+  assert.match(script, /#\\\/oficina\\\/c\\\//);
+  assert.match(script, /openChannel: openChannelInOffice/);
+  assert.match(script, /function openChannelInOffice\(channelId\) \{\s*if \(!wideLayout\(\)\) return void navigateChannel\(channelId\);/);
+  const css = readFileSync(join(publicDir, "styles.css"), "utf8");
+  assert.match(css, /body\.office-docked \.thread,\s*body\.office-docked \.queue-bar,\s*body\.office-docked \.composer \{\s*max-width: none;\s*\}/);
+  const office = readFileSync(join(publicDir, "office.js"), "utf8");
+  assert.match(office, /selectTeam\(channelId\)/);
+});
+
 test("Oficina (interfaz): una plataforma por grupo con un escritorio por integrante, y el resto en «Sin grupo»", async () => {
   const office = (await import(new URL("../../public/office.js", import.meta.url).href)) as {
     planOffice: (input: unknown) => { panels: Array<Record<string, any>>; home: Map<string, string> };

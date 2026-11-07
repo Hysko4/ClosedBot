@@ -179,6 +179,8 @@ export interface ChannelRecord {
   lastAt: number;
   /** Fecha en que se movió a «Canales eliminados»; null si está activo. */
   deletedAt: number | null;
+  /** Color del equipo en la Oficina («#rrggbb»); vacío = el automático. */
+  color: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -328,6 +330,7 @@ const ADDED_COLUMNS: Array<{ table: string; column: string; ddl: string; backfil
   { table: "deliveries", column: "steps", ddl: "ALTER TABLE deliveries ADD COLUMN steps INTEGER NOT NULL DEFAULT 0" },
   { table: "agents", column: "appearance", ddl: "ALTER TABLE agents ADD COLUMN appearance TEXT NOT NULL DEFAULT ''" },
   { table: "agents", column: "character", ddl: "ALTER TABLE agents ADD COLUMN character TEXT" },
+  { table: "channels", column: "color", ddl: "ALTER TABLE channels ADD COLUMN color TEXT NOT NULL DEFAULT ''" },
 ];
 
 /** Tablas que ya no se usan: la de las rondas de Claude Bot (solo existió en la 0.8.0). */
@@ -889,9 +892,10 @@ export class Store {
 
   updateChannel(
     id: string,
-    patch: Partial<Pick<ChannelRecord, "name" | "topic" | "leadId" | "memberIds" | "preview" | "readAt" | "deletedAt">>,
+    patch: Partial<Pick<ChannelRecord, "name" | "topic" | "leadId" | "memberIds" | "preview" | "readAt" | "deletedAt" | "color">>,
   ): ChannelRecord {
     const columns: Record<string, string> = {
+      color: "color",
       name: "name",
       topic: "topic",
       leadId: "lead_agent_id",
@@ -1127,6 +1131,7 @@ function toChannel(row: Row): ChannelRecord {
     readAt: Number(row.read_at ?? 0),
     lastAt: row.last_at === null || row.last_at === undefined ? 0 : Number(row.last_at),
     deletedAt: row.deleted_at === null || row.deleted_at === undefined ? null : Number(row.deleted_at),
+    color: String(row.color ?? ""),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
