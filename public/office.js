@@ -388,6 +388,7 @@ export function createOffice(host) {
     try {
       const data = await host.api("/api/office");
       live.board = data.board ?? "";
+      live.boardChecklist = data.boardChecklist ?? null;
       live.activity = new Map(Object.entries(data.activity ?? {}));
       live.asking = new Set(data.asking ?? []);
       live.failed = new Map((data.failed ?? []).map((id) => [id, Date.now()]));
@@ -1854,8 +1855,23 @@ export function createOffice(host) {
     const title = boardView.querySelector(".office-board-head h3");
     if (title) title.textContent = `Pizarra de ${mainName()}`;
     body.replaceChildren();
-    if (live.board.trim()) host.renderMarkdown(live.board, body);
-    else body.textContent = `Está vacía. ${mainName()} anota aquí el plan cuando reparte un trabajo: quién hace qué y en qué orden.`;
+    // Minimalista: la lista de tareas del trabajo (como el cuadro de avance de los hilos); las notas, plegadas.
+    const card = live.boardChecklist && host.checklistCard ? host.checklistCard(live.boardChecklist) : null;
+    if (card) body.append(card);
+    const notes = live.board.trim();
+    if (notes) {
+      const details = document.createElement("details");
+      details.className = "office-board-notes";
+      const summary = document.createElement("summary");
+      summary.textContent = "Notas";
+      const text = document.createElement("div");
+      text.className = "md";
+      host.renderMarkdown(notes, text);
+      details.append(summary, text);
+      details.open = !card;
+      body.append(details);
+    }
+    if (!card && !notes) body.textContent = `Está vacía. ${mainName()} anota aquí las tareas cuando reparte un trabajo.`;
   }
 
   function closeBoard() {
@@ -2051,6 +2067,15 @@ export function createOffice(host) {
 
   function onMessage(agentId, message) {
     if (!message) return;
+    // La lista de tareas del bot principal es lo que muestra la pizarra.
+    if (message.role === "checklist" && !message.channelId && host.isMain?.(agentId)) {
+      live.boardChecklist = message;
+      if (!boardView.hidden) {
+        fillBoard();
+        placeBoard();
+      }
+      return;
+    }
     if (message.role === "activity") {
       const payload = message.payload ?? null;
       if (payload?.kind === "board-updated") {

@@ -23,7 +23,7 @@ export const MAIN_AGENT_GUIDE = [
   "   - Grok: QA y segunda opinión: otra mirada que la de quien hizo el trabajo.",
   "   - Gemini (plan gratis): solo tareas cortas o de respaldo.",
   "   Claude no genera imágenes: encárgaselas a un agente de Codex; si no hay o no puede, a uno de Gemini o de Grok.",
-  "4. Anota el plan en la pizarra con update_board: el objetivo, las partes, quién hace cada una (y con qué proveedor), en qué orden y dónde queda cada entrega. La reciben los agentes cuando les escribes.",
+  "4. Lleva las tareas con update_checklist (una línea corta por parte: «Agente: qué hace»): es lo que el usuario ve en la pizarra de la Oficina. En la pizarra (update_board) deja solo notas breves para los agentes: el objetivo, el orden y dónde queda cada entrega. La reciben cuando les escribes.",
   "5. Reparte con send_message. Cada encargo se entiende solo: qué hacer, con qué archivos, qué entregar y dónde guardarlo (en la carpeta compartida, en una carpeta del proyecto). Pide que te respondan con un resumen breve y la ruta de lo que entregan. Lo que no depende de otra parte, encárgalo a la vez.",
   "6. Cada respuesta te llega sola, como un mensaje nuevo: no esperes en el mismo turno. Revisa la entrega (abre los archivos; las imágenes también las puedes ver) antes de pasársela al siguiente. Si no sirve, pídele al mismo agente la corrección concreta.",
   "7. QA: revisa un agente con un proveedor distinto del que hizo el trabajo. Si encuentra fallas, vuelven al autor con lo que hay que corregir.",

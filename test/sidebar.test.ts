@@ -437,10 +437,11 @@ test("menú del agente (interfaz): las opciones y el orden de OpenBot; sin «Mar
     "Duplicar agente",
     "Ocultar agente",
     "-",
+    "Eliminar chat",
     "Eliminar agente",
   ]);
   assert.deepEqual(labels(agentMenuItems("beto")).filter((label) => /fijar|agente$/i.test(label)), ["Desfijar", "Editar agente", "Duplicar agente", "Mostrar agente", "Eliminar agente"]);
-  assert.deepEqual(labels(agentMenuItems("bot")), ["Nuevo hilo", "Abrir en ventana nueva", "Editar agente"], "Claude Bot no se mueve, ni se duplica, ni se oculta, ni se elimina");
+  assert.deepEqual(labels(agentMenuItems("bot")), ["Nuevo hilo", "Abrir en ventana nueva", "Editar agente", "-", "Eliminar chat"], "Claude Bot no se mueve, ni se duplica, ni se oculta, ni se elimina");
   // Con varios marcados (Ctrl/Mayús+clic), «Mover» y «Eliminar» son para todos.
   context.state.selection = new Set(["ana", "beto"]);
   assert.deepEqual(labels(agentMenuItems("ana")).filter((label) => /^(Mover|Eliminar)/.test(label)), ["Mover 2 a", "Eliminar 2 agentes"]);

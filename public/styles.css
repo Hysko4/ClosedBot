@@ -5737,3 +5737,42 @@ body.solo-window .chat {
 .waiting-resume:hover {
   background: rgba(255, 255, 255, 0.08);
 }
+
+/* Pizarra minimalista: la lista de tareas del bot principal, con tinta oscura sobre el blanco. */
+.office-board-text .checklist {
+  --text: #1d2433;
+  --text-2: #5b6474;
+  --muted: #6b7484;
+  max-width: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.office-board-text .checklist-step[data-status="done"] .checklist-mark {
+  background: #1f4fd1;
+  color: #fff;
+}
+.office-board-text .checklist-step[data-status="pending"] .checklist-mark {
+  border-color: #9aa3b5;
+}
+.office-board-text .checklist-step[data-status="in_progress"] .checklist-mark {
+  border-color: rgba(31, 79, 209, 0.18);
+  border-top-color: #1f4fd1;
+}
+.office-board-notes {
+  margin-top: 12px;
+  font-size: 13px;
+  color: #5b6474;
+}
+.office-board-notes > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #1f4fd1;
+}
+.office-board-notes[open] > summary {
+  margin-bottom: 6px;
+}
+.office-board-text .checklist-steps {
+  margin: 0;
+  padding: 0;
+}

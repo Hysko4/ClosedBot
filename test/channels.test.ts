@@ -321,3 +321,23 @@ test("canal: al eliminar un agente deja los canales y lo que escribió el usuari
     await h.close();
   }
 });
+
+test("canal: «Eliminar chat» borra lo escrito y lo que esperaba turno, sin tocar el equipo", async () => {
+  const h = await createHarness();
+  try {
+    const ana = h.service.createAgent({ name: "Ana", provider: "demo" });
+    const channel = h.service.createChannel({ name: "Limpio", memberIds: [ana.id] });
+    h.service.sendChannelMessage(channel.id, "hola");
+    await waitFor(() => replies(h, channel.id).some((message) => message.status === "completed"), 5_000, "Ana responde");
+    await waitFor(() => h.service.getAgent(ana.id).state === "idle", 3_000, "Ana libre");
+    h.service.setPaused(ana.id, true);
+    h.service.sendChannelMessage(channel.id, "espera");
+    const cleared = h.service.clearChannel(channel.id);
+    assert.equal(h.service.listChannelMessages(channel.id, 50).length, 0);
+    assert.equal(h.service.getAgent(ana.id).queued, 0);
+    assert.deepEqual(cleared.memberIds, [ana.id]);
+    assert.equal(cleared.preview, "");
+  } finally {
+    await h.close();
+  }
+});

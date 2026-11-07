@@ -430,6 +430,8 @@ export interface OfficeArtView {
 /** Lo que necesita la Oficina al abrirse; lo demás llega con los eventos. */
 export interface OfficeSnapshot {
   board: string;
+  /** La última lista de tareas del bot principal: es lo que muestra la pizarra. */
+  boardChecklist: MessageRecord | null;
   images: Array<{ agentId: string; channelId: string | null; path: string; at: number }>;
   activity: Record<string, { text: string; at: number }>;
   asking: string[];
@@ -2037,6 +2039,22 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     return { message, recipients: recipients.map((agent) => ({ id: agent.id, name: agent.name })) };
   }
 
+  /** «Eliminar chat» de un canal: se borra lo escrito y lo que esperaba turno; el equipo sigue igual. */
+  clearChannel(id: string): ChannelView {
+    const channel = this.#requireChannel(id);
+    if ([...this.#active.values()].some((state) => state.channelId === id)) {
+      throw new ServiceError("Alguien del equipo está trabajando en este canal: detenlo antes de eliminar el chat.", 409);
+    }
+    const cancelled = this.#store.cancelQueuedForChannel(id);
+    this.#store.deleteChannelMessages(id);
+    const updated = this.#store.updateChannel(id, { preview: "", readAt: Date.now() });
+    this.#restartTeamProgress(channel);
+    for (const agentId of new Set(cancelled.map((delivery) => delivery.agentId))) this.#emitQueue(agentId);
+    this.#emitAgents();
+    this.#emitChannels();
+    return this.#channelView(updated);
+  }
+
   markChannelRead(id: string): ChannelView {
     const channel = this.#requireChannel(id);
     if (channel.lastAt <= channel.readAt) return this.#channelView(channel);
@@ -3216,8 +3234,10 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#studio.ensureArt();
     const activity: Record<string, { text: string; at: number }> = {};
     for (const item of this.#store.latestActivities(Date.now() - 30 * 60_000)) activity[item.agentId] = { text: item.text, at: item.at };
+    const mainId = this.#mainAgentId;
     return {
       board: this.#board(),
+      boardChecklist: mainId ? this.#store.lastChecklist({ agentId: mainId }) : null,
       images: this.#store.recentImages(40),
       activity,
       asking: this.#store.agentsAsking(),

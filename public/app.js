@@ -3495,9 +3495,9 @@ async function agentAction(action, agentId = state.currentId) {
       showToast(agent.paused ? "Cola reanudada." : "Cola en pausa: los mensajes nuevos esperarán.");
     } else if (action === "reset") {
       const ok = await confirmAction(
-        "¿Empezar de cero?",
-        `Se borra el historial de ${agent.name} y su cola, y empieza una conversación nueva. Los archivos de su carpeta y sus rutinas no se tocan.`,
-        "Empezar de cero",
+        "¿Eliminar el chat?",
+        `Se borra el chat con ${agent.name} y su cola, y empieza una conversación nueva. Sus archivos, recuerdos y rutinas no se tocan.`,
+        "Eliminar chat",
       );
       if (!ok) return;
       await api(`${path}/reset`, { method: "POST" });
@@ -4076,6 +4076,28 @@ async function setChannelUnread(channelId, unread) {
   }
 }
 
+async function clearChannel(channelId) {
+  closeContextMenu();
+  const channel = findChannel(channelId);
+  if (!channel) return;
+  const ok = await confirmAction(
+    "¿Eliminar el chat?",
+    `Se borra todo lo escrito en «${channel.name}» y lo que esperaba turno. El equipo y sus agentes siguen igual.`,
+    "Eliminar chat",
+  );
+  if (!ok) return;
+  try {
+    const result = await api(`/api/channels/${encodeURIComponent(channel.id)}/clear`, { method: "POST" });
+    replaceChannel(result.channel);
+    state.messages.set(`c:${channel.id}`, []);
+    state.hasMore.set(`c:${channel.id}`, false);
+    if (convKey() === `c:${channel.id}`) renderAllMessages();
+    showToast("Chat eliminado.");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
 async function deleteChannel(channelId) {
   const channel = findChannel(channelId);
   if (!channel) return;
@@ -4426,8 +4448,9 @@ function agentMenuItems(agentId) {
   // En el celular no hay ventanas aparte.
   const newWindow = coarsePointer ? [] : [{ label: "Abrir en ventana nueva", icon: "window", run: () => openAgentWindow(agent.id) }];
   const edit = { label: "Editar agente", icon: "pencil", run: () => openDetails(agent.id) };
+  const clear = { label: "Eliminar chat", icon: "trash", danger: true, run: () => agentAction("reset", agent.id) };
   // Claude Bot va fijo arriba: no se mueve, no se duplica, no se oculta ni se elimina.
-  if (agent.main) return [newThread, ...newWindow, edit];
+  if (agent.main) return [newThread, ...newWindow, edit, "-", clear];
   const targets = moveTargets(agent.id);
   const many = targets.length > 1;
   const items = [
@@ -4449,7 +4472,7 @@ function agentMenuItems(agentId) {
         : { label: "Seleccionar varios", icon: "select", run: () => startSelection([agent.id]) },
     );
   }
-  items.push("-", {
+  items.push("-", ...(many ? [] : [clear]), {
     label: many ? `Eliminar ${targets.length} agentes` : "Eliminar agente",
     icon: "trash",
     danger: true,
@@ -4504,6 +4527,7 @@ function channelMenuItems(channelId) {
       ? { label: "Marcar como leído", icon: "check", run: () => setChannelUnread(channel.id, false) }
       : { label: "Marcar como no leído", icon: "unread", run: () => setChannelUnread(channel.id, true) },
     "-",
+    { label: "Eliminar chat", icon: "trash", danger: true, run: () => clearChannel(channel.id) },
     { label: "Eliminar canal", icon: "trash", danger: true, run: () => deleteChannel(channel.id) },
   ];
 }
@@ -5359,7 +5383,8 @@ function officeAgentMenu(agentId, { x = 0, y = 0, channelId = null, touch = fals
     items.push({ label: agent.paused ? "Reanudar" : "Pausar", icon: agent.paused ? "play" : "pause", run: () => agentAction("pause", agent.id) });
   }
   items.push({ label: "Cambiar nombre", icon: "pencil", run: () => renameAgent(agent.id) });
-  if (!agent.main) items.push("-", { label: "Eliminar", icon: "trash", danger: true, run: () => agentAction("delete", agent.id) });
+  items.push("-", { label: "Eliminar chat", icon: "trash", danger: true, run: () => agentAction("reset", agent.id) });
+  if (!agent.main) items.push({ label: "Eliminar", icon: "trash", danger: true, run: () => agentAction("delete", agent.id) });
   openContextMenu(items, { x, y, touch });
 }
 
@@ -5378,6 +5403,7 @@ function officeTeamMenu({ kind, channelId = null, empty = false, teamsFull = fal
       { label: "Cambiar color", icon: "palette", submenu: () => teamColorItems(channelId) },
       { label: "Editar el equipo", icon: "pencil", run: () => openChannelDialog(channelId, { fromOffice: true }) },
       "-",
+      { label: "Eliminar chat", icon: "trash", danger: true, run: () => clearChannel(channelId) },
       { label: "Eliminar el equipo", icon: "trash", danger: true, run: () => deleteChannel(channelId) },
     );
   } else if (kind === "loose") {
@@ -8755,6 +8781,8 @@ function bindUi() {
     wide: wideLayout,
     imageUrl: (agentId, path) => libraryUrl(agentId, "shared", path, true),
     renderMarkdown: (text, target) => renderMarkdown(text, target),
+    checklistCard: (message) => buildChecklist(message).querySelector(".checklist"),
+    isMain: (agentId) => Boolean(findAgent(agentId)?.main),
     api,
     createAgent: createFromOffice,
     createTeam: createTeamFromOffice,

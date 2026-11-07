@@ -548,6 +548,8 @@ export function createApp(options: AppOptions): App {
     return service.sendChannelMessage(param(ctx, 0), body.text);
   });
 
+  route("POST", "/api/channels/:id/clear", (ctx) => ({ channel: service.clearChannel(param(ctx, 0)) }));
+
   route("POST", "/api/channels/:id/read", (ctx) => ({ channel: service.markChannelRead(param(ctx, 0)) }));
 
   route("POST", "/api/channels/:id/unread", (ctx) => ({ channel: service.markChannelUnread(param(ctx, 0)) }));

@@ -988,6 +988,11 @@ export class Store {
     return channel;
   }
 
+  /** «Eliminar chat» de un canal: borra sus mensajes; el canal y sus miembros siguen. */
+  deleteChannelMessages(id: string): void {
+    this.#db.prepare("DELETE FROM messages WHERE channel_id = ?").run(id);
+  }
+
   /** Borra el canal para siempre, con sus mensajes. */
   deleteChannel(id: string): void {
     this.transaction(() => {
