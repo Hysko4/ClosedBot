@@ -491,7 +491,11 @@ test("list_agents muestra proyecto y bot principal; las instrucciones solo las v
     const fromMain = parse(await talk(h, mainId, "/equipo"));
     const anaSeenByMain = fromMain.find((agent) => agent.id === ana.id);
     assert.equal(anaSeenByMain?.instrucciones, "Revisa el sitio cada día.");
-    assert.equal(anaSeenByMain?.modelo, "predeterminado");
+    // Sin modelo elegido se dice cuál usa (pedido: nada de «predeterminado» sin decir cuál); la lista de Demo aún no se pidió.
+    assert.equal(anaSeenByMain?.modelo, "el que use su programa por defecto");
+    await h.service.listModels("demo");
+    const again = parse(await talk(h, mainId, "/equipo")).find((agent) => agent.id === ana.id);
+    assert.equal(again?.modelo, "demo (el que usa Demo por defecto)");
   } finally {
     await h.close();
   }

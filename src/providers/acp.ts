@@ -563,6 +563,7 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
       await this.#applySettings(thread);
       // Un turno puede durar lo que el agente necesite: sin límite de tiempo (se detiene con «Detener»).
       const result = await this.#call("session/prompt", { sessionId: thread.id, prompt: [{ type: "text", text: prompt }] }, 0);
+      this.#emitTurnUsage(thread, turn, result);
       const stop = getString(result, "stopReason");
       if (stop === "cancelled" || turn.cancelled) status = "interrupted";
       else if (stop === "refusal") problem = `${this.#options.label} se negó a responder ese mensaje.`;
@@ -576,6 +577,32 @@ export class AcpClient extends EventEmitter<ClientEvents> implements AgentClient
       }
     }
     this.#finishTurn(thread, turn, status, problem);
+  }
+
+  /**
+   * Lo gastado en el turno, si el agente lo informa (`usage` de la respuesta, aún no estándar en ACP: los tokens
+   * de este turno). Según el agente, la entrada incluye o no lo leído de caché y la salida, el razonamiento:
+   * se deduce del total para no contarlo dos veces.
+   */
+  #emitTurnUsage(thread: AcpThread, turn: AcpTurn, result: unknown): void {
+    const usage = getRecord(result, "usage");
+    if (!usage) return;
+    const count = (key: string): number => {
+      const value = Number(usage[key]);
+      return Number.isFinite(value) && value > 0 ? value : 0;
+    };
+    const reported = count("inputTokens");
+    const cacheRead = count("cachedReadTokens");
+    const cacheWrite = count("cachedWriteTokens");
+    const thought = count("thoughtTokens");
+    const total = count("totalTokens");
+    const cacheApart = !total || total >= reported + count("outputTokens") + cacheRead + cacheWrite;
+    const input = cacheApart ? reported : Math.max(0, reported - cacheRead);
+    const thoughtApart = Boolean(total) && total >= reported + count("outputTokens") + thought + (cacheApart ? cacheRead + cacheWrite : 0);
+    const output = count("outputTokens") + (thought && thoughtApart ? thought : 0);
+    if (!input && !output && !cacheRead && !cacheWrite) return;
+    const model = thread.appliedModel ?? modelChoices(this.#models).current ?? this.#options.label;
+    this.#emitNotification("closedbot/tokenUsage", { threadId: thread.id, turnId: turn.id, turn: { model, input, cacheRead, cacheWrite, output } });
   }
 
   #finishTurn(thread: AcpThread, turn: AcpTurn, status: string, problem: string | null): void {

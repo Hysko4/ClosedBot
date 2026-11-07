@@ -12,6 +12,12 @@
 | --- | --- | --- | --- |
 | [Inter](https://github.com/rsms/inter) (Inter Variable, de `@fontsource-variable/inter`) | 5.3.0 | SIL OFL 1.1 | La letra de toda la app, la misma de OpenBot. Archivos `latin` y `latin-ext` en `public/fonts/`. Ver `licenses/INTER-OFL-1.1.txt`. |
 
+## Logos incluidos
+
+| Recurso | Versión | Licencia | Uso |
+| --- | --- | --- | --- |
+| [Lobe Icons](https://github.com/lobehub/lobe-icons) (`@lobehub/icons-static-svg`) | 1.102.0 | MIT | Los logos de Claude, Codex, Gemini y Grok junto al uso de cada plan, en `public/logos/` (el de Grok, en blanco). Ver `licenses/LOBEHUB-ICONS-MIT.txt`. Las marcas son de Anthropic, OpenAI, Google y xAI: solo indican de qué cuenta es cada uso. |
+
 ## Dependencias de ejecución
 
 | Paquete | Versión | Licencia |

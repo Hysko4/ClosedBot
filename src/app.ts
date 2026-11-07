@@ -543,6 +543,12 @@ export function createApp(options: AppOptions): App {
 
   route("POST", "/api/usage/refresh", async () => ({ usage: await service.refreshUsage(false) }));
 
+  // «Uso»: lo gastado por los agentes en los últimos días (?days=1, 7, 30; 0 = todo).
+  route("GET", "/api/usage/spend", async (ctx) => {
+    const days = Number(ctx.url.searchParams.get("days") ?? "30");
+    return { report: await service.spendReport(Number.isFinite(days) ? Math.max(0, Math.min(3650, Math.floor(days))) : 30) };
+  });
+
   // ---------- dictado local ----------
 
   const speech = options.speech ?? null;

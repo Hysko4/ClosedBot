@@ -363,6 +363,9 @@ function handleEvent(event) {
       state.usage = event.usage;
       renderUsage();
       break;
+    case "spend":
+      spendChanged();
+      break;
     case "speech":
       applySpeechStatus(event.speech);
       break;
@@ -374,7 +377,10 @@ function handleEvent(event) {
       const before = new Map(state.providers.map((provider) => [provider.id, `${provider.available}:${provider.loggedIn}`]));
       state.providers = event.providers;
       for (const provider of state.providers) {
-        if (before.get(provider.id) !== `${provider.available}:${provider.loggedIn}`) state.models.delete(provider.id);
+        if (before.get(provider.id) !== `${provider.available}:${provider.loggedIn}`) {
+          state.models.delete(provider.id);
+          modelsMissing.delete(provider.id);
+        }
       }
       renderProviders();
       // «Crear nuevo agente» abierto: sus botones de modelo dicen si cada uno ya tiene sesión.
@@ -4708,22 +4714,54 @@ function updateProviderHint(form) {
   hint.dataset.tone = hint.textContent ? "warn" : "";
 }
 
+/** Pedidos de listas de modelos en curso, y proveedores que no devolvieron ninguna (no se insiste al dibujar). */
+const modelRequests = new Map();
+const modelsMissing = new Set();
+
+/**
+ * La lista de modelos de un proveedor, pedida una vez: el servidor la guarda, así que llega al instante (pedido:
+ * «Gemini demora mucho en cargar el modelo»). `retry`: volver a pedirla aunque la última vez no trajo ninguna.
+ */
+function ensureModels(provider, { retry = false } = {}) {
+  const known = state.models.get(provider);
+  if (known) return Promise.resolve(known);
+  if (!retry && modelsMissing.has(provider)) return Promise.resolve([]);
+  let pending = modelRequests.get(provider);
+  if (!pending) {
+    pending = api(`/api/models?provider=${encodeURIComponent(provider)}`)
+      .then((result) => result.models ?? [])
+      .catch(() => [])
+      .then((models) => {
+        if (models.length) {
+          state.models.set(provider, models);
+          modelsMissing.delete(provider);
+        } else modelsMissing.add(provider);
+        return models;
+      })
+      .finally(() => modelRequests.delete(provider));
+    modelRequests.set(provider, pending);
+  }
+  return pending;
+}
+
+/** El modelo que usa un proveedor cuando el agente no tiene uno elegido (el que el propio programa marca). */
+function defaultModelOf(provider) {
+  const models = state.models.get(provider) ?? [];
+  return models.find((entry) => entry.isDefault) ?? models[0] ?? null;
+}
+
+/** «Modelo» de la ficha: siempre un modelo con nombre (pedido: nada de «Predeterminado», ¿cuál es?). */
 async function refreshModelOptions(form, model = "", effort = "") {
   const provider = form.elements.provider.value;
   const modelSelect = form.elements.model;
-  modelSelect.replaceChildren(new Option("Predeterminado", ""));
-  modelSelect.disabled = true;
   let models = state.models.get(provider);
   if (!models) {
-    try {
-      models = (await api(`/api/models?provider=${encodeURIComponent(provider)}`)).models;
-      state.models.set(provider, models);
-    } catch {
-      models = [];
-    }
+    modelSelect.replaceChildren(new Option("Cargando modelos…", ""));
+    modelSelect.disabled = true;
+    models = await ensureModels(provider, { retry: true });
+    if (form.elements.provider.value !== provider) return;
   }
-  if (form.elements.provider.value !== provider) return;
-  for (const entry of models) modelSelect.append(new Option(entry.displayName || entry.model, entry.model));
+  modelSelect.replaceChildren(...models.map((entry) => new Option(entry.displayName || entry.model, entry.model)));
   // Un modelo guardado que es una variante de nivel («Gemini 4 Argon (Medium)») se muestra como modelo + esfuerzo.
   const owner = variantOwner(models, model);
   if (owner) {
@@ -4731,8 +4769,11 @@ async function refreshModelOptions(form, model = "", effort = "") {
     model = owner.model;
   }
   if (model && !models.some((entry) => entry.model === model)) modelSelect.append(new Option(model, model));
+  // Sin modelo elegido, se ve el que de verdad usa: el que marca su programa.
+  model ||= defaultModelOf(provider)?.model ?? "";
+  if (!modelSelect.options.length) modelSelect.append(new Option("Sin modelos: revisa Ajustes → Proveedores", ""));
   modelSelect.value = model;
-  modelSelect.disabled = false;
+  modelSelect.disabled = !models.length;
   refreshEffortOptions(form, effort);
 }
 
@@ -4744,9 +4785,15 @@ function variantOwner(models, model) {
 
 const EFFORT_LABELS = { none: "Ninguno", minimal: "Mínimo", low: "Bajo", medium: "Medio", high: "Alto", xhigh: "Muy alto", max: "Máximo" };
 
-/** Nombre del modelo del agente para mostrar («Gemini 4 Argon · Alto»), si la lista de su proveedor ya llegó. */
+/**
+ * Nombre del modelo del agente para mostrar («Gemini 4 Argon · Alto»), si la lista de su proveedor ya llegó. Sin uno
+ * elegido, el que usa su programa por defecto, con su nombre.
+ */
 function modelLabel(agent) {
-  if (!agent.model) return "";
+  if (!agent.model) {
+    const fallback = defaultModelOf(agent.provider);
+    return fallback ? fallback.displayName || fallback.model : "";
+  }
   const models = state.models.get(agent.provider) ?? [];
   const owner = variantOwner(models, agent.model);
   const entry = owner ?? models.find((item) => item.model === agent.model);
@@ -4779,7 +4826,7 @@ const MODEL_COLOR_KEY = "closedbot:color-por-modelo";
 const UNPAINTED = "#3a3a3a";
 const MODEL_MISSING = "Elige qué modelo usará.";
 // color null: todavía sin color. colorPicked: lo elegiste tú, así que cambiar de modelo ya no lo cambia.
-const createState = { shape: 0, color: null, colorPicked: false, provider: null, project: "", agentId: null, channelId: null, fromOffice: false };
+const createState = { shape: 0, color: null, colorPicked: false, provider: null, model: "", project: "", agentId: null, channelId: null, fromOffice: false };
 
 /** «+»: nombre, modelo, figura y color (el color llega al elegir el modelo). Con agentId cambia la apariencia de uno que ya existe. */
 function openCreateDialog({ project = "", agentId = null, channelId = null, fromOffice = false } = {}) {
@@ -4791,6 +4838,7 @@ function openCreateDialog({ project = "", agentId = null, channelId = null, from
   createState.channelId = channel?.id ?? null;
   createState.fromOffice = !agent && fromOffice;
   createState.provider = null;
+  createState.model = "";
   createState.colorPicked = false;
   if (agent) {
     const [shape, color] = avatarParts(agent);
@@ -4896,11 +4944,38 @@ function renderCreateModels(focus = false) {
         ? `${chosen.label} no tiene sesión: entra en Ajustes → Proveedores.`
         : "";
   hint.dataset.tone = hint.textContent ? "warn" : "";
+  void renderCreateModelSelect();
   if (focus) row.querySelector('[tabindex="0"]')?.focus();
+}
+
+/** Debajo de los botones, el modelo exacto del proveedor elegido: empieza en el que usa su programa. */
+async function renderCreateModelSelect() {
+  const select = $("#create-model-select");
+  const provider = createState.provider;
+  select.hidden = !provider || Boolean(createState.agentId);
+  if (select.hidden) return;
+  let models = state.models.get(provider);
+  if (!models) {
+    select.replaceChildren(new Option("Cargando modelos…", ""));
+    select.disabled = true;
+    models = await ensureModels(provider, { retry: true });
+    if (createState.provider !== provider) return;
+  }
+  if (!models.length) {
+    select.replaceChildren(new Option("Sin modelos: revisa Ajustes → Proveedores", ""));
+    select.disabled = true;
+    createState.model = "";
+    return;
+  }
+  select.replaceChildren(...models.map((entry) => new Option(entry.displayName || entry.model, entry.model)));
+  if (!models.some((entry) => entry.model === createState.model)) createState.model = defaultModelOf(provider)?.model ?? models[0].model;
+  select.value = createState.model;
+  select.disabled = false;
 }
 
 /** Elegir el modelo le pone su color al agente (salvo que ya hayas elegido uno tú). */
 function chooseModel(provider, { focus = false } = {}) {
+  if (createState.provider !== provider) createState.model = "";
   createState.provider = provider;
   if (!createState.colorPicked) createState.color = modelColor(provider);
   const error = $("#create-error");
@@ -5300,8 +5375,8 @@ async function saveCreate(event) {
       const { channelId, fromOffice } = createState;
       const role = fromOffice ? $("#create-role").value.trim() : "";
       // greet: como lo creaste tú, se presenta con un primer mensaje (los que arma Claude Bot no).
-      const { provider, color } = createState;
-      const body = { name, avatar, appearance, project: createState.project, provider, greet: true, ...(role ? { role } : {}) };
+      const { provider, color, model } = createState;
+      const body = { name, avatar, appearance, project: createState.project, provider, ...(model ? { model } : {}), greet: true, ...(role ? { role } : {}) };
       const result = await api("/api/agents", { method: "POST", body });
       rememberModelColor(provider, color);
       closeDialog($("#create-dialog"));
@@ -5908,6 +5983,7 @@ async function signOutProvider(provider, button) {
     const data = await api(`/api/providers/${encodeURIComponent(provider.id)}/logout`, { method: "POST" });
     state.providers = data.providers;
     state.models.delete(provider.id);
+    modelsMissing.delete(provider.id);
     renderProviders();
     showToast(`Cerraste la sesión de ${provider.label}.`);
   } catch (error) {
@@ -5944,6 +6020,7 @@ async function refreshProviders() {
     const data = await api("/api/providers/refresh", { method: "POST" });
     state.providers = data.providers;
     state.models.clear();
+    modelsMissing.clear();
     renderProviders();
   } catch (error) {
     showToast(error.message, "error");
@@ -6109,7 +6186,14 @@ function renderDetailsHeader(agent) {
 
 function renderSettingsHome(agent) {
   for (const row of document.querySelectorAll("#details-groups .row-icon:empty")) row.append(icon(row.dataset.icon));
-  $("#row-brain").textContent = [providerLabel(agent.provider), modelLabel(agent) || "Predeterminado"].join(" · ");
+  $("#row-brain").textContent = [providerLabel(agent.provider), modelLabel(agent)].filter(Boolean).join(" · ");
+  // El nombre del modelo llega con la lista de su proveedor (guardada en el servidor: suele ser al instante).
+  if (!state.models.has(agent.provider)) {
+    void ensureModels(agent.provider).then((models) => {
+      const current = findAgent(agent.id);
+      if (models.length && current && details.agentId === agent.id) $("#row-brain").textContent = [providerLabel(current.provider), modelLabel(current)].filter(Boolean).join(" · ");
+    });
+  }
   $("#row-instructions").textContent = agent.instructions ? agent.instructions.replace(/\s+/g, " ").slice(0, 80) : "Sin instrucciones";
   const memories = details.memories?.agentId === agent.id ? details.memories.items : null;
   $("#row-memories").textContent = memories === null ? "" : memories.length ? String(memories.length) : "Ninguno";
@@ -7742,32 +7826,93 @@ function usageEntries() {
   return state.usage.filter((entry) => entry.windows?.length || entry.error);
 }
 
+/** El logo original de cada IA (Lobe Icons, MIT): va dentro de su anillo y en «Uso». */
+const PROVIDER_LOGOS = { claude: "/logos/claude.svg", codex: "/logos/codex.svg", gemini: "/logos/gemini.svg", grok: "/logos/grok.svg" };
+/** Color de cada IA en el gráfico de «Uso» (sigue a la IA, no a su puesto en la lista). */
+const SPEND_COLORS = { claude: "var(--spend-claude)", codex: "var(--spend-codex)", gemini: "var(--spend-gemini)", grok: "var(--spend-grok)" };
+
+function usageLevel(percent) {
+  return percent === null ? "unknown" : percent >= 90 ? "high" : percent >= 75 ? "mid" : "low";
+}
+
+function providerLogo(provider, className) {
+  const src = PROVIDER_LOGOS[provider];
+  if (!src) return null;
+  const image = document.createElement("img");
+  image.className = className;
+  image.src = src;
+  image.alt = "";
+  image.draggable = false;
+  return image;
+}
+
+/** Abajo a la izquierda: un anillo por IA con su logo adentro; el arco es lo usado del plan (como OpenBot). */
 function renderUsage() {
   const button = $("#usage-button");
   const entries = usageEntries();
   button.hidden = entries.length === 0;
-  if (!entries.length) {
-    closeUsage();
-    return;
-  }
-  const primary = entries.find((entry) => entry.provider === "claude" && entry.windows.length) ?? entries.find((entry) => entry.windows.length) ?? null;
-  const window = primary?.windows[0] ?? null;
-  const percent = window ? window.percent : null;
-  $("#usage-ring-value").setAttribute("stroke-dasharray", `${percent ?? 0} 100`);
-  button.dataset.level = percent === null ? "unknown" : percent >= 90 ? "high" : percent >= 75 ? "mid" : "low";
-  $("#usage-number").textContent = percent === null ? "!" : String(percent);
-  const label = window
-    ? `Uso de ${primary.label}: ${percent}% (${window.label.toLowerCase()})${window.resetsAt ? `, se reinicia en ${formatCountdown(window.resetsAt - Date.now())}` : ""}`
-    : "Uso del plan: no se pudo leer";
-  button.title = label;
-  button.setAttribute("aria-label", label);
-  if (!$("#usage-popover").hidden) renderUsagePopover();
+  const existing = new Map([...button.children].map((node) => [node.dataset.provider, node]));
+  const labels = [];
+  const items = entries.map((entry) => {
+    const item = existing.get(entry.provider) ?? usageRing(entry.provider, entry.label);
+    const window = entry.windows[0] ?? null;
+    const percent = window ? window.percent : null;
+    item.dataset.level = usageLevel(percent);
+    item.querySelector(".value").setAttribute("stroke-dasharray", `${percent ?? 0} 100`);
+    item.querySelector(".usage-number").textContent = percent === null ? "!" : String(percent);
+    const text = window
+      ? `${entry.label}: ${percent} % (${window.label.toLowerCase()})${window.resetsAt ? `, se reinicia en ${formatCountdown(window.resetsAt - Date.now())}` : ""}`
+      : `${entry.label}: no se pudo leer el uso`;
+    item.title = text;
+    labels.push(text);
+    return item;
+  });
+  button.replaceChildren(...items);
+  button.title = "Uso";
+  button.setAttribute("aria-label", `Uso. ${labels.join(". ")}`);
+  if ($("#usage-dialog").open) renderPlanLimits();
 }
 
-function renderUsagePopover() {
+function usageRing(provider, label) {
+  const item = document.createElement("span");
+  item.className = "usage-ring-item";
+  item.dataset.provider = provider;
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 36 36");
+  svg.setAttribute("aria-hidden", "true");
+  svg.classList.add("usage-ring");
+  for (const name of ["track", "value"]) {
+    const circle = document.createElementNS(SVG_NS, "circle");
+    circle.setAttribute("class", name);
+    circle.setAttribute("cx", "18");
+    circle.setAttribute("cy", "18");
+    circle.setAttribute("r", "15.5");
+    if (name === "value") {
+      circle.setAttribute("pathLength", "100");
+      circle.setAttribute("stroke-dasharray", "0 100");
+    }
+    svg.append(circle);
+  }
+  const logo = providerLogo(provider, "usage-logo");
+  const mark = logo ?? Object.assign(document.createElement("span"), { className: "usage-letter", textContent: String(label || provider).slice(0, 1).toUpperCase() });
+  const number = document.createElement("span");
+  number.className = "usage-number";
+  item.append(svg, mark, number);
+  return item;
+}
+
+/** «Límites del plan» en la ventana «Uso»: cada IA con sus ventanas (semanal, 5 horas…) y cuándo se reinician. */
+function renderPlanLimits() {
   const list = $("#usage-list");
   list.replaceChildren();
-  for (const entry of usageEntries()) {
+  const entries = usageEntries();
+  if (!entries.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted small";
+    empty.textContent = "Ninguna IA informa su límite todavía.";
+    list.append(empty);
+  }
+  for (const entry of entries) {
     const block = document.createElement("div");
     block.className = "usage-provider";
     const title = document.createElement("div");
@@ -7793,7 +7938,7 @@ function renderUsagePopover() {
       top.append(name, value);
       const bar = document.createElement("div");
       bar.className = "usage-bar";
-      bar.dataset.level = window.percent >= 90 ? "high" : window.percent >= 75 ? "mid" : "low";
+      bar.dataset.level = usageLevel(window.percent);
       const fill = document.createElement("span");
       fill.style.width = `${window.percent}%`;
       bar.append(fill);
@@ -7843,29 +7988,332 @@ function formatAgo(timestamp) {
   return formatTime(timestamp);
 }
 
-function toggleUsage() {
-  if ($("#usage-popover").hidden) openUsage();
-  else closeUsage();
-}
+// ---------- «Uso»: lo gastado en USD y tokens (como OpenBot) ----------
 
-function openUsage() {
+const spendView = { days: 30, group: "byAgent", report: null, loading: null, again: false, timer: null };
+const SPEND_NUMBER = new Intl.NumberFormat("es-CL", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+function openUsageDialog() {
   closeContextMenu();
-  const popover = $("#usage-popover");
-  popover.hidden = false;
-  $("#usage-button").setAttribute("aria-expanded", "true");
-  renderUsagePopover();
+  const dialog = $("#usage-dialog");
+  openDialog(dialog);
+  renderPlanLimits();
+  if (spendView.report) renderSpend();
+  void loadSpend();
   clearInterval(usageTicker);
-  usageTicker = setInterval(renderUsagePopover, 30_000);
+  usageTicker = setInterval(() => {
+    if (!dialog.open) return void clearInterval(usageTicker);
+    renderPlanLimits();
+  }, 30_000);
   void refreshUsage();
 }
 
 function closeUsage() {
-  const popover = $("#usage-popover");
-  if (popover.hidden) return;
-  popover.hidden = true;
-  $("#usage-button").setAttribute("aria-expanded", "false");
-  clearInterval(usageTicker);
-  usageTicker = null;
+  closeDialog($("#usage-dialog"));
+}
+
+/** Vuelve a pedir el informe; mientras llega, se ve el anterior más tenue. */
+async function loadSpend() {
+  if (spendView.loading) {
+    spendView.again = true;
+    return spendView.loading;
+  }
+  $("#usage-body").classList.add("loading");
+  spendView.loading = (async () => {
+    try {
+      const result = await api(`/api/usage/spend?days=${spendView.days}`);
+      spendView.report = result.report;
+      renderSpend();
+    } catch (error) {
+      if (error.status !== 401) showToast(error.message, "error");
+    } finally {
+      spendView.loading = null;
+      $("#usage-body").classList.remove("loading");
+      if (spendView.again) {
+        spendView.again = false;
+        void loadSpend();
+      }
+    }
+  })();
+  return spendView.loading;
+}
+
+/** Llegó gasto nuevo: con «Uso» abierto, se actualiza (agrupando avisos seguidos). */
+function spendChanged() {
+  if (!$("#usage-dialog").open) return;
+  clearTimeout(spendView.timer);
+  spendView.timer = setTimeout(() => void loadSpend(), 1_500);
+}
+
+function formatUsd(value) {
+  if (value === null || value === undefined) return "Sin precio";
+  if (value > 0 && value < 0.005) return "< USD 0,01";
+  return `USD ${SPEND_NUMBER.format(value)}`;
+}
+
+/** 10.130 → «10,13 k»; 1.250.000 → «1,25 M». */
+function formatTokens(value) {
+  const number = Number(value) || 0;
+  const fixed = (amount, unit) => `${amount.toLocaleString("es-CL", { maximumFractionDigits: amount < 100 ? 2 : 1 })} ${unit}`;
+  if (number >= 1e9) return fixed(number / 1e9, "B");
+  if (number >= 1e6) return fixed(number / 1e6, "M");
+  if (number >= 1e3) return fixed(number / 1e3, "k");
+  return number.toLocaleString("es-CL");
+}
+
+function formatShare(share) {
+  return `${(share * 100).toLocaleString("es-CL", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} %`;
+}
+
+function spendColor(provider) {
+  return SPEND_COLORS[provider] ?? "var(--spend-other)";
+}
+
+function shortDay(day) {
+  const [year, month, date] = String(day).split("-").map(Number);
+  if (!year || !month || !date) return String(day);
+  return new Date(year, month - 1, date).toLocaleDateString("es-CL", { day: "numeric", month: "short" });
+}
+
+function renderSpend() {
+  const report = spendView.report;
+  if (!report) return;
+  for (const button of $("#usage-range").querySelectorAll("button")) button.setAttribute("aria-pressed", String(Number(button.dataset.days) === spendView.days));
+  for (const button of $("#usage-group").querySelectorAll("button")) button.setAttribute("aria-pressed", String(button.dataset.group === spendView.group));
+  $("#usage-total").textContent = formatUsd(report.totalUsd);
+  const parts = [];
+  if (report.agents) parts.push(report.agents === 1 ? "1 agente" : `${report.agents} agentes`);
+  parts.push("Estimación de API · USD");
+  if (report.unpricedTokens) parts.push(`${formatTokens(report.unpricedTokens)} tokens sin precio`);
+  $("#usage-sub").textContent = report.turns ? parts.join(" · ") : "Todavía no hay gasto en este período. Se cuenta desde esta versión.";
+
+  const providers = $("#usage-providers");
+  providers.replaceChildren();
+  for (const row of report.providers) {
+    const item = document.createElement("li");
+    const line = document.createElement("div");
+    line.className = "usage-provider-line";
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    dot.style.setProperty("--dot", spendColor(row.provider));
+    const logo = providerLogo(row.provider, "") ?? document.createElement("span");
+    const name = document.createElement("span");
+    name.textContent = row.label;
+    const value = document.createElement("strong");
+    value.textContent = formatUsd(row.usd);
+    line.append(dot, logo, name, value);
+    const meta = document.createElement("p");
+    meta.className = "usage-provider-meta";
+    meta.textContent = `${row.usd === null ? "Sin precio en la lista" : `${formatShare(row.share)} del coste conocido`} · ${formatTokens(row.tokens)} tokens`;
+    item.append(line, meta);
+    providers.append(item);
+  }
+
+  renderSpendChart(report);
+
+  const totals = $("#usage-totals");
+  totals.replaceChildren();
+  for (const [label, value] of [
+    ["Tokens sin lecturas de caché", report.totals.withoutCacheReads],
+    ["Tokens con lecturas de caché", report.totals.withCacheReads],
+    ["Entrada en caché", report.totals.cacheRead],
+    ["Entrada sin caché", report.totals.input],
+    ["Creación de caché", report.totals.cacheWrite],
+  ]) {
+    const tile = document.createElement("div");
+    const name = document.createElement("span");
+    name.textContent = label;
+    const number = document.createElement("strong");
+    number.textContent = formatTokens(value);
+    tile.append(name, number);
+    totals.append(tile);
+  }
+  renderSpendTable(report);
+}
+
+function renderSpendTable(report) {
+  const table = $("#usage-table");
+  table.replaceChildren();
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  const first = { byModel: "Modelo", byAgent: "Agente", byDay: "Día" }[spendView.group];
+  for (const label of [first, "Coste", "Proporción", "Tokens"]) {
+    const cell = document.createElement("th");
+    cell.scope = "col";
+    cell.textContent = label;
+    headRow.append(cell);
+  }
+  head.append(headRow);
+  const body = document.createElement("tbody");
+  const rows = report[spendView.group] ?? [];
+  if (!rows.length) {
+    const row = document.createElement("tr");
+    row.className = "empty";
+    const cell = document.createElement("td");
+    cell.colSpan = 4;
+    cell.textContent = "Sin gasto en este período.";
+    row.append(cell);
+    body.append(row);
+  }
+  for (const item of rows) {
+    const row = document.createElement("tr");
+    const name = document.createElement("td");
+    const label = document.createElement("span");
+    label.className = "name";
+    const logo = item.provider ? providerLogo(item.provider, "") : null;
+    if (logo) label.append(logo);
+    label.append(document.createTextNode(spendView.group === "byDay" ? shortDay(item.label) : item.label));
+    name.append(label);
+    const cost = document.createElement("td");
+    cost.textContent = formatUsd(item.usd);
+    const share = document.createElement("td");
+    share.textContent = item.usd === null ? "—" : formatShare(item.share);
+    const tokens = document.createElement("td");
+    tokens.textContent = formatTokens(item.tokens);
+    row.append(name, cost, share, tokens);
+    body.append(row);
+  }
+  table.append(head, body);
+}
+
+/** «Coste diario»: columnas apiladas por IA (más de dos meses: por semana). Pasar el mouse muestra el detalle. */
+function renderSpendChart(report) {
+  const box = $("#usage-chart");
+  box.replaceChildren();
+  // «Hoy» es una sola columna: el total de arriba ya lo dice.
+  $("#usage-daily").hidden = report.days.length < 2;
+  if (report.days.length < 2) return;
+  const weekly = report.days.length > 62;
+  const columns = [];
+  for (const [index, day] of report.days.entries()) {
+    if (!weekly || index % 7 === 0) columns.push({ day: day.day, usd: 0, byProvider: {} });
+    const column = columns[columns.length - 1];
+    column.usd += day.usd;
+    for (const [provider, usd] of Object.entries(day.byProvider)) column.byProvider[provider] = (column.byProvider[provider] ?? 0) + usd;
+  }
+  const max = Math.max(...columns.map((column) => column.usd));
+  if (!(max > 0)) {
+    const empty = document.createElement("div");
+    empty.className = "usage-chart-empty";
+    empty.textContent = "Sin gasto con precio en estos días.";
+    box.append(empty);
+    return;
+  }
+  const width = Math.max(240, box.clientWidth || 420);
+  const height = 190;
+  const left = 54;
+  const bottom = 22;
+  const plotH = height - bottom - 8;
+  const slot = (width - left) / columns.length;
+  const bar = Math.max(2, Math.min(24, slot * 0.7));
+  const top = niceCeil(max);
+  const y = (usd) => 8 + plotH - (usd / top) * plotH;
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `Coste diario: máximo ${formatUsd(max)} en un ${weekly ? "semana" : "día"}`);
+  for (const tick of [0, top / 2, top]) {
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("class", "grid");
+    line.setAttribute("x1", String(left));
+    line.setAttribute("x2", String(width));
+    line.setAttribute("y1", String(y(tick)));
+    line.setAttribute("y2", String(y(tick)));
+    const label = document.createElementNS(SVG_NS, "text");
+    label.setAttribute("x", String(left - 8));
+    label.setAttribute("y", String(y(tick) + 4));
+    label.setAttribute("text-anchor", "end");
+    label.textContent = `$${tick < 1 && tick > 0 ? tick.toFixed(2) : tick.toLocaleString("es-CL", { maximumFractionDigits: 1 })}`;
+    svg.append(line, label);
+  }
+  const order = ["claude", "codex", "gemini", "grok"];
+  columns.forEach((column, index) => {
+    const group = document.createElementNS(SVG_NS, "g");
+    group.setAttribute("class", "column");
+    group.setAttribute("tabindex", "0");
+    const x = left + slot * index + (slot - bar) / 2;
+    const hit = document.createElementNS(SVG_NS, "rect");
+    hit.setAttribute("class", "hit");
+    hit.setAttribute("x", String(left + slot * index));
+    hit.setAttribute("y", "0");
+    hit.setAttribute("width", String(slot));
+    hit.setAttribute("height", String(height - bottom));
+    group.append(hit);
+    const parts = Object.entries(column.byProvider)
+      .filter(([, usd]) => usd > 0)
+      .sort(([a], [b]) => (order.indexOf(a) + 99) % 99 - ((order.indexOf(b) + 99) % 99));
+    let base = 8 + plotH;
+    parts.forEach(([provider, usd], partIndex) => {
+      const h = (usd / top) * plotH;
+      const gap = partIndex > 0 ? 2 : 0;
+      const segH = Math.max(0, h - gap);
+      if (segH <= 0) return;
+      const yTop = base - gap - segH;
+      const last = partIndex === parts.length - 1;
+      const path = document.createElementNS(SVG_NS, "path");
+      const r = last ? Math.min(4, bar / 2, segH) : 0;
+      path.setAttribute(
+        "d",
+        `M${x},${yTop + segH} V${yTop + r} Q${x},${yTop} ${x + r},${yTop} H${x + bar - r} Q${x + bar},${yTop} ${x + bar},${yTop + r} V${yTop + segH} Z`,
+      );
+      path.setAttribute("fill", spendColor(provider));
+      group.append(path);
+      base = yTop;
+    });
+    const label = `${weekly ? `Semana del ${shortDay(column.day)}` : shortDay(column.day)}: ${formatUsd(column.usd)}`;
+    group.setAttribute("aria-label", label);
+    const show = () => showSpendTip(box, column, weekly, left + slot * index + slot / 2, width);
+    group.addEventListener("pointerenter", show);
+    group.addEventListener("focus", show);
+    group.addEventListener("pointerleave", () => box.querySelector(".usage-tip")?.remove());
+    group.addEventListener("blur", () => box.querySelector(".usage-tip")?.remove());
+    svg.append(group);
+  });
+  for (const index of [0, columns.length - 1]) {
+    const label = document.createElementNS(SVG_NS, "text");
+    label.setAttribute("x", String(left + slot * index + slot / 2));
+    label.setAttribute("y", String(height - 4));
+    label.setAttribute("text-anchor", index === 0 ? "start" : "end");
+    label.textContent = shortDay(columns[index].day);
+    svg.append(label);
+  }
+  box.append(svg);
+}
+
+function showSpendTip(box, column, weekly, center, width) {
+  box.querySelector(".usage-tip")?.remove();
+  const tip = document.createElement("div");
+  tip.className = "usage-tip";
+  const title = document.createElement("div");
+  title.className = "tip-day";
+  title.textContent = weekly ? `Semana del ${shortDay(column.day)}` : shortDay(column.day);
+  tip.append(title);
+  const rows = Object.entries(column.byProvider).filter(([, usd]) => usd > 0);
+  if (!rows.length) rows.push(["", 0]);
+  for (const [provider, usd] of rows) {
+    const row = document.createElement("div");
+    row.className = "tip-row";
+    const key = document.createElement("i");
+    key.style.setProperty("--dot", provider ? spendColor(provider) : "transparent");
+    const name = document.createElement("span");
+    name.textContent = provider ? (spendView.report?.providers.find((item) => item.provider === provider)?.label ?? provider) : "Sin gasto";
+    const value = document.createElement("strong");
+    value.textContent = formatUsd(usd);
+    row.append(key, name, value);
+    tip.append(row);
+  }
+  box.append(tip);
+  const tipWidth = tip.offsetWidth;
+  tip.style.left = `${Math.max(0, Math.min(width - tipWidth, center - tipWidth / 2))}px`;
+  tip.style.top = "-6px";
+}
+
+/** Un tope «redondo» para el eje: 0,37 → 0,4; 7 → 8; 230 → 250. */
+function niceCeil(value) {
+  if (!(value > 0)) return 1;
+  const power = 10 ** Math.floor(Math.log10(value));
+  for (const step of [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) if (value <= step * power) return step * power;
+  return 10 * power;
 }
 
 async function refreshUsage() {
@@ -7942,8 +8390,8 @@ function bindUi() {
   $("#search-input").addEventListener("keydown", (event) => {
     if (event.key === "Escape") toggleSearch(false);
   });
-  $("#open-settings").addEventListener("click", () => openSettings());
-  $("#open-profile").addEventListener("click", () => openSettings({ focusName: true }));
+  // «Tú» abre los ajustes (el botón de la derecha hacía lo mismo y se quitó).
+  $("#open-profile").addEventListener("click", () => openSettings());
   $("#open-routines").addEventListener("click", () => openRoutines());
   $("#open-office").addEventListener("click", openOffice);
   $("#office-back").addEventListener("click", goBack);
@@ -8010,18 +8458,12 @@ function bindUi() {
     (event) => {
       const target = event.target instanceof Element ? event.target : null;
       if (menuState && !target?.closest("#context-menu, #context-submenu")) closeContextMenu();
-      if (!$("#usage-popover").hidden && !target?.closest("#usage-popover, #usage-button")) closeUsage();
       primeAudio();
     },
     true,
   );
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
-    if (!$("#usage-popover").hidden) {
-      closeUsage();
-      $("#usage-button").focus();
-      return;
-    }
     // Esc termina la selección, salvo que se esté escribiendo o haya un diálogo abierto.
     const target = event.target instanceof Element ? event.target : null;
     if (state.selection && !document.querySelector("dialog[open]") && !target?.closest("input, textarea, select, [contenteditable]")) endSelection();
@@ -8047,6 +8489,9 @@ function bindUi() {
   $("#shape-grid").addEventListener("keydown", (event) => onPickerKeydown(event, "shape"));
   $("#color-row").addEventListener("keydown", (event) => onPickerKeydown(event, "color"));
   $("#model-row").addEventListener("keydown", onModelKeydown);
+  $("#create-model-select").addEventListener("change", (event) => {
+    createState.model = event.target.value;
+  });
 
   // Ficha del agente: lista de ajustes y subpantallas.
   const detailsDialog = $("#details-dialog");
@@ -8147,8 +8592,29 @@ function bindUi() {
   $("#copy-shared").addEventListener("click", () => void copyText($("#computer-shared").textContent));
 
   // Uso del plan.
-  $("#usage-button").addEventListener("click", toggleUsage);
+  $("#usage-button").addEventListener("click", () => openUsageDialog());
   $("#usage-refresh").addEventListener("click", () => void refreshUsage());
+  $("#usage-close").addEventListener("click", () => closeUsage());
+  $("#usage-range").addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("button[data-days]") : null;
+    if (!button) return;
+    spendView.days = Number(button.dataset.days);
+    renderSpend();
+    void loadSpend();
+  });
+  $("#usage-group").addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("button[data-group]") : null;
+    if (!button) return;
+    spendView.group = button.dataset.group;
+    renderSpend();
+  });
+  $("#usage-dialog").addEventListener("close", () => {
+    clearInterval(usageTicker);
+    usageTicker = null;
+  });
+  new ResizeObserver(() => {
+    if ($("#usage-dialog").open && spendView.report) renderSpendChart(spendView.report);
+  }).observe($("#usage-chart"));
 
   $("#queue-toggle").addEventListener("click", () => {
     state.queueOpen = !state.queueOpen;

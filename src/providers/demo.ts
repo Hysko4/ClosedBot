@@ -63,6 +63,8 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
   readonly #wordDelayMs: number;
   readonly #threads = new Set<string>();
   readonly #active = new Map<string, { turnId: string; interrupted: boolean }>();
+  /** Tokens acumulados de cada sesión, como los informa Claude (la demo no cuesta nada: va sin costo). */
+  readonly #spent = new Map<string, { input: number; cacheRead: number; cacheWrite: number; output: number }>();
   readonly #pending = new Map<RequestId, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   #running = false;
 
@@ -362,6 +364,15 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
       this.emit("notification", {
         method: "item/completed",
         params: { threadId, turnId: state.turnId, item: { id: itemId, type: "agentMessage", text } },
+      });
+      const spent = this.#spent.get(threadId) ?? { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
+      spent.input += Math.ceil(input.length / 4);
+      spent.cacheRead += 1_000;
+      spent.output += Math.ceil(text.length / 4);
+      this.#spent.set(threadId, spent);
+      this.emit("notification", {
+        method: "closedbot/tokenUsage",
+        params: { threadId, turnId: state.turnId, reading: { demo: { ...spent, costUsd: null } } },
       });
       this.#finish(threadId, state, state.interrupted ? "interrupted" : "completed");
     } catch (error) {

@@ -52,6 +52,8 @@ export async function createHarness(options: {
   /** La Oficina: PixelLab y el arte en alta resolución, con un fetch de prueba. */
   pixelLab?: ServiceOptions["pixelLab"];
   officeArt?: ServiceOptions["officeArt"];
+  /** La lista de precios de «Uso»; por omisión, ninguna (las pruebas no bajan nada de internet). */
+  fetchPrices?: ServiceOptions["fetchPrices"];
 } = {}): Promise<Harness> {
   const temp = options.dir ? { path: options.dir, cleanup: () => undefined } : tempDir();
   const store = new Store(join(temp.path, "closedbot.db"));
@@ -70,6 +72,7 @@ export async function createHarness(options: {
     ...(options.mainMaxSteps ? { mainMaxSteps: options.mainMaxSteps } : {}),
     ...(options.pixelLab ? { pixelLab: options.pixelLab, autoCharacters: true } : {}),
     ...(options.officeArt ? { officeArt: options.officeArt } : {}),
+    fetchPrices: options.fetchPrices ?? null,
   });
   service.on("event", (event) => events.push(event));
   await service.start();

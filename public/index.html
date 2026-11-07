@@ -87,26 +87,8 @@
             <span class="user-avatar" id="user-avatar" aria-hidden="true">T</span>
             <span class="user-name" id="user-name">Tú</span>
           </button>
-          <button type="button" class="usage-button" id="usage-button" aria-haspopup="dialog" aria-expanded="false" aria-controls="usage-popover" hidden>
-            <svg class="usage-ring" viewBox="0 0 36 36" aria-hidden="true">
-              <circle class="track" cx="18" cy="18" r="14.5" />
-              <circle class="value" id="usage-ring-value" cx="18" cy="18" r="14.5" pathLength="100" stroke-dasharray="0 100" />
-            </svg>
-            <span class="usage-number" id="usage-number"></span>
-          </button>
-          <button type="button" class="square-button" id="open-settings" title="Ajustes" aria-label="Ajustes">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></svg>
-          </button>
-          <div class="usage-popover" id="usage-popover" role="dialog" aria-label="Uso del plan" hidden>
-            <div class="usage-head">
-              <h2>Uso del plan</h2>
-              <button type="button" class="round-button small-round" id="usage-refresh" title="Actualizar" aria-label="Actualizar el uso">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12a7 7 0 1 1-2.05-4.95M19 4.5V8h-3.5" /></svg>
-              </button>
-            </div>
-            <div id="usage-list"></div>
-            <p class="usage-foot" id="usage-foot"></p>
-          </div>
+          <!-- Un anillo por IA con su logo: el arco es el uso del plan. Al tocarlo se abre «Uso». -->
+          <button type="button" class="usage-button" id="usage-button" aria-haspopup="dialog" hidden></button>
         </footer>
       </aside>
 
@@ -195,10 +177,6 @@
                 <li><span class="guide-key">Clic derecho</span><p>(o mantener presionado sin mover) en un robot o una tarjeta muestra más opciones: ficha, encargado, pausa, cambiar de equipo, sus MCP y habilidades…</p></li>
               </ul>
             </div>
-            <footer class="office-guide-foot">
-              <button type="button" class="button ghost" data-office-action="main">Hablar con <span class="main-name">Claude Bot</span></button>
-              <button type="button" class="button primary" data-office-action="create">Crear un agente</button>
-            </footer>
           </aside>
           <div class="office-board" role="dialog" aria-label="Pizarra de Claude Bot" hidden>
             <header class="office-board-head">
@@ -350,6 +328,61 @@
         <footer class="dialog-footer">
           <button type="button" class="button primary" id="routines-close">Listo</button>
         </footer>
+      </div>
+    </dialog>
+
+    <dialog class="dialog usage-dialog" id="usage-dialog" aria-labelledby="usage-title">
+      <div>
+        <header class="dialog-header usage-dialog-head">
+          <h2 id="usage-title">Uso</h2>
+          <div class="usage-range" id="usage-range" role="group" aria-label="Período">
+            <button type="button" data-days="1">Hoy</button>
+            <button type="button" data-days="7">7 días</button>
+            <button type="button" data-days="30" aria-pressed="true">30 días</button>
+            <button type="button" data-days="0">Todo</button>
+          </div>
+          <button type="button" class="round-button usage-close" id="usage-close" aria-label="Cerrar">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>
+          </button>
+        </header>
+        <div class="dialog-body usage-body" id="usage-body">
+          <section class="usage-top">
+            <div class="usage-summary">
+              <div class="usage-total" id="usage-total">USD 0,00</div>
+              <p class="usage-sub" id="usage-sub"></p>
+              <ul class="usage-providers" id="usage-providers"></ul>
+            </div>
+            <div class="usage-daily" id="usage-daily">
+              <h3>Coste diario</h3>
+              <div class="usage-chart" id="usage-chart"></div>
+            </div>
+          </section>
+          <section class="usage-section">
+            <div class="usage-section-head">
+              <h3>Límites del plan</h3>
+              <button type="button" class="round-button small-round" id="usage-refresh" title="Actualizar" aria-label="Actualizar el uso del plan">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12a7 7 0 1 1-2.05-4.95M19 4.5V8h-3.5" /></svg>
+              </button>
+            </div>
+            <div class="usage-limits" id="usage-list"></div>
+            <p class="usage-foot" id="usage-foot"></p>
+          </section>
+          <section class="usage-section">
+            <h3>Totales</h3>
+            <div class="usage-totals" id="usage-totals"></div>
+          </section>
+          <section class="usage-section">
+            <div class="usage-section-head">
+              <h3>Desglose</h3>
+              <div class="usage-range small" id="usage-group" role="group" aria-label="Desglose por">
+                <button type="button" data-group="byModel">Modelo</button>
+                <button type="button" data-group="byAgent" aria-pressed="true">Agente</button>
+                <button type="button" data-group="byDay">Día</button>
+              </div>
+            </div>
+            <table class="usage-table" id="usage-table"></table>
+          </section>
+        </div>
       </div>
     </dialog>
 
@@ -510,6 +543,7 @@
           <div class="field create-model" id="create-model-field">
             <span id="create-model-label">Modelo</span>
             <div class="model-row" id="model-row" role="radiogroup" aria-labelledby="create-model-label"></div>
+            <select id="create-model-select" aria-label="Modelo exacto" hidden></select>
             <p class="hint" id="create-model-hint"></p>
           </div>
           <div class="shape-grid" id="shape-grid" role="radiogroup" aria-label="Figura"></div>

@@ -185,6 +185,40 @@ export interface ChannelRecord {
   updatedAt: number;
 }
 
+/** Tokens por tipo (como los cuenta la API: la entrada sin caché va aparte de lo leído o escrito en caché). */
+export interface TokenCounts {
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+}
+
+/** Lo que gastó un agente en un turno con un modelo: tokens y, si su programa lo calcula, el costo estimado en USD. */
+export interface TokenUsageRecord extends TokenCounts {
+  at: number;
+  /** Día local (AAAA-MM-DD), para el coste diario. */
+  day: string;
+  provider: ProviderId;
+  model: string;
+  agentId: string;
+  /** Su nombre en ese momento (el agente puede eliminarse después). */
+  agentName: string;
+  /** null: su programa no lo dice; se calcula con la lista de precios al mostrarlo. */
+  costUsd: number | null;
+}
+
+/** Suma de tokens de un día, proveedor, modelo y agente (las filas con y sin costo conocido, aparte). */
+export interface TokenUsageGroup extends TokenCounts {
+  day: string;
+  provider: ProviderId;
+  model: string;
+  agentId: string;
+  agentName: string;
+  /** Suma de los costos que dio el programa; null si estas filas no traían costo. */
+  costUsd: number | null;
+  turns: number;
+}
+
 type Row = Record<string, SQLInputValue>;
 
 const SCHEMA = `
@@ -303,6 +337,21 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at INTEGER NOT NULL,
   user_agent TEXT
 );
+CREATE TABLE IF NOT EXISTS token_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL,
+  day TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  agent_name TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL
+);
+CREATE INDEX IF NOT EXISTS token_usage_day ON token_usage(day);
 `;
 
 /** Columnas añadidas después de la 0.1: una base creada antes las recibe al abrirse (y `backfill` las rellena). */
@@ -1071,6 +1120,56 @@ export class Store {
 
   deleteMemory(id: string): void {
     this.#db.prepare("DELETE FROM memories WHERE id = ?").run(id);
+  }
+
+  // ---------- gasto (tokens y costo) ----------
+
+  addTokenUsage(record: TokenUsageRecord): void {
+    this.#db
+      .prepare(
+        `INSERT INTO token_usage (at, day, provider, model, agent_id, agent_name, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, cost_usd)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.at,
+        record.day,
+        record.provider,
+        record.model,
+        record.agentId,
+        record.agentName,
+        record.input,
+        record.cacheRead,
+        record.cacheWrite,
+        record.output,
+        record.costUsd,
+      );
+  }
+
+  /** Lo gastado desde `fromDay` (incluido; null = todo), sumado por día, proveedor, modelo y agente. */
+  tokenUsageGroups(fromDay: string | null): TokenUsageGroup[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT day, provider, model, agent_id, MAX(agent_name) AS agent_name, cost_usd IS NOT NULL AS priced,
+                SUM(input_tokens) AS input, SUM(cache_read_tokens) AS cache_read, SUM(cache_write_tokens) AS cache_write,
+                SUM(output_tokens) AS output, SUM(cost_usd) AS cost, COUNT(*) AS turns
+         FROM token_usage WHERE day >= ?
+         GROUP BY day, provider, model, agent_id, priced
+         ORDER BY day`,
+      )
+      .all(fromDay ?? "") as Row[];
+    return rows.map((row) => ({
+      day: String(row.day),
+      provider: String(row.provider) as ProviderId,
+      model: String(row.model),
+      agentId: String(row.agent_id),
+      agentName: String(row.agent_name),
+      input: Number(row.input ?? 0),
+      cacheRead: Number(row.cache_read ?? 0),
+      cacheWrite: Number(row.cache_write ?? 0),
+      output: Number(row.output ?? 0),
+      costUsd: Number(row.priced) ? Number(row.cost ?? 0) : null,
+      turns: Number(row.turns ?? 0),
+    }));
   }
 
   // ---------- sesiones ----------

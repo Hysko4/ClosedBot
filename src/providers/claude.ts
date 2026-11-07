@@ -113,6 +113,8 @@ interface ActiveTurn {
   /** Si el mensaje que se está transmitiendo ya aportó texto (para separar párrafos). */
   streamingMessageHasText: boolean;
   toolUseIds: Set<string>;
+  /** El modelo de la última respuesta del agente (para contar lo gastado en el turno). */
+  model: string | null;
 }
 
 interface ThreadRuntime {
@@ -556,6 +558,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
       assistantMessages: new Map(),
       streamingMessageHasText: false,
       toolUseIds: new Set(),
+      model: null,
     };
     runtime.lastActivity = Date.now();
     this.emit("notification", {
@@ -611,6 +614,8 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
       if (message.parent_tool_use_id !== null) return;
       const turn = runtime.activeTurn;
       if (!turn) return;
+      const model = (message.message as { model?: unknown }).model;
+      if (typeof model === "string" && model) turn.model = model;
       for (const block of contentBlocks(message.message)) {
         if (block.type === "tool_use" && typeof block.id === "string" && !turn.toolUseIds.has(block.id)) {
           turn.toolUseIds.add(block.id);
@@ -634,6 +639,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
 
     if (message.type !== "result") return;
     const turn = runtime.activeTurn;
+    this.#emitTokenUsage(runtime, message, turn?.model ?? null);
     const fallback = message.subtype === "success" ? message.result : "";
     if (turn) {
       const completeText = [...turn.assistantMessages.values()].join("\n\n");
@@ -646,6 +652,41 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
       terminal === "aborted_streaming" || terminal === "aborted_tools" || errors.some((error) => /interrupt|abort/i.test(error));
     const status = interrupted ? "interrupted" : message.subtype === "success" ? "completed" : "failed";
     this.#completeTurn(runtime, status, errors.length ? errors.join("\n") : null);
+  }
+
+  /**
+   * Lo gastado, para «Uso»: lo acumulado en la sesión por modelo, con el costo que calcula Claude Code
+   * (precio de lista de la API), y lo del agente principal en este turno, por si la sesión se reanudó.
+   */
+  #emitTokenUsage(runtime: ThreadRuntime, message: Extract<SDKMessage, { type: "result" }>, model: string | null): void {
+    const reading: Record<string, { input: number; cacheRead: number; cacheWrite: number; output: number; costUsd: number }> = {};
+    for (const [key, usage] of Object.entries(message.modelUsage ?? {})) {
+      // «claude-opus-4-8[1m]» y «claude-opus-4-8» son el mismo modelo.
+      const name = key.replace(/\[[^\]]*\]$/, "");
+      const entry = (reading[name] ??= { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, costUsd: 0 });
+      entry.input += usage.inputTokens || 0;
+      entry.cacheRead += usage.cacheReadInputTokens || 0;
+      entry.cacheWrite += usage.cacheCreationInputTokens || 0;
+      entry.output += usage.outputTokens || 0;
+      entry.costUsd += usage.costUSD || 0;
+    }
+    const usage = message.usage;
+    const turnModel = (model ?? Object.keys(reading)[0] ?? "").replace(/\[[^\]]*\]$/, "");
+    const turn =
+      usage && turnModel
+        ? {
+            model: turnModel,
+            input: usage.input_tokens || 0,
+            cacheRead: usage.cache_read_input_tokens || 0,
+            cacheWrite: usage.cache_creation_input_tokens || 0,
+            output: usage.output_tokens || 0,
+          }
+        : null;
+    if (!Object.keys(reading).length && !turn) return;
+    this.emit("notification", {
+      method: "closedbot/tokenUsage",
+      params: { threadId: runtime.id, turnId: runtime.activeTurn?.id ?? null, reading, ...(turn ? { turn } : {}) },
+    });
   }
 
   #appendStreamingText(runtime: ThreadRuntime, text: string): void {

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { effortVariant, groupModelVariants, mergeSessionModels, modelChoices, NO_MODELS, resolveModel } from "../src/providers/acp-models.js";
 import { AcpClient, type AcpClientOptions, isInside } from "../src/providers/acp.js";
 import { DemoAgentClient } from "../src/providers/demo.js";
-import type { ProviderStatus } from "../src/service.js";
+import { MODELS_META, type ProviderStatus } from "../src/service.js";
 import { createHarness, tempDir, waitFor } from "./helpers.js";
 
 const fixture = fileURLToPath(new URL("../../test/fixtures/fake-acp.mjs", import.meta.url));
@@ -294,6 +294,31 @@ test("ACP: lista los modelos sin gastar mensajes y retoma la conversación tras 
     } finally {
       await second.close();
     }
+  }
+});
+
+test("modelos: la lista se guarda y, al reabrir la app, sale al instante sin volver a abrir el programa", async () => {
+  const first = await acpHarness();
+  const { dir, log } = first;
+  try {
+    const models = await first.h.service.listModels("grok");
+    assert.equal(models[0]?.model, "fake-pro");
+    assert.match(first.h.store.getMeta(MODELS_META) ?? "", /"grok":\{"at":\d+,"models":\[\{"model":"fake-pro"/);
+  } finally {
+    await first.close(true);
+  }
+  const probes = () => readLog(log).filter((item) => item.method === "session/new" && /closedbot-grok-modelos/.test(String(item.params?.cwd))).length;
+  const before = probes();
+  const second = await acpHarness({ dir, log });
+  try {
+    const models = await second.h.service.listModels("grok");
+    assert.deepEqual(models.map((entry) => entry.model), ["fake-pro", "fake-mini"]);
+    assert.equal(probes(), before, "no abre una sesión para listarlos otra vez");
+    // «fresh» la vuelve a pedir.
+    await second.h.service.listModels("grok", { fresh: true });
+    assert.equal(probes(), before + 1);
+  } finally {
+    await second.close();
   }
 });
 

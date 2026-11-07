@@ -36,6 +36,7 @@ import {
   type VoiceSettings,
 } from "./db.js";
 import { type SavedImage, saveGeneratedImage, withImages } from "./images.js";
+import { downloadPrices, type ModelPrice, normalizeModel } from "./prices.js";
 import { buildInstructions, composeDeliveryInput, composeGreeting, GREETING_MARKER } from "./instructions.js";
 import { type AgentMcpView, closedbotServer, fromCodexStatus, type McpListing, type McpServerView } from "./mcp.js";
 import { cleanMemory, describeMemories, MEMORY_LIMITS, searchMemories } from "./memories.js";
@@ -100,6 +101,7 @@ import {
   parseReportProgressArgs,
   type UpdateAgentArgs,
 } from "./team.js";
+import { emptyReading, localDay, type ModelReading, rangeStart, type Reading, readingIncrement, spendReport, type SpendReport, tokensOf } from "./spend.js";
 import { describeChanges, describeTeam, parseTeamSnapshot, snapshotAgent, snapshotChannel, snapshotTeam, type TeamSnapshot } from "./team-state.js";
 import { VERSION } from "./version.js";
 
@@ -163,6 +165,22 @@ const CHANNEL_HISTORY = 12;
 export const MAX_CHANNELS_PER_TURN = 3;
 /** Uso del plan: cada cuánto se vuelve a leer y cuánto esperar como mínimo entre lecturas. */
 const USAGE_INTERVAL_MS = 10 * 60_000;
+/**
+ * Las listas de modelos de cada proveedor, guardadas como JSON { proveedor: { at, models } }: la ficha y «Crear»
+ * las muestran al instante (Gemini tarda en abrir la sesión con que se piden). Pasado este rato, se renuevan en
+ * segundo plano la próxima vez que se piden.
+ */
+export const MODELS_META = "model_lists";
+const MODELS_REFRESH_MS = 30 * 60_000;
+/** Lo último que dijo cada sesión de su gasto acumulado: así de cada turno se cuenta solo lo nuevo. */
+export const TOKEN_READINGS_META = "token_readings";
+/** Una sesión sin novedades en 60 días se olvida. */
+const TOKEN_READING_KEEP_MS = 60 * 24 * 60 * 60_000;
+/** La lista de precios de las API (de LiteLLM) y cuándo se bajó; se renueva una vez al día. */
+export const PRICES_META = "model_prices";
+const PRICES_REFRESH_MS = 24 * 60 * 60_000;
+/** Si todavía no hay precios, «Uso» espera la lista a lo más esto. */
+const PRICES_WAIT_MS = 12_000;
 const USAGE_MIN_GAP_MS = 60_000;
 const USAGE_AFTER_TURN_MS = 2 * 60_000;
 const USAGE_FIRST_MS = 20_000;
@@ -374,6 +392,8 @@ export type ServiceEvent =
   | { type: "settings"; settings: Settings }
   | { type: "sections"; sections: string[] }
   | { type: "usage"; usage: UsageView[] }
+  /** Se contó el gasto de un turno (la ventana «Uso» abierta se actualiza). */
+  | { type: "spend" }
   | { type: "notice"; level: "error" | "info"; message: string; agentId?: string }
   | { type: "memories"; agentId: string; memories: MemoryView[] }
   | { type: "skills"; agentId: string; skills: SkillView[] }
@@ -434,6 +454,8 @@ export interface ServiceOptions {
   pixelLab?: PixelLabOptions;
   /** De dónde y cómo bajar el arte en alta resolución (las pruebas usan uno falso). */
   officeArt?: OfficeStudioOptions["art"];
+  /** Cómo bajar la lista de precios de las API (por omisión, la de LiteLLM); null: sin precios (pruebas). */
+  fetchPrices?: (() => Promise<Record<string, ModelPrice>>) | null;
   log?: (level: "info" | "warn" | "error", message: string) => void;
 }
 
@@ -559,6 +581,13 @@ export class AgentService extends EventEmitter<ServiceEvents> {
   readonly #mcpQueue: Array<() => void> = [];
   #progress: Map<string, AgentProgress> | null = null;
   #teamProgress: Map<string, TeamProgressRecord> | null = null;
+  #modelLists: Map<string, { at: number; models: ModelOption[] }> | null = null;
+  /** Lo último que dijo cada sesión («proveedor:hilo») de su gasto acumulado. */
+  #tokenReadings: Map<string, { at: number; reading: Reading }> | null = null;
+  /** La lista de precios guardada (undefined: aún no se leyó de la base). */
+  #prices: { at: number; prices: Record<string, ModelPrice> } | null | undefined = undefined;
+  #pricesRefresh: Promise<void> | null = null;
+  readonly #modelReads = new Map<ProviderId, Promise<ModelOption[]>>();
 
   constructor(options: ServiceOptions) {
     super();
@@ -810,27 +839,223 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     await client.stop().catch(() => undefined);
   }
 
-  async listModels(provider: ProviderId): Promise<ModelOption[]> {
+  /**
+   * El modelo de un agente para contarlo (a Claude Bot, en sus herramientas): el elegido o, si no hay, el que usa su
+   * programa por defecto, con el nombre de la lista guardada (pedido: nada de «predeterminado» sin decir cuál).
+   */
+  #modelName(provider: ProviderId, model: string | null): string {
+    if (model) return model;
+    const models = this.#modelListMap().get(provider)?.models ?? [];
+    const fallback = models.find((entry) => entry.isDefault) ?? models[0];
+    return fallback ? `${fallback.model} (el que usa ${providerLabel(provider)} por defecto)` : "el que use su programa por defecto";
+  }
+
+  /** El id del modelo de un agente: el elegido o el que usa su programa por defecto (de la lista guardada). */
+  #modelId(provider: ProviderId, model: string | null): string {
+    if (model) return model;
+    const models = this.#modelListMap().get(provider)?.models ?? [];
+    return (models.find((entry) => entry.isDefault) ?? models[0])?.model ?? provider;
+  }
+
+  /** El nombre de un modelo para mostrar («Claude Opus 5.5»), si está en la lista guardada. */
+  #modelLabel(provider: ProviderId, model: string): string {
+    const name = normalizeModel(model);
+    const models = this.#modelListMap().get(provider)?.models ?? [];
+    return models.find((entry) => entry.model === model || normalizeModel(entry.model) === name)?.displayName ?? model;
+  }
+
+  // ---------- gasto de los agentes («Uso») ----------
+
+  /** El informe de «Uso» de los últimos `days` días (0 = todo), con precios de API para lo que no trae costo. */
+  async spendReport(days: number): Promise<SpendReport> {
+    await this.#ensurePrices();
+    const from = rangeStart(days);
+    const prices = this.#priceList();
+    return spendReport(this.#store.tokenUsageGroups(from), {
+      from,
+      to: localDay(Date.now()),
+      prices: prices?.prices ?? {},
+      pricesAt: prices?.at ?? null,
+      providerLabel,
+      modelLabel: (provider, model) => this.#modelLabel(provider, model),
+      agentName: (agentId) => this.#store.getAgent(agentId)?.name ?? null,
+    });
+  }
+
+  /** Sin precios todavía: se espera la lista un rato; si es vieja, se renueva aparte. */
+  async #ensurePrices(): Promise<void> {
+    if (this.#options.fetchPrices === null) return;
+    const saved = this.#priceList();
+    if (saved && Date.now() - saved.at < PRICES_REFRESH_MS) return;
+    this.#pricesRefresh ??= (async () => {
+      try {
+        const prices = await (this.#options.fetchPrices ?? (() => downloadPrices()))();
+        this.#prices = { at: Date.now(), prices };
+        this.#store.setMeta(PRICES_META, JSON.stringify(this.#prices));
+      } catch (error) {
+        this.#log("warn", `No se pudo bajar la lista de precios: ${errorText(error)}`);
+      } finally {
+        this.#pricesRefresh = null;
+      }
+    })();
+    if (saved) return;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([this.#pricesRefresh, new Promise<void>((done) => (timer = setTimeout(done, PRICES_WAIT_MS)))]);
+    clearTimeout(timer);
+  }
+
+  #priceList(): { at: number; prices: Record<string, ModelPrice> } | null {
+    if (this.#prices !== undefined) return this.#prices;
+    this.#prices = null;
+    try {
+      const saved: unknown = JSON.parse(this.#store.getMeta(PRICES_META) ?? "null");
+      if (isRecord(saved) && typeof saved.at === "number" && isRecord(saved.prices)) {
+        this.#prices = { at: saved.at, prices: saved.prices as Record<string, ModelPrice> };
+      }
+    } catch {
+      // Una lista dañada se vuelve a bajar.
+    }
+    return this.#prices;
+  }
+
+  #tokenReadingMap(): Map<string, { at: number; reading: Reading }> {
+    if (this.#tokenReadings) return this.#tokenReadings;
+    const map = new Map<string, { at: number; reading: Reading }>();
+    try {
+      const saved: unknown = JSON.parse(this.#store.getMeta(TOKEN_READINGS_META) ?? "{}");
+      if (isRecord(saved)) {
+        for (const [key, value] of Object.entries(saved)) {
+          const reading = isRecord(value) ? parseReading(getRecord(value, "reading")) : null;
+          if (isRecord(value) && typeof value.at === "number" && reading) map.set(key, { at: value.at, reading });
+        }
+      }
+    } catch {
+      // Dañada: se empieza de nuevo (las sesiones siguientes vuelven a contar desde su próxima lectura).
+    }
+    this.#tokenReadings = map;
+    return map;
+  }
+
+  #saveTokenReadings(): void {
+    const map = this.#tokenReadingMap();
+    const now = Date.now();
+    for (const [key, value] of map) if (now - value.at > TOKEN_READING_KEEP_MS) map.delete(key);
+    this.#store.setMeta(TOKEN_READINGS_META, JSON.stringify(Object.fromEntries(map)));
+  }
+
+  #seedTokenReading(provider: ProviderId, threadId: string): void {
+    this.#tokenReadingMap().set(`${provider}:${threadId}`, { at: Date.now(), reading: {} });
+    this.#saveTokenReadings();
+  }
+
+  /**
+   * Cuenta lo que gastó un turno. `reading`: lo acumulado en la sesión (se resta la lectura anterior);
+   * `turn`: lo de este turno solo, que se usa si la acumulada no sirve (sesión reanudada sin lectura anterior).
+   */
+  #countTokens(agentId: string, threadId: string, reading: Reading | null, turn: (ModelReading & { model: string }) | null): void {
+    const agent = this.#store.getAgent(agentId);
+    if (!agent) return;
+    let counted: Reading | null = null;
+    if (reading && !emptyReading(reading)) {
+      const readings = this.#tokenReadingMap();
+      const key = `${agent.provider}:${threadId}`;
+      const previous = readings.get(key);
+      if (previous) {
+        counted = readingIncrement(reading, previous.reading);
+        // Bajó: la sesión empezó de nuevo. Sin lo del turno, la lectura entera es lo nuevo (Codex reanudado desde cero).
+        if (!counted && !turn) counted = reading;
+      }
+      readings.set(key, { at: Date.now(), reading });
+      this.#saveTokenReadings();
+    }
+    if (!counted && turn) counted = { [turn.model]: turn };
+    if (!counted) return;
+    const at = Date.now();
+    let added = false;
+    for (const [model, entry] of Object.entries(counted)) {
+      if (!tokensOf(entry) && !entry.costUsd) continue;
+      this.#store.addTokenUsage({
+        at,
+        day: localDay(at),
+        provider: agent.provider,
+        model,
+        agentId: agent.id,
+        agentName: agent.name,
+        input: entry.input,
+        cacheRead: entry.cacheRead,
+        cacheWrite: entry.cacheWrite,
+        output: entry.output,
+        costUsd: entry.costUsd,
+      });
+      added = true;
+    }
+    if (added) this.#emit({ type: "spend" });
+  }
+
+  /** `fresh`: pedirla de nuevo aunque haya una guardada. */
+  async listModels(provider: ProviderId, options: { fresh?: boolean } = {}): Promise<ModelOption[]> {
     // Codex, Grok y Gemini son programas aparte: si no están instalados (o no tienen sesión) no se arrancan.
     if (provider === "codex" || provider === "grok" || provider === "gemini") {
       const status = this.#providers.find((item) => item.id === provider);
       if (!status?.available || (provider !== "codex" && status.loggedIn === false)) return [];
     }
-    const client = await this.#getClient(provider);
-    const response = await client.request<unknown>("model/list", {});
-    return getArray(response, "data")
-      .filter(isRecord)
-      .filter((model) => model.hidden !== true)
-      .map((model) => ({
-        model: String(model.model ?? model.id ?? ""),
-        displayName: String(model.displayName ?? model.model ?? ""),
-        isDefault: model.isDefault === true,
-        efforts: getArray(model, "supportedReasoningEfforts")
-          .map((entry) => (isRecord(entry) ? String(entry.reasoningEffort ?? "") : String(entry)))
-          .filter(Boolean),
-        ...variantsOf(model),
-      }))
-      .filter((model) => model.model);
+    // La guardada sale al instante (pedido: «Gemini demora mucho en cargar el modelo»); si es vieja, se renueva aparte.
+    const saved = this.#modelListMap().get(provider);
+    if (saved && !options.fresh) {
+      if (Date.now() - saved.at > MODELS_REFRESH_MS) void this.#readModels(provider).catch(() => undefined);
+      return saved.models;
+    }
+    return this.#readModels(provider);
+  }
+
+  #modelListMap(): Map<string, { at: number; models: ModelOption[] }> {
+    if (this.#modelLists) return this.#modelLists;
+    const map = new Map<string, { at: number; models: ModelOption[] }>();
+    try {
+      const saved: unknown = JSON.parse(this.#store.getMeta(MODELS_META) ?? "{}");
+      if (isRecord(saved)) {
+        for (const [provider, value] of Object.entries(saved)) {
+          if (!isRecord(value) || typeof value.at !== "number" || !Array.isArray(value.models)) continue;
+          const models = value.models.filter((model): model is ModelOption => isRecord(model) && typeof model.model === "string" && typeof model.displayName === "string" && Array.isArray(model.efforts));
+          if (models.length) map.set(provider, { at: value.at, models });
+        }
+      }
+    } catch {
+      // Una lista dañada se vuelve a pedir.
+    }
+    this.#modelLists = map;
+    return map;
+  }
+
+  /** Pide la lista al programa (una vez a la vez por proveedor) y la guarda. */
+  #readModels(provider: ProviderId): Promise<ModelOption[]> {
+    const running = this.#modelReads.get(provider);
+    if (running) return running;
+    const read = (async () => {
+      const client = await this.#getClient(provider);
+      const response = await client.request<unknown>("model/list", {});
+      const models: ModelOption[] = getArray(response, "data")
+        .filter(isRecord)
+        .filter((model) => model.hidden !== true)
+        .map((model) => ({
+          model: String(model.model ?? model.id ?? ""),
+          displayName: String(model.displayName ?? model.model ?? ""),
+          isDefault: model.isDefault === true,
+          efforts: getArray(model, "supportedReasoningEfforts")
+            .map((entry) => (isRecord(entry) ? String(entry.reasoningEffort ?? "") : String(entry)))
+            .filter(Boolean),
+          ...variantsOf(model),
+        }))
+        .filter((model) => model.model);
+      if (models.length) {
+        const map = this.#modelListMap();
+        map.set(provider, { at: Date.now(), models });
+        this.#store.setMeta(MODELS_META, JSON.stringify(Object.fromEntries(map)));
+      }
+      return models;
+    })().finally(() => this.#modelReads.delete(provider));
+    this.#modelReads.set(provider, read);
+    return read;
   }
 
   // ---------- agentes ----------
@@ -2576,6 +2801,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const threadId = response.thread.id;
     this.#store.updateAgent(agent.id, { threadId });
     this.#threadToAgent.set(threadId, agent.id);
+    // Sesión nueva: su gasto empieza en cero (de una reanudada solo se cuenta lo que sume desde la lectura anterior).
+    this.#seedTokenReading(agent.provider, threadId);
     // La huella es la de reanudar (Codex no repite ahí las herramientas): así el próximo mensaje no lo reabre por nada.
     this.#loadedThreads.set(`${agent.provider}:${threadId}`, paramsPrint(this.#threadParams(agent, false)));
     return threadId;
@@ -2906,6 +3133,34 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const threadId = getString(params, "threadId");
     const agentId = threadId ? this.#threadToAgent.get(threadId) : undefined;
     switch (notification.method) {
+      case "closedbot/tokenUsage": {
+        // Claude (y la demo): lo acumulado en la sesión por modelo, con su costo; y lo de este turno, por si no sirve.
+        if (agentId && threadId) this.#countTokens(agentId, threadId, parseReading(getRecord(params, "reading")), parseTurnUsage(getRecord(params, "turn")));
+        return;
+      }
+      case "thread/tokenUsage/updated": {
+        // Codex: el total del hilo (su entrada incluye lo leído de caché); el modelo es el del agente.
+        const total = getRecord(getRecord(params, "tokenUsage"), "total");
+        const agent = agentId ? this.#store.getAgent(agentId) : null;
+        if (!agent || !threadId || !total) return;
+        // La entrada de OpenAI incluye lo leído de caché; lo escrito en caché (modelos nuevos) va dentro salvo que el total diga otra cosa.
+        const input = tokenNumber(total.inputTokens);
+        const cached = tokenNumber(total.cachedInputTokens);
+        const written = tokenNumber(total.cacheWriteInputTokens);
+        const output = tokenNumber(total.outputTokens);
+        const writtenApart = written > 0 && tokenNumber(total.totalTokens) >= input + output + written;
+        const reading: Reading = {
+          [this.#modelId(agent.provider, agent.model)]: {
+            input: Math.max(0, input - cached - (writtenApart ? 0 : written)),
+            cacheRead: cached,
+            cacheWrite: written,
+            output,
+            costUsd: null,
+          },
+        };
+        this.#countTokens(agent.id, threadId, reading, null);
+        return;
+      }
       case "turn/started": {
         if (!agentId) return;
         const turnId = getString(getRecord(params, "turn"), "id");
@@ -3095,7 +3350,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
         ...(agent.progress ? { avance: `${agent.progress.percent} %${agent.progress.step ? ` · ${agent.progress.step}` : ""}` } : {}),
         eresTu: agent.id === senderId,
         ...(agent.main ? { botPrincipal: true } : {}),
-        ...(forMain ? { modelo: agent.model ?? "predeterminado", instrucciones: clip(agent.instructions, 400) } : {}),
+        ...(forMain ? { modelo: this.#modelName(agent.provider, agent.model), instrucciones: clip(agent.instructions, 400) } : {}),
       }));
       // Al bot principal le sirve saber con qué proveedores puede crear agentes ahora mismo.
       const ready = forMain
@@ -3407,7 +3662,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       nombre: agent.name,
       proyecto: agent.project,
       proveedor: agent.provider,
-      modelo: agent.model ?? "predeterminado",
+      modelo: this.#modelName(agent.provider, agent.model),
     });
   }
 
@@ -3540,7 +3795,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       nombre: updated.name,
       proyecto: updated.project || null,
       proveedor: updated.provider,
-      modelo: updated.model ?? "predeterminado",
+      modelo: this.#modelName(updated.provider, updated.model),
       cambios: changes,
     });
   }
@@ -3780,7 +4035,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       ...(agent.appearance ? { aspecto: agent.appearance } : {}),
       proyecto: agent.project || null,
       proveedor: providerLabel(agent.provider),
-      modelo: agent.model ?? "predeterminado",
+      modelo: this.#modelName(agent.provider, agent.model),
       razonamiento: agent.effort ?? "predeterminado",
       estado: agentStateLabel(view.state),
       enCola: view.queued,
@@ -4167,6 +4422,41 @@ function safeRealpath(path: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Un número de tokens (entero, no negativo) de lo que manda un programa. */
+function tokenNumber(value: unknown): number {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.round(number) : 0;
+}
+
+function parseModelReading(value: unknown): ModelReading | null {
+  if (!isRecord(value)) return null;
+  const cost = typeof value.costUsd === "number" && Number.isFinite(value.costUsd) && value.costUsd >= 0 ? value.costUsd : null;
+  return {
+    input: tokenNumber(value.input),
+    cacheRead: tokenNumber(value.cacheRead),
+    cacheWrite: tokenNumber(value.cacheWrite),
+    output: tokenNumber(value.output),
+    costUsd: cost,
+  };
+}
+
+/** `{ modelo: { input, cacheRead, cacheWrite, output, costUsd } }` → lectura; null si no trae ningún modelo. */
+function parseReading(value: Record<string, unknown> | null): Reading | null {
+  if (!value) return null;
+  const reading: Reading = {};
+  for (const [model, entry] of Object.entries(value)) {
+    const parsed = parseModelReading(entry);
+    if (parsed && model.trim()) reading[model.trim().slice(0, 120)] = parsed;
+  }
+  return Object.keys(reading).length ? reading : null;
+}
+
+function parseTurnUsage(value: Record<string, unknown> | null): (ModelReading & { model: string }) | null {
+  const parsed = parseModelReading(value);
+  const model = value && typeof value.model === "string" ? value.model.trim().slice(0, 120) : "";
+  return parsed && model ? { ...parsed, model } : null;
 }
 
 function isInside(base: string, target: string): boolean {
