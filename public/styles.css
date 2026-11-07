@@ -4237,19 +4237,6 @@ svg {
 
 /* ---------- la Oficina: crear, arrastrar, la guía y el panel del agente ---------- */
 
-.office-new {
-  flex: none;
-  min-height: 34px;
-  padding: 6px 13px 6px 10px;
-  font-size: 13px;
-}
-
-.office-new svg {
-  width: 17px;
-  height: 17px;
-  stroke-width: 2.2;
-}
-
 .office-help {
   flex: none;
 }
@@ -4632,21 +4619,9 @@ svg {
     max-height: 78%;
   }
 
-  /* En el teléfono, «Nuevo agente» queda como un «+». */
   .office-title {
     font-size: 16px;
     line-height: 1.2;
-  }
-
-  .office-new {
-    width: 36px;
-    min-height: 36px;
-    padding: 0;
-    border-radius: 50%;
-  }
-
-  .office-new span {
-    display: none;
   }
 
   .office-empty {

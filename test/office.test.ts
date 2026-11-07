@@ -535,11 +535,13 @@ test("Oficina (interfaz): la escena llena el espacio que hay, también en un mon
   }
 });
 
-test("Oficina (interfaz): el encabezado dice solo «Oficina», sin el resumen al lado", () => {
+test("Oficina (interfaz): el encabezado dice solo «Oficina», sin el resumen ni el botón «Nuevo agente»", () => {
   const html = readFileSync(join(publicDir, "index.html"), "utf8");
   const header = html.match(/<header class="office-header">([\s\S]*?)<\/header>/)?.[1] ?? "";
   assert.match(header, /<div class="office-heading">\s*<h2 class="office-title">Oficina<\/h2>\s*<\/div>/);
   assert.doesNotMatch(html, /office-status/);
+  // Crear un agente sigue en el «+» de cada tarjeta y en el clic derecho, no arriba.
+  assert.doesNotMatch(header, /data-office-action="create"|Nuevo agente|office-new/);
   const script = readFileSync(join(publicDir, "office.js"), "utf8");
   assert.doesNotMatch(script, /office-status|preguntas? para ti|todos libres/);
 });

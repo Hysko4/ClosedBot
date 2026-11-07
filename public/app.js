@@ -31,8 +31,9 @@ const COLLAPSED_KEY = "closedbot:secciones-plegadas";
 const MAX_CHANNEL_MEMBERS = 12;
 
 const state = {
-  /** En la Oficina cerraste la ficha del costado: no se vuelve a abrir sola al elegir otro agente. */
-  officeSideClosed: false,
+  /** La ficha al costado de la Oficina está cerrada: no se abre sola al elegir un agente (pedido), solo si la pides
+   *  tocando su nombre arriba del chat o con «Ver su ficha»; abierta así, sigue al elegir otro hasta que la cierres. */
+  officeSideClosed: true,
   agents: [],
   providers: [],
   routines: [],
@@ -603,7 +604,7 @@ async function openDocked(agent) {
     restoreDraft();
     renderAttachments();
     renderQueue();
-    // La ficha se abre con cada agente que eliges, salvo que la hayas cerrado.
+    // La ficha solo acompaña al agente si la abriste (ver officeSideClosed).
     if (!state.officeSideClosed) openDetails(agent.id, takeDetailsPage(agent.id), { docked: true });
     else closeDockedDetails();
     await loadConversation(key);

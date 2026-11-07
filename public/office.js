@@ -18,7 +18,7 @@ const TILE_W = 74;
 const TILE_H = 37;
 const THICK = 14;
 const CARD_W = 230;
-const CARD_H = 62;
+const CARD_H = 46;
 /** El «+» junto a la tarjeta de cada equipo. */
 const ADD_R = 14;
 /** Lo mismo que en el servidor: agentes por canal y canales activos. */
@@ -486,27 +486,6 @@ export function createOffice(host) {
 
   function teamOf(platform) {
     return platform.seats.map((seat) => robots.get(seat.agentId)).filter((robot) => robot && robot.platform === platform).map((robot) => robot.agent);
-  }
-
-  /** Qué hace el equipo, en pocas palabras (la línea de la tarjeta). */
-  function teamStatus(platform) {
-    const team = teamOf(platform);
-    if (!team.length) return platform.channelId ? "Sin agentes: suma uno con +" : "Sin agentes aquí";
-    if (team.some((agent) => live.asking.has(agent.id))) return "Te hizo una pregunta";
-    const working = team.filter((agent) => agent.state === "working");
-    if (working.length) {
-      let latest = null;
-      for (const agent of working) {
-        const activity = live.activity.get(agent.id);
-        if (activity && (!latest || activity.at > latest.at)) latest = activity;
-      }
-      if (latest && Date.now() - latest.at < 120_000) return latest.text;
-      if (platform.kind === "hall") return "Trabajando";
-      return working.length === 1 ? `${working[0].name} trabajando` : `${working.length} trabajando`;
-    }
-    if (team.some((agent) => agent.state === "queued")) return "Encargos en cola";
-    if (team.every((agent) => agent.state === "paused")) return "En pausa";
-    return "Libre";
   }
 
   /** Avance del equipo: el promedio de lo que informaron sus agentes (o el de Claude Bot en su plataforma). */
@@ -1097,17 +1076,14 @@ export function createOffice(host) {
     ctx.restore();
   }
 
-  /** Tarjeta de cristal sobre la plataforma: nombre, cuántos son, qué hacen y su avance; al lado, el «+». */
+  /** Tarjeta de cristal sobre la plataforma: solo el nombre y el avance (pedido); al lado, el «+». */
   function drawCard(platform, t) {
     const o = origin(platform);
     const hall = platform.kind === "hall";
     const x = platform.cx - CARD_W / 2;
     const y = o.y - CARD_H - 115;
     const color = platform.color;
-    const team = teamOf(platform);
     const progress = teamProgress(platform);
-    const asking = team.some((agent) => live.asking.has(agent.id));
-    const working = team.some((agent) => agent.state === "working");
     platform.card = { x, y, w: CARD_W, h: CARD_H };
 
     // Hilo punteado de la tarjeta a la plataforma.
@@ -1137,27 +1113,12 @@ export function createOffice(host) {
     ctx.fillStyle = color;
     roundRect(ctx, x + 7, y + 10, 4, CARD_H - 20, 2);
     ctx.fill();
-    // Punto de estado.
-    ctx.fillStyle = asking ? "#ffd23f" : working ? "#3ee07a" : "#5d6794";
-    if (working || asking) {
-      ctx.shadowColor = ctx.fillStyle;
-      ctx.shadowBlur = 8;
-    }
-    ctx.beginPath();
-    ctx.arc(x + CARD_W - 14, y + 15, 4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    // Textos.
+    // El nombre.
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
     ctx.fillStyle = "#ffffff";
     ctx.font = `700 15px ${FONT}`;
-    ctx.fillText(clipText(ctx, platform.title, CARD_W - 46), x + 19, y + 22);
-    const count = team.length;
-    const who = hall ? "Coordina" : `${count} ${count === 1 ? "agente" : "agentes"}`;
-    ctx.fillStyle = rgba(color, 0.95);
-    ctx.font = `500 12px ${FONT}`;
-    ctx.fillText(clipText(ctx, `${who} · ${teamStatus(platform)}`, CARD_W - 30), x + 19, y + 39);
+    ctx.fillText(clipText(ctx, platform.title, CARD_W - 30), x + 19, y + 21);
     // Avance del equipo. Su rótulo («45 %», «Listo» o la pizarra, que siempre se nombra para que se sepa que
     // está ahí, más clara si tiene un plan) va a la derecha y la barra termina antes, sin pasar por debajo.
     let label = null;
@@ -1402,7 +1363,18 @@ export function createOffice(host) {
       if (platform.channelId) return { kind: "channel", platform };
       return { kind: "loose", platform };
     }
+    // La plataforma de un equipo también lleva a su canal.
+    for (const platform of platforms) {
+      if (platform.channelId && onFloor(point, platform)) return { kind: "channel", platform };
+    }
     return null;
+  }
+
+  /** Si el punto cae justo sobre la cara de una plataforma (sin el margen de soltar). */
+  function onFloor(point, platform) {
+    const o = origin(platform);
+    const { i, j } = cellAt(point.x - o.x, point.y - o.y);
+    return i >= 0 && j >= 0 && i <= platform.side && j <= platform.side;
   }
 
   /** Si el punto cae sobre la cara de una plataforma (con un margen, para que sea fácil soltar ahí). */
@@ -1631,7 +1603,7 @@ export function createOffice(host) {
         platform: target.platform,
         title: `Equipo «${target.platform.title}»`,
         text: [target.platform.topic, lead ? `Encargado: ${lead.name}` : ""].filter(Boolean).join(" · ") || "Un canal donde sus agentes conversan y se reparten el trabajo.",
-        hint: "Clic: abrir el chat del equipo · Clic derecho: más opciones",
+        hint: "Clic: abrir su canal · Clic derecho: más opciones",
       });
     } else if (target.kind === "loose") {
       setHover({ ...at, kind: "loose", platform: target.platform, title: "Sin grupo", text: "Agentes que todavía no están en un equipo.", hint: "Arrástralos a una plataforma para sumarlos" });
