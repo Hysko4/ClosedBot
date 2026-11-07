@@ -27,8 +27,8 @@ const streamText = (text: string): SDKMessage =>
 const messageStart = (): SDKMessage =>
   ({ type: "stream_event", parent_tool_use_id: null, uuid: crypto.randomUUID(), session_id: "s", event: { type: "message_start" } }) as unknown as SDKMessage;
 
-const assistant = (content: unknown[]): SDKMessage =>
-  ({ type: "assistant", parent_tool_use_id: null, uuid: crypto.randomUUID(), session_id: "s", message: { role: "assistant", content } }) as unknown as SDKMessage;
+const assistant = (content: unknown[], extra: Record<string, unknown> = {}): SDKMessage =>
+  ({ type: "assistant", parent_tool_use_id: null, uuid: crypto.randomUUID(), session_id: "s", message: { role: "assistant", content }, ...extra }) as unknown as SDKMessage;
 
 const result = (subtype: string, extra: Record<string, unknown> = {}): SDKMessage =>
   ({ type: "result", subtype, result: "", errors: [], session_id: "s", uuid: crypto.randomUUID(), ...extra }) as unknown as SDKMessage;
@@ -72,6 +72,12 @@ function fakeQueryFactory(recorder: Recorder): QueryFactory {
         if (text.includes("@falla-sandbox")) {
           yield result("error_during_execution", { errors: ["sandbox unavailable: bubblewrap (bwrap) not found"] });
           continue;
+        }
+        // Como al reanudar una sesión con un comando en segundo plano sin terminar: Claude Code cierra eso
+        // antes, con un «listo» sin respuesta del modelo, y una respuesta suelta a un mensaje anterior.
+        if (text.includes("@pendiente")) {
+          yield assistant([{ type: "text", text: "Respuesta a algo anterior." }], { user_message_uuid: "otro", user_message_uuids: ["otro"] });
+          yield result("success", { result: "" });
         }
         yield messageStart();
         yield streamText("Hola ");
@@ -222,6 +228,24 @@ test("Claude: detener interrumpe el turno", async () => {
     await h.service.interrupt(clara.id);
     await waitFor(() => h.store.getMessage(message.id)?.status === "interrupted", 5_000, "interrumpido");
     assert.equal(recorder.interrupts, 1);
+  } finally {
+    await h.close();
+  }
+});
+
+test("Claude: al reanudar una sesión que quedó a medias, el cierre de lo anterior no se come la respuesta", async () => {
+  const { h } = await claudeHarness();
+  try {
+    const clara = h.service.createAgent({ name: "Clara", provider: "claude" });
+    const channel = h.service.createChannel({ name: "Equipo", memberIds: [clara.id] });
+    h.service.sendChannelMessage(channel.id, "@pendiente hola");
+    const reply = await waitFor(
+      () => h.service.listChannelMessages(channel.id, 50).find((item) => item.role === "assistant" && item.status === "completed"),
+      5_000,
+      "la respuesta en el canal",
+    );
+    assert.equal(reply.text, "Hola desde Claude.");
+    assert.ok(!h.service.listChannelMessages(channel.id, 50).some((item) => item.text.includes("algo anterior")));
   } finally {
     await h.close();
   }

@@ -122,6 +122,12 @@ interface ActiveTurn {
   toolUseIds: Set<string>;
   /** El modelo de la última respuesta del agente (para contar lo gastado en el turno). */
   model: string | null;
+  /**
+   * Si ya llegó una respuesta del modelo a este mensaje. Al reanudar una sesión que quedó a medias (p. ej. con un
+   * comando en segundo plano), Claude Code cierra antes lo pendiente con un `result` sin llamar al modelo: ese
+   * `result` no es de este turno y no debe cerrarlo (si no, la respuesta de verdad llega sin turno y se pierde).
+   */
+  answered: boolean;
 }
 
 interface ThreadRuntime {
@@ -578,6 +584,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
       streamingMessageHasText: false,
       toolUseIds: new Set(),
       model: null,
+      answered: false,
     };
     runtime.lastActivity = Date.now();
     this.emit("notification", {
@@ -633,6 +640,9 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
       if (message.parent_tool_use_id !== null) return;
       const turn = runtime.activeTurn;
       if (!turn) return;
+      // Lo que responde a otro mensaje (trabajo que quedó pendiente de antes) no es de este turno.
+      if (answersOther(message, turn.id)) return;
+      turn.answered = true;
       const model = (message.message as { model?: unknown }).model;
       if (typeof model === "string" && model) turn.model = model;
       for (const block of contentBlocks(message.message)) {
@@ -659,6 +669,8 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> implements Age
     if (message.type !== "result") return;
     const turn = runtime.activeTurn;
     this.#emitTokenUsage(runtime, message, turn?.model ?? null);
+    // Un «listo» sin ninguna respuesta del modelo es el cierre de algo anterior: el turno sigue esperando la suya.
+    if (turn && !turn.answered && message.subtype === "success") return;
     const fallback = message.subtype === "success" ? message.result : "";
     if (turn) {
       const completeText = [...turn.assistantMessages.values()].join("\n\n");
@@ -1143,4 +1155,15 @@ function normalizeClaudeEffort(effort: string): "low" | "medium" | "high" | "xhi
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+/** Si un mensaje del asistente dice que responde a otros mensajes del usuario y no a este turno. */
+function answersOther(message: SDKMessage, turnId: string): boolean {
+  const stamped = message as { user_message_uuids?: unknown; user_message_uuid?: unknown };
+  const uuids = Array.isArray(stamped.user_message_uuids)
+    ? stamped.user_message_uuids.filter((value): value is string => typeof value === "string")
+    : typeof stamped.user_message_uuid === "string"
+      ? [stamped.user_message_uuid]
+      : [];
+  return uuids.length > 0 && !uuids.includes(turnId);
 }
