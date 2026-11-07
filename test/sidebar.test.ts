@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import vm from "node:vm";
 import { AVATAR_CUSTOM_BASE } from "../src/db.js";
 import { composeGreeting, GREETING_MARKER } from "../src/instructions.js";
 import type { ProviderId } from "../src/providers/client.js";
@@ -343,4 +344,56 @@ test("uso del plan: el servicio lo lee de todos los proveedores con sesión, lo 
     await h.close();
     temp.cleanup();
   }
+});
+
+test("crear agente (interfaz): sin color hasta elegir el modelo; cada modelo trae su color y se recuerda el que elegiste", () => {
+  const app = readFileSync(new URL("../../public/app.js", import.meta.url), "utf8");
+  const slice = (from: string, to: string) => {
+    const start = app.indexOf(from);
+    const end = app.indexOf(to, start);
+    assert.ok(start >= 0 && end > start, `no encontré «${from}» en public/app.js`);
+    return app.slice(start, end);
+  };
+  const saved = new Map<string, string>();
+  const context = vm.createContext({
+    BLOB_COLORS: ["#8b5cf6", "#e5484d", "#4cbb73", "#ef9f3a", "#6f6f6f", "#3b82f6", "#e0609d", "#22b3a3", "#c9a227", "#a07cf0", "#38bdf8", "#84cc16"],
+    state: {
+      providers: [
+        { id: "claude", label: "Claude", available: true, loggedIn: true },
+        { id: "codex", label: "Codex", available: false, loggedIn: null },
+        { id: "gemini", label: "Gemini", available: true, loggedIn: false },
+        { id: "demo", label: "Demo", available: true, loggedIn: true },
+      ],
+    },
+    localStorage: { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => void saved.set(key, value) },
+  });
+  vm.runInContext(
+    `${slice("const MODEL_COLORS =", "const MODEL_MISSING")}
+    ${slice("/** Los modelos que se ofrecen al crear un agente", "/** «Modelo» en «Crear nuevo agente»")}
+    globalThis.created = { createModels, modelColor, rememberModelColor };`,
+    context,
+  );
+  const { createModels, modelColor, rememberModelColor } = context.created as {
+    createModels: () => Array<{ id: string }>;
+    modelColor: (provider: string) => number;
+    rememberModelColor: (provider: string, color: number) => void;
+  };
+  assert.deepEqual(createModels().map((provider) => provider.id), ["claude", "codex", "gemini"], "Demo no se ofrece; los que no están listos sí (con aviso)");
+  assert.equal(modelColor("claude"), 3, "Claude: naranja");
+  assert.equal(modelColor("gemini"), 5, "Gemini: azul");
+  rememberModelColor("gemini", 1);
+  assert.equal(modelColor("gemini"), 1, "el rojo que elegiste para Gemini");
+  assert.equal(modelColor("claude"), 3, "los otros modelos siguen con el suyo");
+  saved.set("closedbot:color-por-modelo", "{roto");
+  assert.equal(modelColor("gemini"), 5, "un dato guardado roto vuelve al color de la marca");
+  context.localStorage = { getItem: () => { throw new Error("bloqueado"); }, setItem: () => { throw new Error("bloqueado"); } };
+  assert.doesNotThrow(() => rememberModelColor("claude", 6), "sin almacenamiento (ventana privada) no falla");
+  assert.equal(modelColor("claude"), 3);
+  // El diálogo no elige un color al azar, y «Crear» usa el modelo que elegiste (o lo pide).
+  const open = slice("function openCreateDialog(", "/** Los modelos que se ofrecen al crear un agente");
+  assert.match(open, /createState\.color = null;/);
+  assert.doesNotMatch(open, /Math\.random\(\) \* BLOB_COLORS/);
+  const save = slice("async function saveCreate(", "// ---------- pedir un nombre");
+  assert.match(save, /if \(!createState\.agentId && !createState\.provider\) return askForModel\(\);/);
+  assert.doesNotMatch(save, /preferredProvider\(\)/);
 });

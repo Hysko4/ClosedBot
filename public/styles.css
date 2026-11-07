@@ -3054,6 +3054,75 @@ svg {
   border-color: #f0f0f0;
 }
 
+/* Sin modelo elegido, los colores esperan: tocarlos pide primero el modelo. */
+.color-row.waiting .color-option {
+  opacity: 0.32;
+}
+
+/* «Modelo» al crear un agente: cada botón trae el color que le pondrá. */
+.create-model {
+  margin: -6px 0 14px;
+  text-align: left;
+}
+
+.model-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.model-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 13px 7px 11px;
+  border: 1.5px solid #2c2c2c;
+  border-radius: 999px;
+  background: #151515;
+  color: var(--text-2);
+  font-size: 14px;
+}
+
+.model-option:hover {
+  background: #202020;
+}
+
+.model-option[aria-checked="true"] {
+  border-color: var(--accent-text);
+  background: #1d1a24;
+  color: var(--text);
+}
+
+.model-option.unready {
+  color: var(--muted);
+}
+
+.model-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.create-model .hint {
+  margin: 0;
+}
+
+.create-model .hint:empty {
+  display: none;
+}
+
+.model-row.nudge .model-option {
+  animation: model-nudge 0.9s ease;
+}
+
+@keyframes model-nudge {
+  25%,
+  60% {
+    border-color: var(--accent-text);
+  }
+}
+
 .prompt-field {
   margin: 14px 0 0;
 }

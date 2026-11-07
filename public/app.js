@@ -373,6 +373,8 @@ function handleEvent(event) {
         if (before.get(provider.id) !== `${provider.available}:${provider.loggedIn}`) state.models.delete(provider.id);
       }
       renderProviders();
+      // «Crear nuevo agente» abierto: sus botones de modelo dicen si cada uno ya tiene sesión.
+      if ($("#create-dialog").open && !createState.agentId) renderCreateModels($("#model-row").contains(document.activeElement));
       break;
     }
     case "routines":
@@ -4600,7 +4602,7 @@ async function stopAgent() {
 
 // ---------- proveedor, modelo y razonamiento (ficha → Modelo) ----------
 
-/** Proveedor para un agente nuevo: el primero con IA instalado y con sesión; si no hay, Claude (pedirá entrar). */
+/** El proveedor que se muestra si no hay uno elegido: el primero con IA instalado y con sesión; si no hay, Claude (pedirá entrar). */
 function preferredProvider() {
   return state.providers.find((provider) => provider.id !== "demo" && provider.available && provider.loggedIn !== false)?.id ?? "claude";
 }
@@ -4689,12 +4691,20 @@ function refreshEffortOptions(form, effort = "") {
   select.disabled = efforts.length === 0 && !effort;
 }
 
-// ---------- crear agente: figura, color y nombre ----------
+// ---------- crear agente: nombre, modelo, figura y color ----------
 
 const COLOR_NAMES = ["Morado", "Rojo", "Verde", "Naranja", "Gris", "Azul", "Rosado", "Turquesa", "Mostaza", "Lavanda", "Celeste", "Lima"];
-const createState = { shape: 0, color: 0, project: "", agentId: null, channelId: null, fromOffice: false };
+/** El color que toma un agente nuevo al elegir su modelo (índices de BLOB_COLORS): Claude naranja, Codex verde, Gemini azul, Grok gris, Qwen morado. */
+const MODEL_COLORS = { claude: 3, codex: 2, gemini: 5, grok: 4, local: 0 };
+/** El último color que elegiste para cada modelo: el próximo agente de ese modelo sale con él. */
+const MODEL_COLOR_KEY = "closedbot:color-por-modelo";
+/** La silueta de un agente nuevo mientras no tiene color (hasta que eliges su modelo). */
+const UNPAINTED = "#3a3a3a";
+const MODEL_MISSING = "Elige qué modelo usará.";
+// color null: todavía sin color. colorPicked: lo elegiste tú, así que cambiar de modelo ya no lo cambia.
+const createState = { shape: 0, color: null, colorPicked: false, provider: null, project: "", agentId: null, channelId: null, fromOffice: false };
 
-/** «+»: nombre, figura y color, como en la app de referencia. Con agentId cambia la apariencia de uno que ya existe. */
+/** «+»: nombre, modelo, figura y color (el color llega al elegir el modelo). Con agentId cambia la apariencia de uno que ya existe. */
 function openCreateDialog({ project = "", agentId = null, channelId = null, fromOffice = false } = {}) {
   closeContextMenu();
   const agent = agentId ? findAgent(agentId) : null;
@@ -4703,6 +4713,8 @@ function openCreateDialog({ project = "", agentId = null, channelId = null, from
   createState.project = agent ? agent.project : project;
   createState.channelId = channel?.id ?? null;
   createState.fromOffice = !agent && fromOffice;
+  createState.provider = null;
+  createState.colorPicked = false;
   if (agent) {
     const [shape, color] = avatarParts(agent);
     const index = BLOB_COLORS.indexOf(color);
@@ -4710,7 +4722,8 @@ function openCreateDialog({ project = "", agentId = null, channelId = null, from
     createState.color = index >= 0 ? index : 4;
   } else {
     createState.shape = Math.floor(Math.random() * BLOB_SHAPES.length);
-    createState.color = Math.floor(Math.random() * BLOB_COLORS.length);
+    // Sin color hasta que elijas su modelo: elegirlo lo pinta (y después puedes cambiarlo).
+    createState.color = null;
   }
   $("#create-title").textContent = agent
     ? `Apariencia de ${agent.name}`
@@ -4728,9 +4741,116 @@ function openCreateDialog({ project = "", agentId = null, channelId = null, from
   $("#create-look").value = agent?.appearance ?? "";
   $("#create-error").textContent = "";
   renderCreateCharacter();
+  renderCreateModels();
   renderCreatePickers();
   openDialog($("#create-dialog"));
   if (!coarsePointer) name.focus();
+}
+
+/** Los modelos que se ofrecen al crear un agente (Demo no usa IA y no se ofrece). */
+function createModels() {
+  const list = state.providers.filter((provider) => provider.id !== "demo");
+  return list.length ? list : [{ id: "claude", label: "Claude", available: true, loggedIn: null }];
+}
+
+/** El color que toma un agente al elegir ese modelo: el último que usaste con él o, si no, el de su marca. */
+function modelColor(provider) {
+  const saved = readModelColors()[provider];
+  return Number.isInteger(saved) && saved >= 0 && saved < BLOB_COLORS.length ? saved : (MODEL_COLORS[provider] ?? 9);
+}
+
+function readModelColors() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(MODEL_COLOR_KEY) ?? "{}");
+    return saved && typeof saved === "object" ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
+function rememberModelColor(provider, color) {
+  try {
+    localStorage.setItem(MODEL_COLOR_KEY, JSON.stringify({ ...readModelColors(), [provider]: color }));
+  } catch {
+    // Sin almacenamiento (ventana privada): la próxima vez sale el color de la marca.
+  }
+}
+
+/** «Modelo» en «Crear nuevo agente»: un botón por proveedor, cada uno con el color que le pondrá. */
+function renderCreateModels(focus = false) {
+  const field = $("#create-model-field");
+  field.hidden = Boolean(createState.agentId);
+  if (field.hidden) return;
+  const models = createModels();
+  const row = $("#model-row");
+  // Los botones nuevos no repiten el aviso de «falta el modelo».
+  row.classList.remove("nudge");
+  row.replaceChildren(
+    ...models.map((provider, index) => {
+      const selected = createState.provider === provider.id;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "model-option";
+      button.dataset.provider = provider.id;
+      button.setAttribute("role", "radio");
+      button.setAttribute("aria-checked", String(selected));
+      button.tabIndex = selected || (!createState.provider && index === 0) ? 0 : -1;
+      const ready = provider.available && provider.loggedIn !== false;
+      button.classList.toggle("unready", !ready);
+      button.title = !provider.available ? `${provider.label}: no está instalado` : provider.loggedIn === false ? `${provider.label}: sin sesión` : provider.label;
+      const dot = document.createElement("span");
+      dot.className = "model-dot";
+      dot.style.background = BLOB_COLORS[modelColor(provider.id)];
+      const label = document.createElement("span");
+      label.textContent = provider.label;
+      button.append(dot, label);
+      button.addEventListener("click", () => chooseModel(provider.id));
+      return button;
+    }),
+  );
+  // Elegiste uno que todavía no funciona: se dice qué falta (como en la ficha → Modelo).
+  const chosen = models.find((provider) => provider.id === createState.provider);
+  const hint = $("#create-model-hint");
+  hint.textContent = !chosen
+    ? ""
+    : !chosen.available
+      ? `${chosen.label} no está instalado: agrégalo en Ajustes → Proveedores.`
+      : chosen.loggedIn === false
+        ? `${chosen.label} no tiene sesión: entra en Ajustes → Proveedores.`
+        : "";
+  hint.dataset.tone = hint.textContent ? "warn" : "";
+  if (focus) row.querySelector('[tabindex="0"]')?.focus();
+}
+
+/** Elegir el modelo le pone su color al agente (salvo que ya hayas elegido uno tú). */
+function chooseModel(provider, { focus = false } = {}) {
+  createState.provider = provider;
+  if (!createState.colorPicked) createState.color = modelColor(provider);
+  const error = $("#create-error");
+  if (error.textContent === MODEL_MISSING) error.textContent = "";
+  renderCreateModels(focus);
+  renderCreatePickers();
+}
+
+/** Falta el modelo (al crear o al tocar un color antes de tiempo): se dice y se marcan los botones. */
+function askForModel() {
+  $("#create-error").textContent = MODEL_MISSING;
+  const row = $("#model-row");
+  row.classList.remove("nudge");
+  void row.offsetWidth;
+  row.classList.add("nudge");
+  row.querySelector('[tabindex="0"]')?.focus();
+}
+
+/** Flechas dentro de «Modelo». */
+function onModelKeydown(event) {
+  const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+  if (!step) return;
+  event.preventDefault();
+  const models = createModels();
+  const current = models.findIndex((provider) => provider.id === createState.provider);
+  const next = current < 0 ? (step > 0 ? 0 : models.length - 1) : (current + step + models.length) % models.length;
+  chooseModel(models[next].id, { focus: true });
 }
 
 /** La Oficina ya no usa personajes de PixelLab (los agentes son robots): la fila queda oculta. */
@@ -4978,11 +5098,13 @@ async function drawMissingCharacters() {
 }
 
 function renderCreatePickers(focusKind = null) {
-  const color = BLOB_COLORS[createState.color];
+  // Sin color todavía: una silueta gris, y los colores esperan (atenuados) a que elijas el modelo.
+  const color = createState.color === null ? UNPAINTED : BLOB_COLORS[createState.color];
   $("#create-preview").replaceChildren(drawBlob(BLOB_SHAPES[createState.shape], color));
   $("#shape-grid").replaceChildren(
     ...BLOB_SHAPES.map((shape, index) => pickerButton("shape", index, drawBlob(shape, color), `Figura ${index + 1}`)),
   );
+  $("#color-row").classList.toggle("waiting", createState.color === null);
   $("#color-row").replaceChildren(
     ...BLOB_COLORS.map((value, index) => {
       const swatch = document.createElement("span");
@@ -4996,17 +5118,21 @@ function renderCreatePickers(focusKind = null) {
 
 function pickerButton(kind, index, content, label) {
   const selected = createState[kind] === index;
+  const waiting = createState[kind] === null;
   const button = document.createElement("button");
   button.type = "button";
   button.className = kind === "shape" ? "shape-option" : "color-option";
   button.setAttribute("role", "radio");
   button.setAttribute("aria-checked", String(selected));
   button.setAttribute("aria-label", label);
-  button.title = label;
-  button.tabIndex = selected ? 0 : -1;
+  if (waiting) button.setAttribute("aria-disabled", "true");
+  button.title = waiting ? `${label} · primero elige el modelo` : label;
+  button.tabIndex = selected || (waiting && index === 0) ? 0 : -1;
   button.append(content);
   button.addEventListener("click", () => {
+    if (waiting) return askForModel();
     createState[kind] = index;
+    if (kind === "color") createState.colorPicked = true;
     renderCreatePickers(kind);
   });
   return button;
@@ -5018,7 +5144,9 @@ function onPickerKeydown(event, kind) {
   const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
   if (!step) return;
   event.preventDefault();
+  if (createState[kind] === null) return askForModel();
   createState[kind] = (createState[kind] + step + total) % total;
+  if (kind === "color") createState.colorPicked = true;
   renderCreatePickers(kind);
 }
 
@@ -5033,6 +5161,7 @@ async function saveCreate(event) {
     input.focus();
     return;
   }
+  if (!createState.agentId && !createState.provider) return askForModel();
   const avatar = customAvatar(createState.shape, createState.color);
   const appearance = $("#create-look").value.trim();
   const button = $("#create-save");
@@ -5049,8 +5178,10 @@ async function saveCreate(event) {
       const { channelId, fromOffice } = createState;
       const role = fromOffice ? $("#create-role").value.trim() : "";
       // greet: como lo creaste tú, se presenta con un primer mensaje (los que arma Claude Bot no).
-      const body = { name, avatar, appearance, project: createState.project, provider: preferredProvider(), greet: true, ...(role ? { role } : {}) };
+      const { provider, color } = createState;
+      const body = { name, avatar, appearance, project: createState.project, provider, greet: true, ...(role ? { role } : {}) };
       const result = await api("/api/agents", { method: "POST", body });
+      rememberModelColor(provider, color);
       closeDialog($("#create-dialog"));
       if (!findAgent(result.agent.id)) state.agents.push(result.agent);
       renderSidebar();
@@ -7495,6 +7626,7 @@ function bindUi() {
   $("#create-cancel").addEventListener("click", () => closeDialog($("#create-dialog")));
   $("#shape-grid").addEventListener("keydown", (event) => onPickerKeydown(event, "shape"));
   $("#color-row").addEventListener("keydown", (event) => onPickerKeydown(event, "color"));
+  $("#model-row").addEventListener("keydown", onModelKeydown);
 
   // Ficha del agente: lista de ajustes y subpantallas.
   const detailsDialog = $("#details-dialog");
