@@ -41,8 +41,19 @@ if not errorlevel 1 (
 
 echo.
 echo   [2/4] Instalando las dependencias...
+rem Un agente pudo dejar abierto su programa (claude.exe, codex...) de esta carpeta: Windows no deja reemplazarlo.
+rem Se cierran solo los que salen de node_modules de ESTA carpeta y se reintenta unas veces.
+set /a INTENTOS_NPM=0
+:dependencias
+call :cerrar_restos
 call npm ci --no-audit --no-fund
-if errorlevel 1 goto fallo
+if not errorlevel 1 goto dependencias_listas
+set /a INTENTOS_NPM+=1
+if %INTENTOS_NPM% geq 3 goto fallo
+echo   Algo seguia abierto. Lo cierro y lo intento otra vez...
+timeout /t 3 /nobreak >nul
+goto dependencias
+:dependencias_listas
 
 echo.
 echo   [3/4] Compilando ClosedBot...
@@ -92,3 +103,7 @@ echo.
 echo   Hubo un problema. Revisa los mensajes de arriba.
 pause
 exit /b 1
+
+:cerrar_restos
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$dir = (Join-Path (Get-Location) 'node_modules') + '\'; Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Write-Host ('  Cerrando ' + $_.Name + ' que quedo abierto...'); Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 800"
+exit /b 0
