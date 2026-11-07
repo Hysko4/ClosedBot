@@ -82,6 +82,9 @@ let pixelLab = null;
 let lastCharacters = "";
 
 const coarsePointer = window.matchMedia("(pointer: coarse)").matches;
+/** «Abrir en ventana nueva»: esta ventana muestra solo el chat de un agente, sin la barra lateral. */
+const soloWindow = new URLSearchParams(location.search).has("ventana");
+if (soloWindow) document.body.classList.add("solo-window");
 
 // ---------- API ----------
 
@@ -953,7 +956,14 @@ const ICONS = {
   folderPlus: ["M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z", "M12 10.5v5M9.5 13h5"],
   unread: ["M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8"],
   check: ["M5 12.5l4.5 4.5L19 7.5"],
-  allRead: ["M2.5 12.5l4 4 9-9", "M10.5 16.5l1 1 9-9"],
+  newThread: ["M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16", "M12 8.5v7M8.5 12h7"],
+  window: ["M4.5 6.5a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2z", "M4.5 9h15"],
+  copy: [
+    "M9 9.5A1.5 1.5 0 0 1 10.5 8h8A1.5 1.5 0 0 1 20 9.5v9a1.5 1.5 0 0 1-1.5 1.5h-8A1.5 1.5 0 0 1 9 18.5z",
+    "M15 8V5.5A1.5 1.5 0 0 0 13.5 4h-8A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H9",
+  ],
+  moon: ["M12.5 4a6.5 6.5 0 0 0 7.5 7.5A8 8 0 1 1 12.5 4z"],
+  gauge: ["M4.5 16.5a7.5 7.5 0 1 1 15 0", "M12 16.5l3.6-4.4", "M12 16.5h.01"],
   eye: ["M2.5 12C3.5 10.5 7 6 12 6s8.5 4.5 9.5 6c-1 1.5-4.5 6-9.5 6s-8.5-4.5-9.5-6z", "M12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6"],
   eyeOff: [
     "M3.5 3.5l17 17",
@@ -1253,9 +1263,14 @@ function agentRow(agent) {
     button.setAttribute("aria-pressed", String(selected));
   }
   button.addEventListener("click", (event) => {
-    // Seleccionando, el clic marca o desmarca. Ctrl+clic y Mayús+clic empiezan a seleccionar, como en el explorador.
-    if (state.selection || event.ctrlKey || event.metaKey || event.shiftKey) selectFromClick(agent.id, event);
-    else navigate(agent.id);
+    // Como en el explorador: Ctrl+clic y Mayús+clic marcan; un clic simple deja de seleccionar y abre al agente.
+    // Con el dedo no hay Ctrl ni Mayús: mientras se selecciona, tocar marca o desmarca.
+    if (event.ctrlKey || event.metaKey || event.shiftKey || (state.selection && (coarsePointer || event.pointerType === "touch"))) {
+      selectFromClick(agent.id, event);
+      return;
+    }
+    endSelection();
+    navigate(agent.id);
   });
 
   const texts = document.createElement("span");
@@ -1313,6 +1328,10 @@ function agentRow(agent) {
 }
 
 function updateTitle() {
+  if (soloWindow) {
+    document.title = findAgent(state.currentId)?.name ?? findChannel(state.currentChannelId)?.name ?? "ClosedBot";
+    return;
+  }
   const count = state.agents.filter(isUnread).length + state.channels.filter(isChannelUnread).length;
   document.title = count ? `(${count}) ClosedBot` : "ClosedBot";
 }
@@ -1742,6 +1761,12 @@ function buildMessage(message) {
 
   if (message.role === "notice" && !(message.toAgentIds ?? []).length) {
     node.className = "msg msg-notice";
+    // «Nuevo hilo»: una línea que separa lo anterior (el agente ya no lo tiene en cuenta).
+    if (message.text === "Nuevo hilo" && !message.channelId) {
+      node.classList.add("msg-divider");
+      node.textContent = message.text;
+      return node;
+    }
     // En un canal se dice de quién es el aviso, salvo que ya lo nombre.
     const who = message.channelId ? agentName(message.agentId) : "";
     node.textContent = who && !message.text.includes(who) ? `${who}: ${message.text}` : message.text;
@@ -3330,7 +3355,8 @@ async function agentAction(action, agentId = state.currentId) {
   const path = `/api/agents/${encodeURIComponent(agent.id)}`;
   try {
     if (action === "edit") {
-      openDetails(agent.id, "profile");
+      openDetails(agent.id);
+      $("#profile-form").elements.name.focus();
     } else if (action === "routines") {
       openRoutines(agent.id);
     } else if (action === "pause") {
@@ -3405,26 +3431,35 @@ async function toggleHidden(agentId) {
   if (updated?.hidden) showToast(`Ocultaste a ${updated.name}: está al final de la lista, en «Ocultos», y en la búsqueda.`);
 }
 
-async function setUnread(agentId, unread) {
-  // Antes de pedirlo: el aviso del servidor puede llegar antes que la respuesta.
-  if (unread) state.keepUnread.add(agentId);
-  else state.keepUnread.delete(agentId);
+/** «Nuevo hilo»: la próxima respuesta empieza sin lo anterior (el historial sigue a la vista). */
+async function startNewThread(agentId) {
   try {
-    const result = await api(`/api/agents/${encodeURIComponent(agentId)}/${unread ? "unread" : "read"}`, { method: "POST" });
+    const result = await api(`/api/agents/${encodeURIComponent(agentId)}/new-thread`, { method: "POST" });
     replaceAgent(result.agent);
+    if (agentId !== state.currentId) navigate(agentId);
+    else if (!coarsePointer) $("#composer-input").focus();
   } catch (error) {
-    if (unread) state.keepUnread.delete(agentId);
     showToast(error.message, "error");
   }
 }
 
-async function markAllRead() {
-  state.keepUnread.clear();
+/** «Duplicar agente»: otro igual con «(copia)» en el nombre; se abre su chat. */
+async function duplicateAgent(agentId) {
   try {
-    await api("/api/read-all", { method: "POST" });
+    const result = await api(`/api/agents/${encodeURIComponent(agentId)}/duplicate`, { method: "POST" });
+    replaceAgent(result.agent);
+    navigate(result.agent.id);
   } catch (error) {
     showToast(error.message, "error");
   }
+}
+
+/** «Abrir en ventana nueva»: el chat del agente en su propia ventana (una por agente). */
+function openAgentWindow(agentId) {
+  const url = `${location.origin}/?ventana=1#/a/${encodeURIComponent(agentId)}`;
+  const opened = window.open(url, `closedbot-agente-${agentId}`, "popup,width=900,height=820");
+  if (opened) opened.focus();
+  else showToast("No se pudo abrir la ventana: permite las ventanas emergentes de ClosedBot.", "error");
 }
 
 async function moveAgent(agentId, project) {
@@ -4255,31 +4290,41 @@ let menuState = null; // { source, openedAt, submenuFor }
 function agentMenuItems(agentId) {
   const agent = findAgent(agentId);
   if (!agent) return [];
-  const readItem = agent.unread
-    ? { label: "Marcar como leído", icon: "check", run: () => setUnread(agent.id, false) }
-    : { label: "Marcar como no leído", icon: "unread", run: () => setUnread(agent.id, true) };
-  if (agent.main) {
-    // Claude Bot va fijo arriba: no se mueve, no se oculta ni se elimina.
-    return [
-      { label: "Ver su ficha", icon: "details", run: () => openDetails(agent.id) },
-      readItem,
-      { label: "Cambiar nombre", icon: "pencil", run: () => renameAgent(agent.id) },
-    ];
-  }
-  return [
+  // Las mismas opciones y el mismo orden que OpenBot.
+  const newThread = { label: "Nuevo hilo", icon: "newThread", run: () => startNewThread(agent.id) };
+  // En el celular no hay ventanas aparte.
+  const newWindow = coarsePointer ? [] : [{ label: "Abrir en ventana nueva", icon: "window", run: () => openAgentWindow(agent.id) }];
+  const edit = { label: "Editar agente", icon: "pencil", run: () => openDetails(agent.id) };
+  // Claude Bot va fijo arriba: no se mueve, no se duplica, no se oculta ni se elimina.
+  if (agent.main) return [newThread, ...newWindow, edit];
+  const targets = moveTargets(agent.id);
+  const many = targets.length > 1;
+  const items = [
     { label: agent.pinned ? "Desfijar" : "Fijar", icon: "pin", run: () => patchAgent(agent.id, { pinned: !agent.pinned }) },
-    { label: moveTargets(agent.id).length > 1 ? `Mover ${moveTargets(agent.id).length} a` : "Mover a", icon: "move", submenu: () => moveMenuItems(agent.id) },
-    readItem,
-    { label: "Cambiar nombre", icon: "pencil", run: () => renameAgent(agent.id) },
+    newThread,
+    ...newWindow,
+    { label: many ? `Mover ${targets.length} a` : "Mover a", icon: "move", submenu: () => moveMenuItems(agent.id) },
+    edit,
+    { label: "Duplicar agente", icon: "copy", run: () => duplicateAgent(agent.id) },
     agent.hidden
-      ? { label: "Mostrar en la barra lateral", icon: "eye", run: () => toggleHidden(agent.id) }
-      : { label: "Ocultar de la barra lateral", icon: "eyeOff", run: () => toggleHidden(agent.id) },
-    "-",
-    state.selection
-      ? { label: state.selection.has(agent.id) ? "Desmarcar" : "Marcar", icon: "select", run: () => toggleSelected(agent.id) }
-      : { label: "Seleccionar varios", icon: "select", run: () => startSelection([agent.id]) },
-    { label: "Eliminar", icon: "trash", danger: true, run: () => agentAction("delete", agent.id) },
+      ? { label: "Mostrar agente", icon: "eye", run: () => toggleHidden(agent.id) }
+      : { label: "Ocultar agente", icon: "moon", run: () => toggleHidden(agent.id) },
   ];
+  // Con el dedo no hay Ctrl ni Mayús: se selecciona desde aquí.
+  if (coarsePointer) {
+    items.push(
+      state.selection
+        ? { label: state.selection.has(agent.id) ? "Desmarcar" : "Marcar", icon: "select", run: () => toggleSelected(agent.id) }
+        : { label: "Seleccionar varios", icon: "select", run: () => startSelection([agent.id]) },
+    );
+  }
+  items.push("-", {
+    label: many ? `Eliminar ${targets.length} agentes` : "Eliminar agente",
+    icon: "trash",
+    danger: true,
+    run: () => (many ? deleteAgents(targets) : agentAction("delete", agent.id)),
+  });
+  return items;
 }
 
 function moveMenuItems(agentId) {
@@ -4304,15 +4349,6 @@ function sidebarMenuItems() {
     { label: "Nueva sección", icon: "section", run: () => newSection() },
     "-",
     { label: deletedChannelsLabel(), icon: "restore", run: () => openDeletedChannels() },
-    {
-      label: "Marcar todo como leído",
-      icon: "allRead",
-      disabled: !state.agents.some((agent) => agent.unread) && !state.channels.some((channel) => channel.unread),
-      run: () => markAllRead(),
-    },
-    state.selection
-      ? { label: "Terminar de seleccionar", icon: "close", run: () => endSelection() }
-      : { label: "Seleccionar agentes", icon: "select", disabled: !state.agents.some((agent) => !agent.main), run: () => startSelection() },
   ];
 }
 
@@ -4789,7 +4825,7 @@ const EFFORT_LABELS = { none: "Ninguno", minimal: "Mínimo", low: "Bajo", medium
  * Nombre del modelo del agente para mostrar («Gemini 4 Argon · Alto»), si la lista de su proveedor ya llegó. Sin uno
  * elegido, el que usa su programa por defecto, con su nombre.
  */
-function modelLabel(agent) {
+function modelLabel(agent, { effort: withEffort = true } = {}) {
   if (!agent.model) {
     const fallback = defaultModelOf(agent.provider);
     return fallback ? fallback.displayName || fallback.model : "";
@@ -4800,7 +4836,7 @@ function modelLabel(agent) {
   if (!entry) return agent.model;
   const effort = agent.effort || (owner ? Object.entries(owner.variants).find(([, id]) => id === agent.model)?.[0] : "");
   const name = entry.displayName || entry.model;
-  return effort && entry.efforts?.includes(effort) ? `${name} · ${EFFORT_LABELS[effort] ?? effort}` : name;
+  return withEffort && effort && entry.efforts?.includes(effort) ? `${name} · ${EFFORT_LABELS[effort] ?? effort}` : name;
 }
 
 function refreshEffortOptions(form, effort = "") {
@@ -4879,6 +4915,11 @@ function createModels() {
 }
 
 /** El color que toma un agente al elegir ese modelo: el último que usaste con él o, si no, el de su marca. */
+/** El color del bot principal en la Oficina: el de su IA, como los demás (si pasa a Codex, deja el naranjo de Claude). */
+function mainColor(agent) {
+  return agent.provider === "claude" ? "#d97757" : (BLOB_COLORS[MODEL_COLORS[agent.provider] ?? 9] ?? "#d97757");
+}
+
 function modelColor(provider) {
   const saved = readModelColors()[provider];
   return Number.isInteger(saved) && saved >= 0 && saved < BLOB_COLORS.length ? saved : (MODEL_COLORS[provider] ?? 9);
@@ -6047,7 +6088,6 @@ const VOICE_LANGS = [
   ["it-IT", "Italiano"],
 ];
 const PAGE_TITLES = {
-  profile: "Perfil",
   brain: "Modelo",
   instructions: "Instrucciones",
   memories: "Recuerdos",
@@ -6135,7 +6175,6 @@ function showPage(page, { focus = true } = {}) {
   if (page === "files") details.library = null;
   if (page === "instructions") details.instructions = null;
   if (page === "skills") details.skillEditing = null;
-  if (page === "profile" && agent) fillProfileForm(agent);
   if (page === "mcp" && agent) void loadMcp(agent.id);
   if (page === "brain" && agent) void fillBrainForm(agent);
   if (page === "memories") {
@@ -6173,36 +6212,41 @@ function renderDetailsHeader(agent) {
   const key = `${agent.id}:${agent.avatar}:${agent.main}`;
   if (avatar.dataset.key !== key) {
     avatar.replaceChildren(blobAvatar(agent));
+    // El lápiz, como en OpenBot: se toca para cambiar figura y color.
+    if (!agent.main) {
+      const badge = document.createElement("span");
+      badge.className = "avatar-edit";
+      badge.append(icon("pencil"));
+      avatar.append(badge);
+    }
     avatar.dataset.key = key;
   }
   avatar.disabled = Boolean(agent.main);
   avatar.title = agent.main ? agent.name : "Cambiar figura y color";
-  $("#details-name").textContent = agent.name;
-  $("#details-title").textContent = agent.role || (agent.main ? "Bot principal" : "Asistente general");
-  const description = $("#details-description");
-  description.textContent = agent.description || "Agrega una descripción";
-  description.dataset.empty = String(!agent.description);
+  fillProfileForm(agent);
 }
 
 function renderSettingsHome(agent) {
   for (const row of document.querySelectorAll("#details-groups .row-icon:empty")) row.append(icon(row.dataset.icon));
-  $("#row-brain").textContent = [providerLabel(agent.provider), modelLabel(agent)].filter(Boolean).join(" · ");
+  renderBrainRows(agent);
   // El nombre del modelo llega con la lista de su proveedor (guardada en el servidor: suele ser al instante).
   if (!state.models.has(agent.provider)) {
     void ensureModels(agent.provider).then((models) => {
       const current = findAgent(agent.id);
-      if (models.length && current && details.agentId === agent.id) $("#row-brain").textContent = [providerLabel(current.provider), modelLabel(current)].filter(Boolean).join(" · ");
+      if (models.length && current && details.agentId === agent.id && details.page === null) renderBrainRows(current);
     });
   }
   $("#row-instructions").textContent = agent.instructions ? agent.instructions.replace(/\s+/g, " ").slice(0, 80) : "Sin instrucciones";
   const memories = details.memories?.agentId === agent.id ? details.memories.items : null;
-  $("#row-memories").textContent = memories === null ? "" : memories.length ? String(memories.length) : "Ninguno";
+  $("#row-memories").textContent = memories === null ? "" : `${memories.length} ${memories.length === 1 ? "guardado" : "guardados"}`;
   const skills = details.skills?.agentId === agent.id ? details.skills.items : null;
-  $("#row-skills").textContent = skills === null ? "" : skills.length ? String(skills.filter((skill) => skill.enabled).length) : "Ninguna";
+  const enabledSkills = skills?.filter((skill) => skill.enabled).length ?? 0;
+  $("#row-skills").textContent = skills === null ? "" : `${enabledSkills} ${enabledSkills === 1 ? "activa" : "activas"}`;
   $("#row-mcp").textContent = mcpRowValue(agent);
   const routines = state.routines.filter((routine) => routine.agentId === agent.id);
   const active = routines.filter((routine) => routine.enabled).length;
-  $("#row-routines").textContent = routines.length ? (active === routines.length ? String(active) : `${active} de ${routines.length} activas`) : "Ninguna";
+  $("#row-routines").textContent =
+    active === routines.length ? `${active} ${active === 1 ? "configurada" : "configuradas"}` : `${active} de ${routines.length} activas`;
   const voice = { ...DEFAULT_VOICE, ...(agent.voice ?? {}) };
   $("#row-voice").textContent = voice.autoRead ? "Lee sus respuestas" : "";
   const full = Boolean(state.settings.fullAccess);
@@ -6215,9 +6259,6 @@ function renderSettingsHome(agent) {
 
 function renderPage(agent) {
   switch (details.page) {
-    case "profile":
-      updateDescriptionCount();
-      break;
     case "instructions":
       renderInstructionsPage(agent);
       break;
@@ -6256,18 +6297,25 @@ function renderPage(agent) {
   }
 }
 
-// Perfil: nombre, título, descripción y sección.
+// Perfil: nombre, título y descripción, a la vista arriba de la ficha (como OpenBot). Cada campo se guarda
+// solo al salir de él; la sección se cambia con «Mover a».
 
 function fillProfileForm(agent) {
   const form = $("#profile-form");
-  form.elements.name.value = agent.name;
-  form.elements.role.value = agent.role;
-  form.elements.role.placeholder = agent.main ? "Ej.: Bot principal: arma y coordina mis equipos" : "Ej.: Investigadora de mercado";
-  form.elements.description.value = agent.description ?? "";
-  form.elements.project.value = agent.project;
-  $("#profile-project").hidden = Boolean(agent.main);
-  $("#project-options").replaceChildren(...allSections().map((section) => new Option(section, section)));
-  $("#profile-error").textContent = "";
+  const fresh = form.dataset.agent !== agent.id;
+  form.dataset.agent = agent.id;
+  for (const [name, value] of [
+    ["name", agent.name],
+    ["role", agent.role],
+    ["description", agent.description ?? ""],
+  ]) {
+    const field = form.elements[name];
+    if (fresh) delete field.dataset.dirty;
+    // Lo que estás escribiendo no se pisa.
+    if (fresh || (field.dataset.dirty !== "true" && document.activeElement !== field)) field.value = value;
+  }
+  form.elements.role.placeholder = agent.main ? "Ej.: Bot principal: arma y coordina mis equipos" : "Describe lo que hace tu agente";
+  if (fresh) $("#profile-error").textContent = "";
   updateDescriptionCount();
 }
 
@@ -6276,36 +6324,64 @@ function updateDescriptionCount() {
   $("#description-count").textContent = length > 1500 ? `${length} / 2000` : "";
 }
 
-async function saveProfile(event) {
-  event.preventDefault();
-  const agent = findAgent(details.agentId);
-  if (!agent) return;
-  const form = $("#profile-form");
+async function saveProfileField(field) {
+  const agent = findAgent($("#profile-form").dataset.agent);
+  if (!agent || field.dataset.dirty !== "true") return;
   const error = $("#profile-error");
-  error.textContent = "";
-  const name = form.elements.name.value.trim();
-  if (!name) {
-    error.textContent = "Ponle un nombre al agente.";
-    form.elements.name.focus();
+  const value = field.name === "description" ? field.value : field.value.trim();
+  const saved = field.name === "name" ? agent.name : field.name === "role" ? agent.role : (agent.description ?? "");
+  // Sin nombre no se queda: vuelve el que tenía.
+  if ((field.name === "name" && !value) || value === saved) {
+    if (!value) field.value = saved;
+    delete field.dataset.dirty;
+    error.textContent = "";
     return;
   }
-  const body = {
-    name,
-    role: form.elements.role.value,
-    description: form.elements.description.value,
-    ...(agent.main ? {} : { project: form.elements.project.value }),
-  };
-  const button = $("#profile-save");
-  button.disabled = true;
   try {
-    const result = await api(`/api/agents/${encodeURIComponent(agent.id)}`, { method: "PATCH", body });
+    const result = await api(`/api/agents/${encodeURIComponent(agent.id)}`, { method: "PATCH", body: { [field.name]: value } });
+    delete field.dataset.dirty;
+    error.textContent = "";
     replaceAgent(result.agent);
-    showPage(null);
   } catch (problem) {
     error.textContent = problem.message;
-  } finally {
-    button.disabled = false;
   }
+}
+
+/** Cerebro: el modelo con el logo de su IA y, aparte, el razonamiento (como OpenBot). */
+function renderBrainRows(agent) {
+  const brain = $("#row-brain");
+  const name = modelLabel(agent, { effort: false }) || providerLabel(agent.provider);
+  const logo = providerLogo(agent.provider, "row-logo");
+  brain.replaceChildren(...(logo ? [logo] : []), name);
+  brain.title = `${providerLabel(agent.provider)} · ${name}`;
+  const { efforts, current, fallback } = effortChoices(agent);
+  const select = $("#row-effort");
+  $("#row-effort-row").hidden = !efforts.length;
+  if (!efforts.length || document.activeElement === select) return;
+  const options = [new Option(fallback ? `Predeterminado (${EFFORT_LABELS[fallback] ?? fallback})` : "Predeterminado", "")];
+  for (const value of efforts) options.push(new Option(EFFORT_LABELS[value] ?? value, value));
+  if (current && !efforts.includes(current)) options.push(new Option(current, current));
+  select.replaceChildren(...options);
+  select.value = current;
+}
+
+/** Los niveles de razonamiento del modelo del agente, el elegido y el que usa si no se elige (si se sabe). */
+function effortChoices(agent) {
+  const models = state.models.get(agent.provider) ?? [];
+  const owner = variantOwner(models, agent.model);
+  const entry = owner ?? (agent.model ? models.find((item) => item.model === agent.model) : defaultModelOf(agent.provider)) ?? null;
+  const current = agent.effort || (owner ? (Object.entries(owner.variants).find(([, id]) => id === agent.model)?.[0] ?? "") : "");
+  return { entry, owner, efforts: entry?.efforts ?? [], current, fallback: entry?.defaultEffort ?? "" };
+}
+
+async function saveEffort(effort) {
+  const agent = findAgent(details.agentId);
+  if (!agent) return;
+  const { owner } = effortChoices(agent);
+  // Un modelo que es la variante de un nivel (Gemini por Antigravity) se guarda como el modelo y su nivel.
+  const body = { effort: effort || null, ...(owner ? { model: owner.model } : {}) };
+  const updated = await patchAgent(agent.id, body);
+  if (!updated) renderDetailsIfOpen();
 }
 
 // Cerebro: proveedor, modelo y razonamiento.
@@ -8403,7 +8479,7 @@ function bindUi() {
     root: $("#office"),
     agents: () => state.agents,
     channels: () => state.channels,
-    colorOf: (agent) => (agent.main ? "#d97757" : avatarParts(agent)[1]),
+    colorOf: (agent) => (agent.main ? mainColor(agent) : avatarParts(agent)[1]),
     openAgent: selectInOffice,
     openChannel: openChannelInOffice,
     openMain: () => {
@@ -8512,17 +8588,30 @@ function bindUi() {
     showPage(null);
   });
   detailsDialog.addEventListener("close", () => {
+    // Lo que quedó escrito sin salir del campo también se guarda.
+    const profile = $("#profile-form");
+    for (const field of [profile.elements.name, profile.elements.role, profile.elements.description]) if (field.dataset.dirty === "true") void saveProfileField(field);
     if (speech.current?.messageId === "voice-test") stopSpeaking();
     document.body.classList.remove("office-side-open");
   });
   $("#details-avatar").addEventListener("click", () => openCreateDialog({ agentId: details.agentId }));
-  $("#details-profile").addEventListener("click", () => showPage("profile"));
   for (const row of document.querySelectorAll("#details-groups [data-page]")) row.addEventListener("click", () => showPage(row.dataset.page));
   $("#details-back").addEventListener("click", () => showPage(null));
 
   const profileForm = $("#profile-form");
-  profileForm.addEventListener("submit", saveProfile);
-  profileForm.elements.description.addEventListener("input", updateDescriptionCount);
+  // Enter en un campo: listo (se guarda al salir de él).
+  profileForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (document.activeElement instanceof HTMLElement && profileForm.contains(document.activeElement)) document.activeElement.blur();
+  });
+  for (const field of [profileForm.elements.name, profileForm.elements.role, profileForm.elements.description]) {
+    field.addEventListener("input", () => {
+      field.dataset.dirty = "true";
+      if (field.name === "description") updateDescriptionCount();
+    });
+    field.addEventListener("change", () => void saveProfileField(field));
+  }
+  $("#row-effort").addEventListener("change", (event) => void saveEffort(event.target.value));
 
   const brainForm = $("#brain-form");
   brainForm.addEventListener("submit", saveBrain);

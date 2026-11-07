@@ -430,6 +430,20 @@ svg {
   display: none !important;
 }
 
+/* «Abrir en ventana nueva»: solo el chat del agente, sin la barra lateral. */
+body.solo-window .layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+body.solo-window .sidebar,
+body.solo-window #back {
+  display: none !important;
+}
+
+body.solo-window .chat {
+  display: flex;
+}
+
 /* ---------- barra lateral ---------- */
 
 .sidebar {
@@ -2284,6 +2298,24 @@ svg {
   color: var(--muted);
 }
 
+/* «Nuevo hilo»: una línea de lado a lado con el texto al medio. */
+.msg-notice.msg-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: none;
+  margin: 20px 4px;
+  font-size: 12px;
+}
+
+.msg-divider::before,
+.msg-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
 .msg-activity,
 .msg-routine {
   display: flex;
@@ -3565,18 +3597,30 @@ svg {
   flex-direction: column;
 }
 
-.details-header {
+/* Arriba, como OpenBot: la figura al centro (con su lápiz) y la X en la esquina. */
+.details-view {
+  position: relative;
+}
+
+.details-close-float {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 2;
+}
+
+.details-identity {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 16px 14px 14px 18px;
+  justify-content: center;
+  padding: 26px 0 14px;
 }
 
 .details-avatar {
-  width: 56px;
-  height: 56px;
+  position: relative;
+  width: 76px;
+  height: 76px;
   flex: none;
-  border-radius: 16px;
+  border-radius: 50%;
 }
 
 .details-avatar:hover:not(:disabled) {
@@ -3587,53 +3631,46 @@ svg {
   opacity: 1;
 }
 
-.details-avatar svg {
+.details-avatar > svg {
   width: 100%;
   height: 100%;
 }
 
-/* Nombre, título y descripción: un botón que abre «Perfil». */
-.details-titles {
-  flex: 1;
-  min-width: 0;
+.avatar-edit {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 26px;
+  height: 26px;
   display: grid;
-  gap: 1px;
-  margin: -2px 0 0 -8px;
-  padding: 4px 8px 6px;
-  border-radius: 12px;
-  text-align: left;
+  place-items: center;
+  border-radius: 50%;
+  border: 2px solid #161616;
+  background: #2c2c2c;
+  color: var(--text);
 }
 
-.details-name {
-  font-size: 18px;
-  font-weight: 650;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.avatar-edit svg {
+  width: 13px;
+  height: 13px;
 }
 
-.details-title {
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--text-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* Nombre, título y descripción a la vista: cada uno se guarda al salir de él. */
+.details-profile {
+  margin: 0 0 6px;
 }
 
-.details-description {
-  margin-top: 2px;
-  font-size: 13px;
+.details-profile .field {
+  margin-bottom: 12px;
+}
+
+.details-profile .field > span {
+  font-weight: 500;
   color: var(--muted);
-  overflow-wrap: anywhere;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 
-.details-description[data-empty="true"] {
-  color: var(--accent-text);
+.details-profile .form-error:empty {
+  display: none;
 }
 
 .details-body {
@@ -3647,13 +3684,20 @@ svg {
   margin: 0 0 18px;
 }
 
-.settings-group h3,
 .list-title {
   margin: 0 0 7px 4px;
   font-size: 12.5px;
   font-weight: 650;
   letter-spacing: 0.02em;
   text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* Los grupos de la ficha, como OpenBot: «Cerebro», «Sabe»… en letra chica, sin mayúsculas. */
+.settings-group h3 {
+  margin: 0 0 7px 4px;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--muted);
 }
 
@@ -3709,6 +3753,53 @@ svg {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* «Modelo»: el logo de su IA antes del nombre. */
+.row-logo {
+  width: 15px;
+  height: 15px;
+  margin-right: 7px;
+  vertical-align: -3px;
+}
+
+/* «Razonamiento»: se elige ahí mismo, con flechas arriba y abajo en vez de la de entrar. */
+.settings-select {
+  cursor: pointer;
+}
+
+.settings-select::after {
+  width: 9px;
+  height: 13px;
+  margin-left: -1px;
+  border: 0;
+  transform: none;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 13'%3E%3Cpath d='M1.5 4.5l3-3 3 3M1.5 8.5l3 3 3-3' fill='none' stroke='%23707070' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.row-select {
+  min-width: 0;
+  width: 100%;
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: right;
+  text-align-last: right;
+  cursor: pointer;
+  outline: none;
+}
+
+.row-select:focus-visible {
+  color: var(--text);
+}
+
+.row-select option {
+  background: #1d1d1d;
+  color: var(--text);
 }
 
 .settings-delete {
@@ -4293,9 +4384,6 @@ svg {
 
 /* Con el dedo, el «hover» se queda pegado tras tocar: solo con mouse. */
 @media (hover: hover) {
-  .details-titles:hover {
-    background: #1d1d1d;
-  }
   .settings-row:hover {
     background: #232323;
   }

@@ -63,7 +63,8 @@ const HOMES_KEY = "closedbot:oficina-puestos";
  */
 export function planOffice({ agents, channels, mainId, prefer = null }) {
   const known = new Map(agents.map((agent) => [agent.id, agent]));
-  const panels = [{ id: "hall", kind: "hall", title: "Claude Bot", channelId: null, members: 0, seats: [] }];
+  // El salón lleva el nombre que tenga el bot principal (se le puede cambiar: «Codex Bot»…).
+  const panels = [{ id: "hall", kind: "hall", title: (mainId && known.get(mainId)?.name) || "Claude Bot", channelId: null, members: 0, seats: [] }];
   if (mainId && known.has(mainId)) panels[0].seats.push({ agentId: mainId, kind: "boss", i: 0, j: 0 });
   const home = new Map();
   if (prefer) {
@@ -120,7 +121,7 @@ export function platformSeats(ids) {
  */
 export function dropVerdict(name, from, target) {
   if (!target) return { ok: false, text: "Suéltalo sobre otro equipo" };
-  if (target.kind === "hall") return { ok: false, text: "Ese es el salón de Claude Bot" };
+  if (target.kind === "hall") return { ok: false, text: `Ese es el salón de ${target.title}` };
   if (target.kind === "new") return { ok: true, text: `Armar un equipo nuevo con ${name}` };
   if (target.id === from?.id) return { ok: false, text: target.channelId ? `Ya está en «${target.title}»` : "Ya está sin grupo" };
   if (!target.channelId) {
@@ -1629,8 +1630,8 @@ export function createOffice(host) {
         ...at,
         kind: "board",
         platform: target.platform,
-        title: "La pizarra de Claude Bot",
-        text: live.board.trim() ? "El plan del trabajo que está repartiendo." : "Vacía: Claude Bot anota aquí el plan cuando reparte un trabajo.",
+        title: `La pizarra de ${mainName()}`,
+        text: live.board.trim() ? "El plan del trabajo que está repartiendo." : `Vacía: ${mainName()} anota aquí el plan cuando reparte un trabajo.`,
         hint: "Clic: verla",
       });
     } else if (target.kind === "channel") {
@@ -1728,12 +1729,17 @@ export function createOffice(host) {
     return "";
   }
 
+  /** El nombre que tiene ahora el bot principal (el usuario se lo puede cambiar). */
+  function mainName() {
+    return platforms.find((platform) => platform.kind === "hall")?.title ?? "Claude Bot";
+  }
+
   function showBoard() {
     closeGuide();
     const body = boardView.querySelector(".office-board-text");
     body.replaceChildren();
     if (live.board.trim()) host.renderMarkdown(live.board, body);
-    else body.textContent = "La pizarra está vacía. Claude Bot anota aquí el plan cuando reparte un trabajo: quién hace qué y en qué orden.";
+    else body.textContent = `La pizarra está vacía. ${mainName()} anota aquí el plan cuando reparte un trabajo: quién hace qué y en qué orden.`;
     boardView.hidden = false;
     boardView.querySelector("button")?.focus();
   }
@@ -1811,7 +1817,7 @@ export function createOffice(host) {
       group.className = "office-panel";
       group.dataset.panel = platform.id;
       const title = document.createElement("h3");
-      title.textContent = platform.kind === "hall" ? "Claude Bot" : platform.channelId ? `Equipo ${platform.title}` : platform.title;
+      title.textContent = platform.kind === "hall" ? platform.title : platform.channelId ? `Equipo ${platform.title}` : platform.title;
       const list = document.createElement("ul");
       for (const agent of teamOf(platform)) {
         const item = document.createElement("li");

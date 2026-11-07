@@ -290,6 +290,14 @@ export function createApp(options: AppOptions): App {
 
   route("POST", "/api/agents/:id/reset", async (ctx) => ({ agent: await service.resetConversation(param(ctx, 0)) }));
 
+  // Menú del agente (como OpenBot): «Nuevo hilo» y «Duplicar agente».
+  route("POST", "/api/agents/:id/new-thread", async (ctx) => ({ agent: await service.newThread(param(ctx, 0)) }));
+
+  route("POST", "/api/agents/:id/duplicate", (ctx) => {
+    ctx.res.statusCode = 201;
+    return { agent: service.duplicateAgent(param(ctx, 0)) };
+  });
+
   // La Oficina: el usuario arrastró al agente a otro equipo (o a uno nuevo, o a «Sin grupo»).
   route("POST", "/api/agents/:id/team", async (ctx) => {
     const body = await readJson(ctx.req);

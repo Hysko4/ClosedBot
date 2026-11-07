@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import {
   cleanInstructions,
@@ -14,6 +14,7 @@ import {
   readInstructions,
   readSkill,
   SKILL_LIMITS,
+  SKILL_ROOTS,
   type SkillInfo,
   writeInstructions,
   writeSkill,
@@ -171,6 +172,8 @@ const USAGE_INTERVAL_MS = 10 * 60_000;
  * segundo plano la próxima vez que se piden.
  */
 export const MODELS_META = "model_lists";
+/** El aviso que deja «Nuevo hilo» en el chat. */
+export const NEW_THREAD_NOTICE = "Nuevo hilo";
 const MODELS_REFRESH_MS = 30 * 60_000;
 /** Lo último que dijo cada sesión de su gasto acumulado: así de cada turno se cuenta solo lo nuevo. */
 export const TOKEN_READINGS_META = "token_readings";
@@ -206,6 +209,8 @@ export interface ModelOption {
   displayName: string;
   isDefault?: boolean;
   efforts: string[];
+  /** El razonamiento que usa si no se elige (Codex lo dice; los demás, no). */
+  defaultEffort?: string;
   /** Nivel → id real, cuando el proveedor ofrece cada nivel como otro modelo (Gemini por Antigravity). */
   variants?: Record<string, string>;
 }
@@ -1044,6 +1049,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
           efforts: getArray(model, "supportedReasoningEfforts")
             .map((entry) => (isRecord(entry) ? String(entry.reasoningEffort ?? "") : String(entry)))
             .filter(Boolean),
+          ...(typeof model.defaultReasoningEffort === "string" && model.defaultReasoningEffort ? { defaultEffort: model.defaultReasoningEffort } : {}),
           ...variantsOf(model),
         }))
         .filter((model) => model.model);
@@ -1208,6 +1214,75 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     this.#emitQueue(id);
     this.#emitAgents();
     return this.#view(updated);
+  }
+
+  /**
+   * «Nuevo hilo» (como en OpenBot): la próxima respuesta empieza una conversación nueva con su programa, sin
+   * lo anterior. A diferencia de «Empezar de cero», el historial sigue a la vista, con un aviso donde empieza.
+   */
+  async newThread(id: string): Promise<AgentView> {
+    const agent = this.#requireAgent(id);
+    if (this.#active.has(id)) throw new ServiceError("Detén el turno en curso antes de empezar un hilo nuevo.", 409);
+    const last = this.#store.listMessages(id, 1)[0];
+    // Sin hilo y sin nada desde el último aviso: ya empieza de nuevo.
+    if (!agent.threadId && (!last || (last.role === "notice" && last.text === NEW_THREAD_NOTICE))) return this.#view(agent);
+    await this.#closeThread(agent);
+    const updated = this.#store.updateAgent(id, { threadId: null });
+    this.#notice(id, NEW_THREAD_NOTICE, null);
+    this.#emitAgents();
+    return this.#view(updated);
+  }
+
+  /**
+   * «Duplicar agente»: otro igual (instrucciones, habilidades, recuerdos, modelo, reglas, voz y avisos) con
+   * «(copia)» en el nombre. Su historial, sus archivos, sus rutinas y sus equipos no se copian.
+   */
+  duplicateAgent(id: string): AgentView {
+    const source = this.#syncInstructions(this.#requireAgent(id));
+    if (this.#isMain(source)) throw new ServiceError(`${source.name} es el bot principal: no se duplica.`, 409);
+    const view = this.createAgent({
+      name: this.#copyName(source.name),
+      role: source.role,
+      description: source.description,
+      instructions: source.instructions,
+      provider: source.provider,
+      model: source.model,
+      effort: source.effort,
+      access: source.access,
+      project: source.project,
+      appearance: source.appearance,
+      voice: source.voice,
+      // La misma figura y el mismo color: se distinguen por el nombre.
+      avatar: source.avatar,
+      ...(source.notify ? { notify: source.notify } : {}),
+    });
+    const copy = this.#requireAgent(view.id);
+    try {
+      for (const root of SKILL_ROOTS) {
+        const from = join(source.workspace, ...root.split("/"));
+        if (!existsSync(from)) continue;
+        // Sin enlaces: solo carpetas y archivos de verdad.
+        cpSync(from, join(copy.workspace, ...root.split("/")), { recursive: true, filter: (path) => !lstatSync(path).isSymbolicLink() });
+      }
+      if (source.skillsOff.length) this.#store.updateAgent(copy.id, { skillsOff: [...source.skillsOff] });
+    } catch (error) {
+      this.#log("warn", `No pude copiar las habilidades de «${source.name}»: ${errorText(error)}`);
+    }
+    for (const memory of this.#store.listMemories(source.id)) {
+      this.#store.insertMemory({ agentId: copy.id, text: memory.text, always: memory.always, createdBy: memory.createdBy });
+    }
+    this.#emitAgents();
+    return this.#view(this.#requireAgent(copy.id));
+  }
+
+  /** «Ana (copia)», «Ana (copia 2)»…: el primero libre (y de la copia de una copia, también). */
+  #copyName(name: string): string {
+    const base = name.replace(/ \(copia(?: \d+)?\)$/, "") || name;
+    for (let index = 1; ; index += 1) {
+      const suffix = index === 1 ? " (copia)" : ` (copia ${index})`;
+      const candidate = `${base.slice(0, 60 - suffix.length).trimEnd()}${suffix}`;
+      if (!this.#store.findAgentByName(candidate)) return candidate;
+    }
   }
 
   setPaused(id: string, paused: boolean): AgentView {
@@ -1765,7 +1840,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
    */
   moveAgentToTeam(agentId: string, input: TeamMoveInput): TeamMove {
     const agent = this.#requireAgent(agentId);
-    if (this.#isMain(agent)) throw new ServiceError("Claude Bot se queda en su salón: desde ahí coordina a todos los equipos.", 409);
+    if (this.#isMain(agent)) throw new ServiceError(`${agent.name} se queda en su salón: desde ahí coordina a todos los equipos.`, 409);
     const from = typeof input.from === "string" && input.from ? this.#requireChannel(input.from) : null;
     const newName = typeof input.name === "string" && input.name.trim() ? channelName(input.name) : null;
     const target = !newName && typeof input.to === "string" && input.to ? this.#requireChannel(input.to) : null;

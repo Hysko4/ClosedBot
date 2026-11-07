@@ -60,7 +60,11 @@ self.addEventListener("notificationclick", (event) => {
   if (target.origin !== self.location.origin) return;
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (windows) => {
-      const open = windows.find((client) => new URL(client.url).origin === self.location.origin);
+      const ours = windows.filter((client) => new URL(client.url).origin === self.location.origin);
+      // Si esa conversación tiene su propia ventana («Abrir en ventana nueva»), se trae esa; si no, la principal.
+      const solo = ours.find((client) => new URL(client.url).searchParams.has("ventana") && new URL(client.url).hash === target.hash);
+      if (solo) return solo.focus();
+      const open = ours.find((client) => !new URL(client.url).searchParams.has("ventana")) ?? ours[0];
       if (!open) return self.clients.openWindow(target.href);
       await open.focus();
       open.postMessage({ type: "open", hash: target.hash });

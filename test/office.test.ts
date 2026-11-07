@@ -586,6 +586,9 @@ test("Oficina (interfaz): una plataforma por grupo con un escritorio por integra
   assert.equal(home.get("cata"), "juegos");
   assert.equal(home.has("main"), false);
   assert.equal(home.has("eli"), false);
+  // El salón lleva el nombre que tenga el bot principal (pedido: «lo cambié a Codex Bot y en la Oficina sigue Claude Bot»).
+  const renamed = office.planOffice({ agents: agents.map((agent) => (agent.id === "main" ? { ...agent, name: "Codex Bot" } : agent)), channels, mainId: "main" });
+  assert.equal(renamed.panels[0]?.title, "Codex Bot");
 
   // Un escritorio por integrante: la plataforma crece con el equipo y nadie comparte celda.
   for (let n = 1; n <= 16; n += 1) {
@@ -762,6 +765,7 @@ test("Oficina (interfaz): el robot se sienta en el equipo donde lo dejaste y el 
   assert.deepEqual(office.dropVerdict("Ana", juegos, juegos), { ok: false, text: "Ya está en «Creación de Juegos»" });
   assert.deepEqual(office.dropVerdict("Eli", loose, loose), { ok: false, text: "Ya está sin grupo" });
   assert.deepEqual(office.dropVerdict("Eli", loose, hall), { ok: false, text: "Ese es el salón de Claude Bot" });
+  assert.deepEqual(office.dropVerdict("Eli", loose, { ...hall, title: "Codex Bot" }), { ok: false, text: "Ese es el salón de Codex Bot" });
   assert.deepEqual(office.dropVerdict("Eli", loose, full), { ok: false, text: "«Lleno» ya tiene 12 agentes" });
   assert.equal(office.dropVerdict("Eli", loose, null).ok, false);
 });

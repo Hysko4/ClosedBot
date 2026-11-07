@@ -178,7 +178,7 @@
               </ul>
             </div>
           </aside>
-          <div class="office-board" role="dialog" aria-label="Pizarra de Claude Bot" hidden>
+          <div class="office-board" role="dialog" aria-label="Pizarra" hidden>
             <header class="office-board-head">
               <h3>Pizarra</h3>
               <button type="button" class="round-button small-round" aria-label="Cerrar la pizarra">
@@ -585,22 +585,34 @@
     <dialog class="dialog details" id="details-dialog" aria-labelledby="details-name">
       <div class="details-panel">
         <section class="details-view" id="details-home">
-          <header class="details-header">
-            <button type="button" class="details-avatar" id="details-avatar" title="Cambiar figura y color" aria-label="Cambiar figura y color"></button>
-            <button type="button" class="details-titles" id="details-profile" title="Editar el perfil">
-              <span class="details-name" id="details-name"></span>
-              <span class="details-title" id="details-title"></span>
-              <span class="details-description" id="details-description"></span>
-            </button>
-            <button type="button" class="round-button details-close" aria-label="Cerrar">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>
-            </button>
-          </header>
+          <!-- Como la ficha de OpenBot: la figura arriba, nombre, título y descripción a la vista, y los ajustes por grupos. -->
+          <button type="button" class="round-button details-close details-close-float" aria-label="Cerrar">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>
+          </button>
           <div class="details-body" id="details-groups">
+            <div class="details-identity">
+              <button type="button" class="details-avatar" id="details-avatar" title="Cambiar figura y color" aria-label="Cambiar figura y color"></button>
+            </div>
+            <form class="details-profile" id="profile-form" novalidate autocomplete="off">
+              <label class="field">
+                <span>Nombre</span>
+                <input name="name" maxlength="60" required autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Título</span>
+                <input name="role" maxlength="200" autocomplete="off" placeholder="Describe lo que hace tu agente" />
+              </label>
+              <label class="field">
+                <span class="field-label">Descripción <output class="counter" id="description-count"></output></span>
+                <textarea name="description" rows="3" maxlength="2000" placeholder="Para qué sirve y qué entrega. La ven los demás agentes."></textarea>
+              </label>
+              <p class="form-error" id="profile-error" role="alert"></p>
+            </form>
             <div class="settings-group">
               <h3>Cerebro</h3>
               <div class="settings-list">
                 <button type="button" class="settings-row" data-page="brain"><span class="row-icon" data-icon="cpu"></span><span class="row-label">Modelo</span><span class="row-value" id="row-brain"></span></button>
+                <label class="settings-row settings-select" id="row-effort-row"><span class="row-icon" data-icon="gauge"></span><span class="row-label">Razonamiento</span><select class="row-select" id="row-effort" aria-label="Razonamiento"></select></label>
               </div>
             </div>
             <div class="settings-group">
@@ -615,17 +627,21 @@
             <div class="settings-group">
               <h3>Hace</h3>
               <div class="settings-list">
-                <button type="button" class="settings-row" data-page="mcp"><span class="row-icon" data-icon="plug"></span><span class="row-label">MCP</span><span class="row-value" id="row-mcp"></span></button>
                 <button type="button" class="settings-row" data-page="routines"><span class="row-icon" data-icon="clock"></span><span class="row-label">Rutinas</span><span class="row-value" id="row-routines"></span></button>
+                <button type="button" class="settings-row" data-page="mcp"><span class="row-icon" data-icon="plug"></span><span class="row-label">MCP</span><span class="row-value" id="row-mcp"></span></button>
                 <button type="button" class="settings-row" data-page="voice"><span class="row-icon" data-icon="speaker"></span><span class="row-label">Chat de voz</span><span class="row-value" id="row-voice"></span></button>
               </div>
             </div>
             <div class="settings-group">
               <h3>Reglas</h3>
               <div class="settings-list">
-                <button type="button" class="settings-row" data-page="folders"><span class="row-icon" data-icon="folder"></span><span class="row-label">Carpetas</span><span class="row-value"></span></button>
                 <button type="button" class="settings-row" data-page="access" id="row-access-button"><span class="row-icon" data-icon="shield"></span><span class="row-label">Acceso</span><span class="row-value" id="row-access"></span></button>
+                <button type="button" class="settings-row" data-page="folders"><span class="row-icon" data-icon="folder"></span><span class="row-label">Carpetas</span><span class="row-value"></span></button>
                 <button type="button" class="settings-row" data-page="advanced"><span class="row-icon" data-icon="sliders"></span><span class="row-label">Avanzado</span><span class="row-value" id="row-advanced"></span></button>
+              </div>
+            </div>
+            <div class="settings-group">
+              <div class="settings-list">
                 <button type="button" class="settings-row" data-page="notify"><span class="row-icon" data-icon="bell"></span><span class="row-label">Avisarme</span><span class="row-value" id="row-notify"></span></button>
               </div>
             </div>
@@ -645,32 +661,6 @@
           </header>
           <div class="details-body page-body" id="page-body">
             <h2 class="page-title" id="page-title" tabindex="-1"></h2>
-
-            <div class="page" data-page="profile" hidden>
-              <form id="profile-form" novalidate>
-                <label class="field">
-                  <span>Nombre</span>
-                  <input name="name" maxlength="60" required autocomplete="off" />
-                </label>
-                <label class="field">
-                  <span>Título</span>
-                  <input name="role" maxlength="200" autocomplete="off" placeholder="Ej.: Investigadora de mercado" />
-                </label>
-                <label class="field">
-                  <span class="field-label">Descripción <output class="counter" id="description-count"></output></span>
-                  <textarea name="description" rows="4" maxlength="2000" placeholder="Para qué sirve y qué entrega. La ven Claude Bot y los demás agentes."></textarea>
-                </label>
-                <label class="field" id="profile-project">
-                  <span>Sección</span>
-                  <input name="project" maxlength="60" list="project-options" autocomplete="off" placeholder="Sin sección" />
-                </label>
-                <datalist id="project-options"></datalist>
-                <p class="form-error" id="profile-error" role="alert"></p>
-                <div class="page-actions">
-                  <button type="submit" class="button primary" id="profile-save">Guardar</button>
-                </div>
-              </form>
-            </div>
 
             <div class="page" data-page="brain" hidden>
               <form id="brain-form" novalidate>

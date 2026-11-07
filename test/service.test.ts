@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
-import type { MessageRecord } from "../src/db.js";
+import { AVATAR_CUSTOM_BASE, type MessageRecord } from "../src/db.js";
+import { NEW_THREAD_NOTICE } from "../src/service.js";
 import { createHarness, tempDir, waitFor } from "./helpers.js";
 
 const assistantTexts = (messages: MessageRecord[]) => messages.filter((message) => message.role === "assistant").map((message) => message.text);
@@ -182,6 +184,91 @@ test("cambiar de proveedor reinicia la conversación y valida nombres", async ()
     assert.equal(h.service.listMessages(ana.id).length, 0);
     await h.service.deleteAgent(ana.id);
     assert.equal(h.service.listAgents().length, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("menú del agente: «Nuevo hilo» empieza otra conversación sin borrar el historial", async () => {
+  const h = await createHarness();
+  try {
+    const ana = h.service.createAgent({ name: "Ana", provider: "demo" });
+    const { message } = h.service.sendUserMessage(ana.id, "hola");
+    await waitFor(() => h.store.getMessage(message.id)?.status === "completed", 5_000, "turno");
+    const first = h.service.getAgent(ana.id).threadId;
+    assert.ok(first);
+    assert.equal((await h.service.newThread(ana.id)).threadId, null);
+    const messages = h.service.listMessages(ana.id);
+    assert.ok(messages.some((item) => item.role === "assistant"), "el historial sigue a la vista");
+    assert.equal(messages.at(-1)?.text, NEW_THREAD_NOTICE);
+    await h.service.newThread(ana.id);
+    assert.equal(h.service.listMessages(ana.id).filter((item) => item.text === NEW_THREAD_NOTICE).length, 1, "dos veces seguidas: un solo aviso");
+    const again = h.service.sendUserMessage(ana.id, "otra vez");
+    await waitFor(() => h.store.getMessage(again.message.id)?.status === "completed", 5_000, "turno del hilo nuevo");
+    const second = h.service.getAgent(ana.id).threadId;
+    assert.ok(second && second !== first, "otro hilo");
+  } finally {
+    await h.close();
+  }
+});
+
+test("menú del agente: «Duplicar agente» copia lo que sabe y sus reglas, no su historial ni sus rutinas", async () => {
+  const h = await createHarness({ mainAgent: true });
+  try {
+    const ana = h.service.createAgent({
+      name: "Ana",
+      provider: "demo",
+      role: "Diseñadora",
+      description: "Hace los niveles.",
+      instructions: "Usa pixel art de 16x16.",
+      model: "demo",
+      effort: "high",
+      access: "total",
+      project: "Juegos",
+      avatar: AVATAR_CUSTOM_BASE + 205,
+      notify: "needs",
+    });
+    h.service.createMemory(ana.id, { text: "El juego se llama 4FTER.", always: true });
+    h.service.createMemory(ana.id, { text: "Prefiere colores fríos." });
+    const kept = h.service.createSkill(ana.id, { name: "Paleta", description: "Elige colores", body: "1. Mira la referencia." });
+    const off = h.service.createSkill(ana.id, { name: "Exportar", description: "Exporta sprites", body: "1. Exporta." });
+    h.service.setSkillEnabled(ana.id, off.id, false);
+    // Un enlace dentro de una habilidad no se copia (podría apuntar fuera de su carpeta).
+    symlinkSync(ana.workspace, join(ana.workspace, kept.id, "atajo"));
+    h.service.createRoutine(ana.id, { name: "Diario", prompt: "Revisa", times: ["09:00"] });
+    const { message } = h.service.sendUserMessage(ana.id, "hola");
+    await waitFor(() => h.store.getMessage(message.id)?.status === "completed", 5_000, "turno");
+    // Lo que el agente escribió en su AGENTS.md también se copia.
+    writeFileSync(join(ana.workspace, "AGENTS.md"), "Usa pixel art de 32x32.");
+    mkdirSync(join(ana.workspace, "niveles"));
+    writeFileSync(join(ana.workspace, "niveles", "uno.txt"), "nivel");
+
+    const copy = h.service.duplicateAgent(ana.id);
+    assert.equal(copy.name, "Ana (copia)");
+    assert.deepEqual(
+      [copy.role, copy.description, copy.instructions, copy.provider, copy.model, copy.effort, copy.access, copy.project, copy.avatar, copy.notify],
+      ["Diseñadora", "Hace los niveles.", "Usa pixel art de 32x32.", "demo", "demo", "high", "total", "Juegos", AVATAR_CUSTOM_BASE + 205, "needs"],
+    );
+    assert.notEqual(copy.workspace, ana.workspace);
+    assert.deepEqual(h.service.listMemories(copy.id).map((memory) => [memory.text, memory.always]), [
+      ["El juego se llama 4FTER.", true],
+      ["Prefiere colores fríos.", false],
+    ]);
+    assert.deepEqual(h.service.listSkills(copy.id).map((skill) => [skill.name, skill.enabled]), [
+      ["Exportar", false],
+      ["Paleta", true],
+    ]);
+    assert.ok(!existsSync(join(copy.workspace, kept.id, "atajo")), "sin enlaces");
+    assert.ok(lstatSync(join(ana.workspace, kept.id, "atajo")).isSymbolicLink(), "el original no se toca");
+    assert.ok(!existsSync(join(copy.workspace, "niveles")), "sus archivos no se copian");
+    assert.equal(h.service.listMessages(copy.id).length, 0, "sin historial");
+    assert.equal(h.service.listRoutines(copy.id).length, 0, "sin rutinas");
+    assert.equal(h.service.listRoutines(ana.id).length, 1);
+    // La copia de una copia: «(copia 2)», no «(copia) (copia)».
+    assert.equal(h.service.duplicateAgent(copy.id).name, "Ana (copia 2)");
+    const main = h.service.listAgents().find((agent) => agent.main);
+    assert.ok(main);
+    assert.throws(() => h.service.duplicateAgent(main.id), /no se duplica/);
   } finally {
     await h.close();
   }

@@ -397,3 +397,57 @@ test("crear agente (interfaz): sin color hasta elegir el modelo; cada modelo tra
   assert.match(save, /if \(!createState\.agentId && !createState\.provider\) return askForModel\(\);/);
   assert.doesNotMatch(save, /preferredProvider\(\)/);
 });
+
+test("menú del agente (interfaz): las opciones y el orden de OpenBot; sin «Marcar todo como leído» ni «Seleccionar agentes»", () => {
+  const app = readFileSync(new URL("../../public/app.js", import.meta.url), "utf8");
+  const slice = (from: string, to: string) => {
+    const start = app.indexOf(from);
+    const end = app.indexOf(to, start);
+    assert.ok(start >= 0 && end > start, `no encontré «${from}» en public/app.js`);
+    return app.slice(start, end);
+  };
+  const agents: Record<string, { id: string; main?: boolean; pinned?: boolean; hidden?: boolean }> = {
+    bot: { id: "bot", main: true },
+    ana: { id: "ana" },
+    beto: { id: "beto", pinned: true, hidden: true },
+  };
+  const context = vm.createContext({
+    coarsePointer: false,
+    state: { selection: null as Set<string> | null },
+    findAgent: (id: string) => agents[id] ?? null,
+    moveTargets: (id: string) => (context.state.selection?.has(id) ? [...context.state.selection] : [id]),
+    deletedChannelsLabel: () => "Canales eliminados",
+  });
+  vm.runInContext(
+    `${slice("function agentMenuItems(agentId) {", "function moveMenuItems(agentId) {")}
+    ${slice("function sidebarMenuItems() {", "/** Menú del título «Canales». */")}
+    globalThis.menus = { agentMenuItems, sidebarMenuItems };`,
+    context,
+  );
+  type Item = string | { label: string; danger?: boolean };
+  const { agentMenuItems, sidebarMenuItems } = context.menus as { agentMenuItems: (id: string) => Item[]; sidebarMenuItems: () => Item[] };
+  // Array.from: un arreglo de este lado (los del contexto de vm no son iguales a los de aquí para deepEqual).
+  const labels = (items: Item[]) => Array.from(items, (item) => (typeof item === "string" ? item : item.label));
+  assert.deepEqual(labels(agentMenuItems("ana")), [
+    "Fijar",
+    "Nuevo hilo",
+    "Abrir en ventana nueva",
+    "Mover a",
+    "Editar agente",
+    "Duplicar agente",
+    "Ocultar agente",
+    "-",
+    "Eliminar agente",
+  ]);
+  assert.deepEqual(labels(agentMenuItems("beto")).filter((label) => /fijar|agente$/i.test(label)), ["Desfijar", "Editar agente", "Duplicar agente", "Mostrar agente", "Eliminar agente"]);
+  assert.deepEqual(labels(agentMenuItems("bot")), ["Nuevo hilo", "Abrir en ventana nueva", "Editar agente"], "Claude Bot no se mueve, ni se duplica, ni se oculta, ni se elimina");
+  // Con varios marcados (Ctrl/Mayús+clic), «Mover» y «Eliminar» son para todos.
+  context.state.selection = new Set(["ana", "beto"]);
+  assert.deepEqual(labels(agentMenuItems("ana")).filter((label) => /^(Mover|Eliminar)/.test(label)), ["Mover 2 a", "Eliminar 2 agentes"]);
+  // Con el dedo no hay Ctrl ni Mayús: se marca desde el menú.
+  context.coarsePointer = true;
+  assert.ok(labels(agentMenuItems("ana")).includes("Desmarcar"));
+  assert.ok(!labels(agentMenuItems("ana")).includes("Abrir en ventana nueva"), "en el celular no hay ventanas aparte");
+  const sidebar = labels(sidebarMenuItems());
+  assert.ok(!sidebar.some((label) => /leído|[Ss]eleccionar/.test(label)), sidebar.join(", "));
+});
