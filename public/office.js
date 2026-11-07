@@ -256,7 +256,8 @@ function iso(i, j) {
   return { x: (i - j) * TILE_W, y: (i + j) * TILE_H };
 }
 
-const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+/** La misma letra que el resto de la app (--font en styles.css): Inter, la de OpenBot. */
+const FONT = '"Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
 
 /** localStorage puede fallar (modo privado, almacenamiento bloqueado): la Oficina funciona igual sin él. */
 const storage = {
@@ -290,7 +291,6 @@ export function createOffice(host) {
   const boardView = root.querySelector(".office-board");
   const guide = root.querySelector(".office-guide");
   const emptyView = root.querySelector(".office-empty");
-  const statusView = root.querySelector(".office-status");
   const helpButton = root.querySelector(".office-help");
   const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
   const canvas = document.createElement("canvas");
@@ -313,7 +313,6 @@ export function createOffice(host) {
   let visible = false;
   let raf = 0;
   let lastFrame = 0;
-  let lastStatus = 0;
   let snapshotLoaded = false;
   let hovered = null;
   let seenMessages = new Set();
@@ -368,7 +367,6 @@ export function createOffice(host) {
       live.asking = new Set(data.asking ?? []);
       live.failed = new Map((data.failed ?? []).map((id) => [id, Date.now()]));
       snapshotLoaded = true;
-      updateStatus();
     } catch {
       // Sin el resumen igual se ve la oficina: se completa con los eventos.
     }
@@ -418,7 +416,6 @@ export function createOffice(host) {
       retarget();
     }
     renderLists();
-    updateStatus();
   }
 
   /** Tamaño en pantalla de una plataforma (sin la tarjeta). */
@@ -542,26 +539,6 @@ export function createOffice(host) {
       icon,
       eye: host.colorOf(agent),
     };
-  }
-
-  /** La línea del encabezado: cuántos son y qué está pasando. */
-  function updateStatus() {
-    if (!statusView || !visible) return;
-    const agents = host.agents();
-    const others = agents.filter((agent) => !agent.main);
-    let text = "";
-    if (others.length) {
-      const teams = host.channels().length;
-      const parts = [`${others.length} ${others.length === 1 ? "agente" : "agentes"}`];
-      if (teams) parts.unshift(`${teams} ${teams === 1 ? "equipo" : "equipos"}`);
-      const working = agents.filter((agent) => agent.state === "working").length;
-      const asking = agents.filter((agent) => live.asking.has(agent.id)).length;
-      if (working) parts.push(`${working} trabajando`);
-      if (asking) parts.push(asking === 1 ? "1 pregunta para ti" : `${asking} preguntas para ti`);
-      if (!working && !asking) parts.push("todos libres");
-      text = parts.join(" · ");
-    }
-    if (statusView.textContent !== text) statusView.textContent = text;
   }
 
   // ---------- dibujo ----------
@@ -1181,10 +1158,19 @@ export function createOffice(host) {
     ctx.fillStyle = rgba(color, 0.95);
     ctx.font = `500 12px ${FONT}`;
     ctx.fillText(clipText(ctx, `${who} · ${teamStatus(platform)}`, CARD_W - 30), x + 19, y + 39);
-    // Avance del equipo.
+    // Avance del equipo. Su rótulo («45 %», «Listo» o la pizarra, que siempre se nombra para que se sepa que
+    // está ahí, más clara si tiene un plan) va a la derecha y la barra termina antes, sin pasar por debajo.
+    let label = null;
+    if (progress !== null) label = { text: progress >= 100 ? "Listo" : `${progress} %`, font: `700 11px ${FONT}`, color: "#dfe6ff" };
+    else if (hall) label = { text: live.board.trim() ? "Pizarra ›" : "Pizarra", font: `600 11px ${FONT}`, color: live.board.trim() ? "#dfe6ff" : "#7f8bbd" };
     const barX = x + 19;
-    const barW = CARD_W - 64;
     const barY = y + CARD_H - 13;
+    const labelX = x + CARD_W - 11;
+    let barW = CARD_W - 64;
+    if (label) {
+      ctx.font = label.font;
+      barW = Math.min(barW, labelX - ctx.measureText(label.text).width - 8 - barX);
+    }
     ctx.fillStyle = "rgba(255, 255, 255, 0.1)";
     roundRect(ctx, barX, barY, barW, 4, 2);
     ctx.fill();
@@ -1195,16 +1181,12 @@ export function createOffice(host) {
       roundRect(ctx, barX, barY, Math.max(4, (barW * progress) / 100), 4, 2);
       ctx.fill();
       ctx.shadowBlur = 0;
-      ctx.fillStyle = "#dfe6ff";
-      ctx.font = `700 11px ${FONT}`;
+    }
+    if (label) {
+      ctx.fillStyle = label.color;
+      ctx.font = label.font;
       ctx.textAlign = "right";
-      ctx.fillText(progress >= 100 ? "Listo" : `${progress} %`, x + CARD_W - 11, barY + 5);
-    } else if (hall) {
-      // La pizarra siempre se nombra: así se sabe que está ahí (más clara si tiene un plan).
-      ctx.fillStyle = live.board.trim() ? "#dfe6ff" : "#7f8bbd";
-      ctx.font = `600 11px ${FONT}`;
-      ctx.textAlign = "right";
-      ctx.fillText(live.board.trim() ? "Pizarra ›" : "Pizarra", x + CARD_W - 11, barY + 5);
+      ctx.fillText(label.text, labelX, barY + 5);
     }
     ctx.textAlign = "left";
 
@@ -1878,7 +1860,6 @@ export function createOffice(host) {
       case "turn":
         if (event.status === "failed") live.failed.set(event.agentId, Date.now());
         else live.failed.delete(event.agentId);
-        updateStatus();
         break;
       default:
         break;
@@ -1897,13 +1878,11 @@ export function createOffice(host) {
       const answered = message.payload?.answer !== null && message.payload?.answer !== undefined;
       if (answered) live.asking.delete(agentId);
       else live.asking.add(agentId);
-      updateStatus();
       return;
     }
     // Si le escribiste en vez de tocar una opción, ya no espera respuesta.
     if (message.role === "user") {
       live.asking.delete(agentId);
-      updateStatus();
       return;
     }
     if (message.role === "teammate" && message.fromAgentId && !seenMessages.has(message.id)) {
@@ -1943,10 +1922,6 @@ export function createOffice(host) {
     autoScroll();
     draw(now);
     paintSamples(now);
-    if (now - lastStatus > 1000) {
-      lastStatus = now;
-      updateStatus();
-    }
   }
 
   const resizer =

@@ -535,6 +535,15 @@ test("Oficina (interfaz): la escena llena el espacio que hay, también en un mon
   }
 });
 
+test("Oficina (interfaz): el encabezado dice solo «Oficina», sin el resumen al lado", () => {
+  const html = readFileSync(join(publicDir, "index.html"), "utf8");
+  const header = html.match(/<header class="office-header">([\s\S]*?)<\/header>/)?.[1] ?? "";
+  assert.match(header, /<div class="office-heading">\s*<h2 class="office-title">Oficina<\/h2>\s*<\/div>/);
+  assert.doesNotMatch(html, /office-status/);
+  const script = readFileSync(join(publicDir, "office.js"), "utf8");
+  assert.doesNotMatch(script, /office-status|preguntas? para ti|todos libres/);
+});
+
 test("Oficina (interfaz): una plataforma por grupo con un escritorio por integrante, y el resto en «Sin grupo»", async () => {
   const office = (await import(new URL("../../public/office.js", import.meta.url).href)) as {
     planOffice: (input: unknown) => { panels: Array<Record<string, any>>; home: Map<string, string> };

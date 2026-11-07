@@ -359,6 +359,7 @@ src/
   cli/password.ts      npm run password
   cli/access.ts        npm run access (acceso total para todos, sin abrir la app)
 public/                interfaz web (sin dependencias ni compilación); office.js dibuja la Oficina (plataformas de neón y robots)
+public/fonts/          la letra de toda la app: Inter, la misma de OpenBot (incluida, funciona sin internet)
 public/office/         arte pintado de la 0.9.0 (ya no lo usa la Oficina)
 scripts/office-art.py  prepara public/office/ a partir de los dibujos originales (Pillow)
 scripts/windows/       ClosedBot.exe: ventana propia e icono en la bandeja (C#)
@@ -368,7 +369,7 @@ test/                  pruebas (node:test)
 
 ## Estado y límites conocidos
 
-- Versión 0.9.9 (la Oficina llena el espacio, también en un monitor vertical, y el equipo nuevo se arma con clic derecho; la 0.9.8 trajo ver qué MCP tiene conectados cada agente y cada equipo, junto con las habilidades del equipo; la 0.9.7 hizo que al crear un agente elijas su modelo, y eso le pone color; la 0.9.6 hizo que en la Oficina la plataforma de un agente solo tome el color de ese agente, y la 0.9.5 trajo crear agentes y equipos en la Oficina, arrastrarlos entre equipos, su chat y su ficha ahí mismo, y una guía). Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. Las voces de OpenBot se probaron con el modelo real en Windows. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
+- Versión 0.9.10 (toda la app, la Oficina incluida, usa una sola letra: Inter, la misma de OpenBot; el encabezado de la Oficina dice solo «Oficina»; la 0.9.9 hizo que la Oficina llene el espacio, también en un monitor vertical, y que el equipo nuevo se arme con clic derecho; la 0.9.8 trajo ver qué MCP tiene conectados cada agente y cada equipo, junto con las habilidades del equipo; la 0.9.7 hizo que al crear un agente elijas su modelo, y eso le pone color; la 0.9.6 hizo que en la Oficina la plataforma de un agente solo tome el color de ese agente, y la 0.9.5 trajo crear agentes y equipos en la Oficina, arrastrarlos entre equipos, su chat y su ficha ahí mismo, y una guía). Se probó con el proveedor Demo y con simulaciones de Claude, Codex, Gemini (Antigravity) y Grok. Las voces de OpenBot se probaron con el modelo real en Windows. **Falta la primera prueba con tus cuentas reales**: hazla con un agente en «Solo su carpeta».
 - PixelLab se probó con una simulación de su API: **falta la primera prueba con tu cuenta**. Si algo falla, el agente queda con el personaje simple: tocando su figura en la ficha se ve el motivo y «Dibujarlo» lo intenta de nuevo.
 - En la Oficina, cada agente está en una sola plataforma (la del equipo donde lo dejaste en este navegador, la del canal que encarga o, si no, la del primero en que está); en sus otros canales su escritorio queda vacío. El chat abajo y la ficha al lado son para pantallas de más de 760 px: en el teléfono, tocar un robot abre su chat completo.
 - Un solo usuario y sin notificaciones push por ahora.
@@ -382,4 +383,5 @@ test/                  pruebas (node:test)
 
 - El código propio de ClosedBot es privado.
 - Algunas partes derivan de **OpenBot v0.1.11** (Copyright 2026 Norbert Bodziony), con licencia Apache 2.0. Cada archivo derivado lo indica al inicio. Ver [NOTICE](NOTICE) y [licenses/OPENBOT-APACHE-2.0.txt](licenses/OPENBOT-APACHE-2.0.txt). Las versiones posteriores de OpenBot usan otra licencia y su código no se usó: de ellas solo se tomó la idea de conectar los proveedores con el inicio de sesión de su propio CLI.
+- La letra **Inter** (The Inter Project Authors, SIL Open Font License 1.1) va incluida en `public/fonts/`. Ver [licenses/INTER-OFL-1.1.txt](licenses/INTER-OFL-1.1.txt).
 - Dependencias: ver [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

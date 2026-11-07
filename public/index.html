@@ -14,6 +14,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="preload" href="/fonts/inter-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/styles.css" />
     <script type="module" src="/app.js"></script>
   </head>
@@ -131,7 +132,6 @@
             </button>
             <div class="office-heading">
               <h2 class="office-title">Oficina</h2>
-              <span class="office-status" id="office-status"></span>
             </div>
             <button type="button" class="button ghost office-draw" id="office-draw" hidden></button>
             <button type="button" class="button primary office-new" data-office-action="create" title="Crear un agente" aria-label="Nuevo agente">

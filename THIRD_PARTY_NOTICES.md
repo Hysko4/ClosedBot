@@ -6,6 +6,12 @@
 | --- | --- | --- | --- |
 | [OpenBot](https://github.com/nightly-labs/openbot) | 0.1.11 | Apache-2.0 | Protocolo de proveedores, cliente del app-server de Codex, adaptador de Claude e instrucciones de los agentes, con modificaciones. Ver `NOTICE` y `licenses/OPENBOT-APACHE-2.0.txt`. |
 
+## Tipografía incluida
+
+| Recurso | Versión | Licencia | Uso |
+| --- | --- | --- | --- |
+| [Inter](https://github.com/rsms/inter) (Inter Variable, de `@fontsource-variable/inter`) | 5.3.0 | SIL OFL 1.1 | La letra de toda la app, la misma de OpenBot. Archivos `latin` y `latin-ext` en `public/fonts/`. Ver `licenses/INTER-OFL-1.1.txt`. |
+
 ## Dependencias de ejecución
 
 | Paquete | Versión | Licencia |

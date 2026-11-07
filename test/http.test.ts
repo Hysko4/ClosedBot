@@ -100,6 +100,38 @@ test("HTTP: archivos estáticos con cabeceras de seguridad y sin salir de public
   }
 });
 
+test("HTTP: la letra de toda la app (Inter, la de OpenBot) va incluida y se sirve como fuente", async () => {
+  const s = await startServer();
+  try {
+    const css = await (await fetch(`${s.base}/styles.css`)).text();
+    // Cada archivo que nombra el CSS existe y llega como font/woff2.
+    const files = [...new Set([...css.matchAll(/url\("(\/fonts\/[^"]+\.woff2)"\)/g)].map((match) => match[1]))];
+    assert.ok(files.length >= 2, files.join(", "));
+    for (const file of files) {
+      const response = await fetch(s.base + file);
+      assert.equal(response.status, 200, file);
+      assert.equal(response.headers.get("content-type"), "font/woff2", file);
+      assert.equal(Buffer.from(await response.arrayBuffer()).subarray(0, 4).toString("latin1"), "wOF2", file);
+    }
+    // Una sola familia para todo (y la de código solo para código): las de OpenBot.
+    assert.match(css, /--font: "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;/);
+    const families = [...css.matchAll(/font-family:\s*([^;]+);/g)].map((match) => match[1]);
+    assert.deepEqual([...new Set(families)].sort(), ['"Inter Variable"', "var(--font)", "var(--mono)"]);
+    // La Oficina dibuja con la misma letra.
+    const office = await (await fetch(`${s.base}/office.js`)).text();
+    assert.match(office, /const FONT = '"Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';/);
+    // La precarga y el modo sin conexión apuntan a archivos que existen.
+    const index = await (await fetch(`${s.base}/`)).text();
+    const preload = index.match(/<link rel="preload" href="([^"]+)" as="font"/)?.[1];
+    assert.ok(preload && files.includes(preload), String(preload));
+    const offline = (await (await fetch(`${s.base}/sw.js`)).text()).match(/"\/fonts\/[^"]+"/g) ?? [];
+    assert.ok(offline.length > 0);
+    for (const file of offline) assert.ok(files.includes(JSON.parse(file)), file);
+  } finally {
+    await s.close();
+  }
+});
+
 test("HTTP: login, CSRF y sesión", async () => {
   const s = await startServer();
   try {
