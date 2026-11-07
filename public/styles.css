@@ -4567,9 +4567,11 @@ svg {
     right: calc(var(--office-side) + 18px);
   }
 
+  /* Con la ficha abierta, el chat de abajo se corre a su izquierda (pedido): la ficha va de arriba a abajo. */
   body.office-docked .conversation {
     flex: 0 0 var(--office-dock);
     height: var(--office-dock);
+    margin-right: var(--office-side);
     border-top: 1px solid #2a3170;
     box-shadow: 0 -10px 30px rgba(3, 6, 28, 0.45);
   }
@@ -4601,7 +4603,7 @@ svg {
 
   body.office-docked #details-dialog[open]:not(:modal) {
     position: fixed;
-    inset: 53px 0 var(--office-dock) auto;
+    inset: 53px 0 0 auto;
     z-index: 30;
     width: var(--office-side);
     height: auto;
