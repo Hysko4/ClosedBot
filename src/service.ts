@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   cleanInstructions,
   composeSkill,
@@ -350,6 +350,8 @@ export interface Settings {
   userName: string;
   /** Todos los agentes trabajan con acceso total (comandos sin pedir permiso), sea cual sea el nivel de cada uno. */
   fullAccess: boolean;
+  /** Ver en el chat los pasos técnicos de los agentes (comandos, archivos). Por defecto, ocultos. */
+  showSteps: boolean;
 }
 
 /** Un canal tal como lo ve la interfaz. */
@@ -357,6 +359,8 @@ export interface ChannelView extends ChannelRecord {
   unread: boolean;
   /** Miembros que están trabajando ahora en algo de este canal. */
   working: string[];
+  /** Miembros con un mensaje de este canal esperando turno (en pausa u ocupados en otra cosa). */
+  waiting: string[];
   /**
    * Avance del equipo en su trabajo actual (la tarjeta de la Oficina), o null. `done`: los que informaron ya
    * terminaron; la Oficina lo muestra listo cuando además nadie del equipo sigue trabajando.
@@ -530,6 +534,8 @@ interface TurnState {
   steps: number;
   /** Imágenes que generó en este turno, ya en la carpeta compartida; `sent` cuando ya se le pasaron a alguien. */
   images: Array<SavedImage & { sent: boolean }>;
+  /** Archivos de imagen que ya se mostraron en este turno (para no repetirlos). */
+  imageSources?: Set<string>;
 }
 
 export class ServiceError extends Error {
@@ -1166,6 +1172,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       updated = this.#store.getAgent(id) ?? updated;
     }
     if (agent.threadId) this.#loadedThreads.delete(`${agent.provider}:${agent.threadId}`);
+    // El bot principal con otro nombre: la pizarra (la escribe él) también lo dice.
+    if (this.#isMain(agent) && next.name && next.name !== agent.name) this.#renameInBoard(agent.name, next.name);
     if (next.provider) {
       void this.#closeThread(agent);
       this.#notice(
@@ -1302,6 +1310,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const updated = this.#store.updateAgent(id, { paused });
     this.#emitAgents();
     if (!paused) this.#scheduleDrain(id);
+    this.#emitChannels();
     return this.#view(updated);
   }
 
@@ -1694,6 +1703,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const stored = this.#store.getMeta(MAIN_AGENT_META);
     const existing = stored ? this.#store.getAgent(stored) : null;
     this.#mainAgentId = existing?.id ?? null;
+    // Renombrado antes de la 0.9.14: la pizarra seguía diciendo «Claude Bot».
+    if (existing && existing.name !== MAIN_AGENT_NAME) this.#renameInBoard(MAIN_AGENT_NAME, existing.name);
     if (existing || !this.#options.mainAgent) return;
     const adopted = this.#store.findAgentByName(MAIN_AGENT_NAME);
     let agent = adopted;
@@ -1763,10 +1774,11 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       botName: typeof stored.botName === "string" && stored.botName && stored.botName !== "Cuadrilla" ? stored.botName : DEFAULT_BOT_NAME,
       userName: typeof stored.userName === "string" ? stored.userName : "",
       fullAccess: stored.fullAccess === true,
+      showSteps: stored.showSteps === true,
     };
   }
 
-  updateSettings(patch: { botName?: unknown; userName?: unknown; fullAccess?: unknown }): Settings {
+  updateSettings(patch: { botName?: unknown; userName?: unknown; fullAccess?: unknown; showSteps?: unknown }): Settings {
     if (patch.fullAccess !== undefined && typeof patch.fullAccess !== "boolean") {
       throw new ServiceError("El acceso total para todos debe ser true o false.", 400);
     }
@@ -1775,6 +1787,7 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       botName: patch.botName === undefined ? current.botName : cleanSettingName(patch.botName) || DEFAULT_BOT_NAME,
       userName: patch.userName === undefined ? current.userName : cleanSettingName(patch.userName),
       fullAccess: patch.fullAccess === undefined ? current.fullAccess : patch.fullAccess,
+      showSteps: patch.showSteps === undefined ? current.showSteps : patch.showSteps === true,
     };
     this.#store.setMeta(SETTINGS_META, JSON.stringify(next));
     if (next.fullAccess !== current.fullAccess) {
@@ -2059,7 +2072,9 @@ export class AgentService extends EventEmitter<ServiceEvents> {
 
   #channelView(channel: ChannelRecord): ChannelView {
     const working = [...this.#active.values()].filter((state) => state.channelId === channel.id).map((state) => state.agentId);
-    return { ...channel, unread: channel.lastAt > channel.readAt, working: [...new Set(working)], progress: this.#channelProgress(channel) };
+    const busy = new Set(working);
+    const waiting = [...new Set(this.#store.queuedForChannel(channel.id).map((delivery) => delivery.agentId))].filter((agentId) => !busy.has(agentId));
+    return { ...channel, unread: channel.lastAt > channel.readAt, working: [...busy], waiting, progress: this.#channelProgress(channel) };
   }
 
   #emitChannels(): void {
@@ -3124,6 +3139,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     const state = this.#active.get(agentId);
     if (!state) return;
     if (turnId && state.turnId && state.turnId !== turnId) return;
+    // Las imágenes que nombra en su respuesta (p. ej. las que hizo con un script) también se ven en el chat.
+    if (status !== "failed") for (const path of imagePathsInText(state.lastAssistantText)) this.#imageFile(agentId, path, state.turnId);
     this.#active.delete(agentId);
     const terminal = status === "failed" ? "failed" : status === "interrupted" ? "interrupted" : "completed";
     const delivery = this.#store.updateDelivery(state.deliveryId, { status: terminal, finishedAt: Date.now() });
@@ -3390,6 +3407,8 @@ export class AgentService extends EventEmitter<ServiceEvents> {
           return;
         }
         if (type && ACTIVITY_ITEM_TYPES.has(type)) {
+          // Una imagen que hizo o cambió (Gemini, Grok, Claude…): se ve en el chat como las de Codex.
+          for (const path of imagePathsOf(item)) this.#imageFile(agentId, path, getString(params, "turnId"));
           const summary = summarizeActivity(item);
           if (!summary) return;
           const message = this.#store.insertMessage({
@@ -4152,6 +4171,12 @@ export class AgentService extends EventEmitter<ServiceEvents> {
     return this.#store.getMeta(BOARD_META) ?? "";
   }
 
+  #renameInBoard(from: string, to: string): void {
+    const board = this.#board();
+    if (!from || !board.includes(from)) return;
+    this.#store.setMeta(BOARD_META, board.split(from).join(to));
+  }
+
   /** update_board: reemplaza la pizarra y lo deja a la vista en el chat de Claude Bot. */
   #updateBoard(mainId: string, text: string, turnId: string | null): DynamicToolResult {
     if (text === this.#board().trim()) return toolResult({ guardada: true, sinCambios: true });
@@ -4264,6 +4289,40 @@ export class AgentService extends EventEmitter<ServiceEvents> {
       turnId,
       channelId: state?.channelId ?? null,
       ...(saved ? { payload: { kind: "image", path: saved.relativePath } } : {}),
+    });
+    this.#emit({ type: "message", agentId, message });
+  }
+
+  /** Una imagen de su disco que hizo, cambió o nombró en este turno: se copia a la carpeta compartida y se ve en el chat. */
+  #imageFile(agentId: string, path: string, turnId: string | null): void {
+    const agent = this.#store.getAgent(agentId);
+    const state = this.#active.get(agentId);
+    if (!agent || !state) return;
+    const key = path.replace(/\\/g, "/").toLowerCase();
+    state.imageSources ??= new Set();
+    if (state.imageSources.has(key) || state.imageSources.size >= MAX_TURN_IMAGES) return;
+    state.imageSources.add(key);
+    let saved: SavedImage | null = null;
+    try {
+      const inside = relative(resolve(this.#options.sharedDir), resolve(path));
+      // Ya está en la carpeta compartida: se muestra ahí mismo, sin copiarla.
+      saved =
+        inside && !inside.startsWith("..") && !isAbsolute(inside) && existsSync(path)
+          ? { path: resolve(path), relativePath: inside.split(sep).join("/") }
+          : saveGeneratedImage({ sharedDir: this.#options.sharedDir, folder: slugify(agent.name) || "agente", savedPath: path, result: null });
+    } catch (error) {
+      this.#log("warn", `No se pudo mostrar la imagen ${path}: ${errorText(error)}`);
+    }
+    if (!saved) return;
+    state.images.push({ ...saved, sent: false });
+    const message = this.#store.insertMessage({
+      agentId,
+      role: "activity",
+      text: `Imagen: ${saved.relativePath}`,
+      status: "completed",
+      turnId,
+      channelId: state.channelId,
+      payload: { kind: "image", path: saved.relativePath },
     });
     this.#emit({ type: "message", agentId, message });
   }
@@ -4969,4 +5028,31 @@ export function summarizeActivity(item: Record<string, unknown>): string | null 
     default:
       return null;
   }
+}
+
+/** Como mucho estas imágenes por turno se muestran en el chat. */
+const MAX_TURN_IMAGES = 8;
+const IMAGE_FILE = /\.(png|jpe?g|webp|gif)$/i;
+
+/** Las imágenes que escribió o cambió en un paso (fileChange de Codex/ACP, Write/Edit de Claude). */
+export function imagePathsOf(item: Record<string, unknown>): string[] {
+  const type = getString(item, "type");
+  if (type === "fileChange") {
+    return getArray(item, "changes")
+      .filter(isRecord)
+      .map((change) => getString(change, "path") ?? "")
+      .filter((path) => IMAGE_FILE.test(path));
+  }
+  if (type === "toolCall") {
+    const input = getRecord(item, "input") ?? {};
+    const path = getString(input, "file_path") ?? getString(input, "path") ?? "";
+    return IMAGE_FILE.test(path) ? [path] : [];
+  }
+  return [];
+}
+
+/** Rutas completas de imágenes que aparecen en un texto (Windows o Linux), sin repetir. */
+export function imagePathsInText(text: string): string[] {
+  const found = text.match(/(?:[A-Za-z]:[\\/]|\/)[^\s"'`<>|*?()\[\]]+?\.(?:png|jpe?g|webp|gif)(?![\w.])/gi) ?? [];
+  return [...new Set(found)];
 }

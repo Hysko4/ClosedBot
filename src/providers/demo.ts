@@ -56,6 +56,7 @@ export interface DemoClientOptions {
  *   - `/lista Título | ✓ hecho | ✱ en curso | ○ pendiente` lleva su lista de tareas (update_checklist);
  *     `/lista-nueva …` igual, pero como una tarea nueva;
  *   - `/imagen descripción` «genera» una imagen (como el generador de imágenes de Codex);
+ *   - `/comando texto` deja un paso «Ejecutó: texto» (oculto en el chat salvo que se activen los pasos);
  *   - solo para el bot principal: `/crear Nombre | Rol | Proyecto | Aspecto` crea un agente (el
  *     aspecto es opcional), `/ajustar Nombre | Rol nuevo | Aspecto nuevo` le cambia el rol o el aspecto,
  *     `/proveedor Nombre | codex` le cambia el proveedor, `/eliminar Nombre, Nombre` pide eliminar
@@ -301,6 +302,19 @@ export class DemoAgentClient extends EventEmitter<ClientEvents> implements Agent
         } catch (error) {
           notes.push(`No pude escribir la pizarra: ${errorMessage(error)}`);
         }
+      }
+      // Un paso técnico, como los comandos que ejecutan los agentes de verdad.
+      let commands = 0;
+      for (const match of body.matchAll(/^\/comando\s+(.+)$/gm)) {
+        commands += 1;
+        this.emit("notification", {
+          method: "item/completed",
+          params: {
+            threadId,
+            turnId: state.turnId,
+            item: { id: `${state.turnId}:comando-${commands}`, type: "commandExecution", command: (match[1] ?? "").trim(), exitCode: 0 },
+          },
+        });
       }
       // Como el generador de imágenes de Codex: un evento imageGeneration con la imagen en base64.
       let images = 0;

@@ -37,7 +37,7 @@ const state = {
   agents: [],
   providers: [],
   routines: [],
-  settings: { botName: "ClosedBot", userName: "", fullAccess: false },
+  settings: { botName: "ClosedBot", userName: "", fullAccess: false, showSteps: false },
   paths: null,
   platform: "",
   currentId: null,
@@ -395,12 +395,15 @@ function handleEvent(event) {
       renderRoutinesIfOpen();
       renderDetailsIfOpen();
       break;
-    case "settings":
+    case "settings": {
+      const stepsChanged = Boolean(state.settings.showSteps) !== Boolean(event.settings.showSteps);
       state.settings = event.settings;
+      if (stepsChanged && convKey()) renderAllMessages();
       renderIdentity();
       renderPermissions();
       renderHeader();
       break;
+    }
     case "queue":
       state.queues.set(event.agentId, event.queue);
       if (event.agentId === state.currentId) renderQueue();
@@ -1713,7 +1716,7 @@ function buildMessage(message) {
       node.classList.add("msg-image");
       const line = document.createElement("div");
       line.className = "msg-image-line";
-      line.append(icon("image"), "Generó una imagen");
+      line.append(icon("image"), message.text.startsWith("Imagen:") ? "Imagen" : "Generó una imagen");
       if (message.channelId) line.prepend(whoLabel(message.agentId));
       node.append(line, imageStrip(message.agentId, [message.payload.path]));
       return node;
@@ -1751,6 +1754,8 @@ function buildMessage(message) {
       what.textContent = created[2];
       node.append(`${created[1]} la rutina`, icon("clock"), what, `· ${created[3]}`);
     } else {
+      // Los pasos técnicos (comandos, archivos, búsquedas) solo se ven si los activas en Ajustes.
+      if (!state.settings.showSteps) node.hidden = true;
       const kind = /^Ejecutó/.test(message.text) ? "terminal" : /^Modificó/.test(message.text) ? "file" : /^Buscó/.test(message.text) ? "search" : "spark";
       const text = document.createElement("span");
       text.textContent = message.text;
@@ -2102,6 +2107,7 @@ function updateWorkingIndicator() {
   // En un canal: los miembros que trabajan y todavía no escribieron nada.
   const thinking = channel ? channel.working.filter((agentId) => !streamingBy(agentId)) : [];
   const show = channel ? thinking.length > 0 : findAgent(state.currentId)?.state === "working" && !streamingBy(null);
+  updateWaitingNote(container, channel);
   if (!show) {
     indicator?.remove();
     return;
@@ -2127,6 +2133,45 @@ function updateWorkingIndicator() {
     who?.remove();
   }
   container.append(indicator);
+  const note = $("#waiting-note");
+  if (note) container.append(note);
+}
+
+/** En un canal: quién no contestó todavía y por qué (en pausa u ocupado en otra cosa). Sin esto, el mensaje parecía ignorado. */
+function updateWaitingNote(container, channel) {
+  let note = $("#waiting-note");
+  const agents = (channel?.waiting ?? []).map(findAgent).filter(Boolean);
+  if (!agents.length) {
+    note?.remove();
+    return;
+  }
+  if (!note) {
+    note = document.createElement("div");
+    note.id = "waiting-note";
+    note.className = "waiting-note";
+  }
+  note.replaceChildren(
+    ...agents.map((agent) => {
+      const line = document.createElement("div");
+      line.className = "waiting-line";
+      const text = document.createElement("span");
+      if (agent.paused) {
+        text.textContent = `${agent.name} está en pausa: tu mensaje espera.`;
+        const resume = document.createElement("button");
+        resume.type = "button";
+        resume.className = "waiting-resume";
+        resume.textContent = "Reanudar";
+        resume.addEventListener("click", () => void agentAction("pause", agent.id));
+        line.append(text, resume);
+      } else {
+        text.textContent =
+          agent.state === "working" ? `${agent.name} está terminando otra tarea; después lee tu mensaje.` : `${agent.name} leerá tu mensaje enseguida.`;
+        line.append(text);
+      }
+      return line;
+    }),
+  );
+  container.append(note);
 }
 
 function userStatus(status) {
@@ -5805,7 +5850,22 @@ function openSettings({ focusName = false } = {}) {
   if (focusName) names.elements.userName.focus();
 }
 
+async function toggleShowSteps() {
+  const box = $("#show-steps");
+  box.disabled = true;
+  try {
+    const result = await api("/api/settings", { method: "PATCH", body: { showSteps: box.checked } });
+    state.settings = result.settings;
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    box.disabled = false;
+    renderPermissions();
+  }
+}
+
 function renderPermissions() {
+  $("#show-steps").checked = Boolean(state.settings.showSteps);
   const enabled = Boolean(state.settings.fullAccess);
   $("#full-access").checked = enabled;
   $("#full-access-warning").hidden = !enabled;
@@ -6968,6 +7028,39 @@ function renderMcpPage(agent) {
   $("#mcp-refresh").disabled = loading;
 }
 
+/** Qué hace cada herramienta de ClosedBot, en el orden en que se muestran (equipo, preguntas, tareas, rutinas, recuerdos). */
+const TOOL_MEANINGS = {
+  list_agents: "Ver los agentes del equipo y qué está haciendo cada uno",
+  send_message: "Escribirle a uno o varios compañeros",
+  ask_user: "Hacerte una pregunta con opciones para que elijas",
+  update_checklist: "Mostrar su lista de tareas y cuánto lleva",
+  create_routine: "Crear una tarea que se repite sola (cada día, cada hora…)",
+  list_routines: "Ver sus rutinas",
+  delete_routine: "Borrar una de sus rutinas",
+  remember: "Guardar un recuerdo para más adelante",
+  search_memories: "Buscar en sus recuerdos",
+  list_memories: "Ver todos sus recuerdos",
+  forget_memory: "Borrar un recuerdo",
+  set_memory_inclusion: "Elegir si un recuerdo va siempre en sus instrucciones",
+  create_agent: "Crear un agente nuevo",
+  update_agent: "Cambiar la ficha de un agente (modelo, instrucciones…)",
+  delete_agents: "Eliminar agentes (te lo pregunta antes)",
+  create_channel: "Crear un canal para un equipo",
+  read_agent: "Leer la ficha completa de un agente",
+  update_board: "Escribir la pizarra del trabajo",
+  report_progress: "Mostrar cuánto lleva (versión antigua de la lista de tareas)",
+};
+const TOOL_ORDER = Object.keys(TOOL_MEANINGS);
+
+/** Las de ClosedBot en su orden; las demás, por nombre. */
+function sortTools(tools) {
+  const rank = (tool) => {
+    const index = TOOL_ORDER.indexOf(tool);
+    return index < 0 ? TOOL_ORDER.length : index;
+  };
+  return [...tools].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+}
+
 function mcpItem(server) {
   const item = document.createElement("li");
   item.className = "item mcp-item";
@@ -7006,9 +7099,23 @@ function mcpItem(server) {
     body.append(error);
   }
   if (tools) {
-    const list = document.createElement("p");
+    const list = document.createElement("ul");
     list.className = "mcp-tools";
-    list.textContent = server.tools.join(" · ");
+    for (const tool of sortTools(server.tools)) {
+      const row = document.createElement("li");
+      const label = document.createElement("code");
+      label.textContent = tool;
+      row.append(label);
+      const meaning = TOOL_MEANINGS[tool];
+      if (meaning) {
+        row.tabIndex = 0;
+        const what = document.createElement("span");
+        what.className = "mcp-tool-what";
+        what.textContent = meaning;
+        row.append(what);
+      }
+      list.append(row);
+    }
     body.append(list);
   }
   // Sin nada que desplegar, no se ofrece desplegarlo.
@@ -8660,6 +8767,7 @@ function bindUi() {
   $("#names-form").addEventListener("submit", saveNames);
   $("#refresh-providers").addEventListener("click", refreshProviders);
   $("#full-access").addEventListener("change", () => void toggleFullAccess());
+  $("#show-steps").addEventListener("change", () => void toggleShowSteps());
   $("#connect-claude").addEventListener("click", () => void connectClaude());
   $("#logout").addEventListener("click", logout);
   $("#back").addEventListener("click", goBack);

@@ -264,6 +264,7 @@ test("canal: eliminarlo cancela lo que esperaba turno; «Detener» corta a quien
     h.service.setPaused(ana.id, true);
     h.service.sendChannelMessage(channel.id, "espera tu turno");
     assert.equal(h.service.getAgent(ana.id).queued, 1);
+    assert.deepEqual(h.service.getChannel(channel.id).waiting, [ana.id], "el canal dice quién no contestó todavía");
     h.service.deleteChannel(channel.id);
     assert.equal(h.service.getAgent(ana.id).queued, 0, "lo que esperaba turno se cancela");
     h.service.restoreChannel(channel.id);
@@ -271,6 +272,7 @@ test("canal: eliminarlo cancela lo que esperaba turno; «Detener» corta a quien
 
     h.service.sendChannelMessage(channel.id, "/lento uno dos tres cuatro cinco seis siete ocho nueve diez");
     await waitFor(() => h.service.getChannel(channel.id).working.includes(ana.id), 3_000, "Ana trabaja en el canal");
+    assert.deepEqual(h.service.getChannel(channel.id).waiting, [], "quien ya trabaja no espera");
     await waitFor(() => h.events.some((event) => event.type === "delta" && event.channelId === channel.id), 3_000, "texto en vivo del canal");
     // Eliminado mientras alguien trabaja: no se puede borrar para siempre hasta que termine.
     h.service.deleteChannel(channel.id);

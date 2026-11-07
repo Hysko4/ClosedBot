@@ -900,6 +900,11 @@ export class Store {
     return rows;
   }
 
+  /** Lo que espera turno en un canal (para decir en el canal quién no contestó todavía y por qué). */
+  queuedForChannel(channelId: string): DeliveryRecord[] {
+    return (this.#db.prepare("SELECT * FROM deliveries WHERE channel_id = ? AND status = 'queued' ORDER BY created_at").all(channelId) as Row[]).map(toDelivery);
+  }
+
   /** Cancela lo que esperaba turno en un canal (al moverlo a «Canales eliminados»). */
   cancelQueuedForChannel(channelId: string): DeliveryRecord[] {
     const queued = (this.#db.prepare("SELECT * FROM deliveries WHERE channel_id = ? AND status = 'queued'").all(channelId) as Row[]).map(toDelivery);

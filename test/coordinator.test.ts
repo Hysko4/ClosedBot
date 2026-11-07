@@ -7,7 +7,7 @@ import { imageExtension, saveGeneratedImage, withImages } from "../src/images.js
 import { buildInstructions, MAIN_AGENT_GUIDE } from "../src/instructions.js";
 import type { AgentClient, ProviderId } from "../src/providers/client.js";
 import { DemoAgentClient, demoPng } from "../src/providers/demo.js";
-import { BOARD_META, USAGE_META } from "../src/service.js";
+import { BOARD_META, USAGE_META, imagePathsInText, imagePathsOf } from "../src/service.js";
 import { createHarness, type Harness, TEST_PROVIDERS, tempDir, waitFor } from "./helpers.js";
 
 interface Turn {
@@ -137,6 +137,12 @@ test("Claude Bot lee la ficha completa de un agente, ve el uso de cada cuenta y 
     assert.doesNotMatch(reply, /usoDelPlan|pizarra/);
     assert.equal(h.store.getMeta(BOARD_META), "Objetivo: juego de memoria. Ana hace el arte.");
     await waitFor(() => h.service.getAgent(beto.id).state === "idle", 5_000, "Beto libre");
+
+    // El bot principal con otro nombre: la pizarra lo dice también.
+    h.store.setMeta(BOARD_META, "Decide Claude Bot; Ana hace el arte.");
+    h.service.updateAgent(mainId, { name: "Codex Bot" });
+    assert.equal(h.store.getMeta(BOARD_META), "Decide Codex Bot; Ana hace el arte.");
+    h.service.updateAgent(mainId, { name: "Claude Bot" });
 
     // Borrarla.
     reply = await talk(h, mainId, "/pizarra");
@@ -372,4 +378,27 @@ test("La guía de Claude Bot: un solo cerebro que elige el proveedor de cada par
   };
   assert.match(buildInstructions(agent, "/tmp/compartida"), /Si generas una imagen, ClosedBot la copia sola a \/tmp\/compartida\/imagenes/);
   assert.doesNotMatch(buildInstructions({ ...agent, provider: "claude" }, "/tmp/compartida"), /Si generas una imagen/);
+});
+
+test("Las imágenes que un agente hace o nombra (Gemini, Grok, Claude) también se ven en el chat", async () => {
+  assert.deepEqual(imagePathsInText("Listo: D:\\4FTER\\arte\\fondo.png y /tmp/x/a.webp (también D:\\4FTER\\arte\\fondo.png)."), [
+    "D:\\4FTER\\arte\\fondo.png",
+    "/tmp/x/a.webp",
+  ]);
+  assert.deepEqual(imagePathsInText("Sin imágenes: notas.md, foto.png.txt"), []);
+  assert.deepEqual(imagePathsOf({ type: "fileChange", changes: [{ path: "D:\\a\\b.PNG" }, { path: "D:\\a\\c.md" }] }), ["D:\\a\\b.PNG"]);
+  assert.deepEqual(imagePathsOf({ type: "toolCall", tool: "Write", input: { file_path: "/w/arte.jpg" } }), ["/w/arte.jpg"]);
+
+  const h = await createHarness();
+  try {
+    const ana = h.service.createAgent({ name: "Ana Arte", provider: "demo" }, { greet: false });
+    const file = join(h.service.getAgent(ana.id).workspace, "lamina.png");
+    writeFileSync(file, demoPng());
+    await talk(h, ana.id, `Mira ${file} por favor`);
+    const shown = await waitFor(() => h.service.listMessages(ana.id).find((item) => item.payload?.kind === "image"), 5_000, "la imagen en su chat");
+    assert.equal(shown.payload?.path, "imagenes/ana-arte/lamina.png");
+    assert.ok(existsSync(join(h.dir, "compartida", "imagenes", "ana-arte", "lamina.png")));
+  } finally {
+    await h.close();
+  }
 });
